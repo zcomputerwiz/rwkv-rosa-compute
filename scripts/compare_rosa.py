@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-import os
-import sys
 import time
 
 import torch
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 from rosa_compute import (
     blinkdl_rosa_4bit_reference,
     get_environment_info,

@@ -5,6 +5,7 @@ from typing import Any
 import torch
 
 from .config import DEFAULT_CONFIG, ROSAConfig
+from .model import ROSAModelSkeleton
 
 
 def compute_checkpoint_hash(filepath: str) -> str:
@@ -16,8 +17,16 @@ def compute_checkpoint_hash(filepath: str) -> str:
     return sha256.hexdigest()
 
 
+def get_expected_state_dict_shapes(
+    config: ROSAConfig = DEFAULT_CONFIG,
+) -> dict[str, tuple[int, ...]]:
+    """Generates expected parameter keys and tensor shapes derived directly from ROSAModelSkeleton."""
+    model = ROSAModelSkeleton(config)
+    return {k: tuple(v.shape) for k, v in model.state_dict().items()}
+
+
 def inspect_checkpoint(checkpoint_path: str) -> dict[str, Any]:
-    """Inspects an actual PyTorch checkpoint file on disk without loading model code."""
+    """Inspects an actual PyTorch checkpoint file on disk without executing model code."""
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found at: {checkpoint_path}")
 
@@ -25,9 +34,17 @@ def inspect_checkpoint(checkpoint_path: str) -> dict[str, Any]:
     file_size_mb = file_size_bytes / (1024 * 1024)
     file_hash = compute_checkpoint_hash(checkpoint_path)
 
-    state_dict = torch.load(checkpoint_path, map_location="cpu")
+    try:
+        state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    except Exception as e:
+        raise ValueError(
+            f"Failed to load checkpoint safely with weights_only=True: {e}"
+        ) from e
+
     if not isinstance(state_dict, dict):
-        state_dict = getattr(state_dict, "state_dict", lambda: {})()
+        raise ValueError(
+            f"Expected checkpoint file to contain a state dict (dict), got {type(state_dict).__name__}"
+        )
 
     tensor_info = {}
     total_params = 0
@@ -52,46 +69,23 @@ def inspect_checkpoint(checkpoint_path: str) -> dict[str, Any]:
 
 
 def validate_checkpoint_state_dict(
-    state_dict: dict[str, torch.Tensor],
+    state_dict: Any,
     config: ROSAConfig = DEFAULT_CONFIG,
 ) -> dict[str, Any]:
-    """Validates state dict parameter names and tensor shapes against target 0.1B ROSA config.
+    """Validates state dict parameter names and tensor shapes against target ROSA config."""
+    expected_shapes = get_expected_state_dict_shapes(config)
 
-    Based on RWKV-v8/260222_rosa4bitLM_L12.py parameter schema.
-    """
-    expected_shapes = {
-        "emb.weight": (config.vocab_size, config.n_embd),
-        "ln_out.weight": (config.n_embd,),
-        "ln_out.bias": (config.n_embd,),
-        "head.weight": (config.vocab_size, config.n_embd),
-    }
-
-    for i in range(config.n_layer):
-        prefix = f"blocks.{i}."
-        expected_shapes[f"{prefix}ln2.weight"] = (config.n_embd,)
-        expected_shapes[f"{prefix}ln2.bias"] = (config.n_embd,)
-        expected_shapes[f"{prefix}ln3.weight"] = (config.n_embd,)
-        expected_shapes[f"{prefix}ln3.bias"] = (config.n_embd,)
-        if i == 0:
-            expected_shapes[f"{prefix}ln0.weight"] = (config.n_embd,)
-            expected_shapes[f"{prefix}ln0.bias"] = (config.n_embd,)
-
-        expected_shapes[f"{prefix}ffn.x_k"] = (1, 1, config.n_embd)
-        expected_shapes[f"{prefix}ffn.key.weight"] = (config.n_embd * 4, config.n_embd)
-        expected_shapes[f"{prefix}ffn.value.weight"] = (config.n_embd, config.n_embd * 4)
-
-        expected_shapes[f"{prefix}rosa.time_shift"] = None  # Non-parameter module, or zero-pad
-        expected_shapes[f"{prefix}rosa.x_q"] = (1, 1, config.n_embd)
-        expected_shapes[f"{prefix}rosa.x_k"] = (1, 1, config.n_embd)
-        expected_shapes[f"{prefix}rosa.x_v"] = (1, 1, config.n_embd)
-        expected_shapes[f"{prefix}rosa.q.weight"] = (config.n_embd, config.n_embd)
-        expected_shapes[f"{prefix}rosa.k.weight"] = (config.n_embd, config.n_embd)
-        expected_shapes[f"{prefix}rosa.v.weight"] = (config.n_embd, config.n_embd)
-        expected_shapes[f"{prefix}rosa.rosa_qkv.emb"] = (1, 1, config.n_embd)
-        expected_shapes[f"{prefix}rosa.o.weight"] = (config.n_embd, config.n_embd)
-
-    # Filter out None entries (modules without parameters)
-    expected_shapes = {k: v for k, v in expected_shapes.items() if v is not None}
+    if not isinstance(state_dict, dict):
+        return {
+            "is_valid": False,
+            "missing_keys": sorted(list(expected_shapes.keys())),
+            "unexpected_keys": [],
+            "mismatched_shapes": {
+                "<root>": {"expected": "dict", "actual": type(state_dict).__name__}
+            },
+            "tensor_shapes": {},
+            "error": f"state_dict must be a dictionary, got {type(state_dict).__name__}",
+        }
 
     present_keys = set(state_dict.keys())
     expected_keys = set(expected_shapes.keys())
@@ -99,20 +93,32 @@ def validate_checkpoint_state_dict(
     missing_keys = sorted(list(expected_keys - present_keys))
     unexpected_keys = sorted(list(present_keys - expected_keys))
     mismatched_shapes = {}
+    tensor_shapes = {}
+
+    for key, val in state_dict.items():
+        if isinstance(val, torch.Tensor):
+            tensor_shapes[key] = tuple(val.shape)
+        else:
+            tensor_shapes[key] = f"non-tensor ({type(val).__name__})"
 
     for key in present_keys.intersection(expected_keys):
-        tensor = state_dict[key]
-        expected_shape = tuple(expected_shapes[key])
-        if tuple(tensor.shape) != expected_shape:
+        val = state_dict[key]
+        expected_shape = expected_shapes[key]
+        if not isinstance(val, torch.Tensor):
             mismatched_shapes[key] = {
                 "expected": expected_shape,
-                "actual": tuple(tensor.shape),
+                "actual": f"non-tensor ({type(val).__name__})",
+            }
+        elif tuple(val.shape) != expected_shape:
+            mismatched_shapes[key] = {
+                "expected": expected_shape,
+                "actual": tuple(val.shape),
             }
 
-    tensor_shapes = {k: tuple(v.shape) for k, v in state_dict.items()}
-
     return {
-        "is_valid": len(missing_keys) == 0 and len(unexpected_keys) == 0 and len(mismatched_shapes) == 0,
+        "is_valid": len(missing_keys) == 0
+        and len(unexpected_keys) == 0
+        and len(mismatched_shapes) == 0,
         "missing_keys": missing_keys,
         "unexpected_keys": unexpected_keys,
         "mismatched_shapes": mismatched_shapes,
@@ -135,7 +141,18 @@ def load_rosa_checkpoint(
     if not checkpoint_path or not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
 
-    state_dict = torch.load(checkpoint_path, map_location="cpu")
+    try:
+        state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    except Exception as e:
+        raise ValueError(
+            f"Failed to load checkpoint safely with weights_only=True: {e}"
+        ) from e
+
+    if not isinstance(state_dict, dict):
+        raise ValueError(
+            f"Expected checkpoint file to contain a state dict (dict), got {type(state_dict).__name__}"
+        )
+
     validation_info = validate_checkpoint_state_dict(state_dict, config=config)
 
     if compute_hash:

@@ -14,3 +14,8 @@ The simple CPU reference implementation (`blinkdl_rosa_4bit_reference`) is the s
 
 ## 5. CUDA as Implementation Detail
 CUDA kernels must reproduce the reference behavior; CUDA is an optimization, not the semantic specification.
+
+## 6. Testing & CI Strategy
+- **CPU Tests**: Executed via `python -m pytest -v` on GitHub Actions across supported Python versions (3.10, 3.11, 3.12).
+- **CUDA Tests**: Gated by `@pytest.mark.cuda`. Triggered on self-hosted GPU runners (`[self-hosted, linux, gpu]`).
+- **Code Linting**: Enforced via `ruff check .` with `external/` submodules excluded from local policy.

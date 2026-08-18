@@ -10,8 +10,7 @@ on:
 
 jobs:
   test-cuda:
-    runs-on: [self-hosted, GPU]
-    if: false  # Disabled until self-hosted GPU runner is configured
+    runs-on: [self-hosted, linux, gpu]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
