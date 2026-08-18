@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rosa-compute"
+version = "0.1.0"
+description = "ROSA Compute Research Repository"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "zcomputerwiz" }
+]
+dependencies = [
+    "torch",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "ruff",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers"
+markers = [
+    "cuda: tests requiring CUDA execution",
+    "integration: full layer or integration tests",
+    "slow: tests that take longer to run",
+    "checkpoint: tests requiring ROSA checkpoint loading",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = []
