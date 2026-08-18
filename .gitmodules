@@ -1,0 +1,6 @@
+[submodule "external/RWKV-LM"]
+	path = external/RWKV-LM
+	url = https://github.com/BlinkDL/RWKV-LM.git
+[submodule "external/rosa_soft"]
+	path = external/rosa_soft
+	url = https://github.com/wjie98/rosa_soft.git
