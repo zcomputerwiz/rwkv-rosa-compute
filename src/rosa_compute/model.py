@@ -6,9 +6,11 @@ from .rosa_compat import ROSALayerCompat
 
 
 class ROSAModelSkeleton(nn.Module):
+    """Skeleton compatibility scaffold matching BlinkDL RWKV-8 ROSA-4bit block structure.
+
+    This module is a testing scaffold and correctness harness, not a full production model implementation.
     """
-    Skeleton model wrapper for 0.1B ROSA-4bit model architecture.
-    """
+
     def __init__(self, config: ROSAConfig = DEFAULT_CONFIG):
         super().__init__()
         self.config = config

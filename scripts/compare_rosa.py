@@ -25,7 +25,7 @@ def compare():
     k = torch.randn(B, T, C)
     v = torch.randn(B, T, C)
 
-    print(f"\nComparing implementations on tensor shape: [B={B}, T={T}, C={C}]")
+    print(f"\nComparing signed ROSA outputs {{-1.0, 0.0, +1.0}} on shape: [B={B}, T={T}, C={C}]")
 
     # 1. BlinkDL reference
     t0 = time.perf_counter()
@@ -38,36 +38,39 @@ def compare():
     t_rosa_soft_ref = (time.perf_counter() - t0) * 1000
 
     max_diff = (out_blinkdl - out_rosa_soft_ref).abs().max().item()
-    mean_diff = (out_blinkdl - out_rosa_soft_ref).abs().mean().item()
-    exact_match_count = (out_blinkdl == out_rosa_soft_ref).sum().item()
-    total_elements = out_blinkdl.numel()
+    exact_equal = torch.equal(out_blinkdl, out_rosa_soft_ref)
+    unmatched_count = (out_blinkdl == 0.0).sum().item()
 
     print(f"BlinkDL Reference Time:       {t_blinkdl:.2f} ms")
     print(f"rosa_soft Reference Time:     {t_rosa_soft_ref:.2f} ms")
     print(f"Max Absolute Difference:      {max_diff:.6f}")
-    print(f"Mean Absolute Difference:     {mean_diff:.6f}")
-    print(f"Exact Equality Count:         {exact_match_count} / {total_elements} ({exact_match_count/total_elements:.2%})")
+    print(f"Exact Binary Equality:        {exact_equal}")
+    print(f"Unmatched Output Count:       {unmatched_count} / {out_blinkdl.numel()}")
 
     # 3. rosa_soft CUDA if available
-    if info['cuda_available'] and info.get('rosa_soft_build_capabilities') and info['rosa_soft_build_capabilities'].rosa_soft_cuda:
-        q_cuda = q.cuda()
-        k_cuda = k.cuda()
-        v_cuda = v.cuda()
+    caps = info.get("rosa_soft_build_capabilities")
+    if info["cuda_available"] and caps and caps.rosa_soft_cuda:
+        q_cuda, k_cuda, v_cuda = q.cuda(), k.cuda(), v.cuda()
 
         # Warmup
         _ = rosa_4bit_forward(q_cuda, k_cuda, v_cuda, max_suffix_length=512, use_cuda=True)
         torch.cuda.synchronize()
 
-        t0 = time.perf_counter()
-        out_cuda = rosa_4bit_forward(q_cuda, k_cuda, v_cuda, max_suffix_length=512, use_cuda=True)
-        torch.cuda.synchronize()
-        t_cuda = (time.perf_counter() - t0) * 1000
+        start_evt = torch.cuda.Event(enable_timing=True)
+        end_evt = torch.cuda.Event(enable_timing=True)
 
+        start_evt.record()
+        out_cuda = rosa_4bit_forward(q_cuda, k_cuda, v_cuda, max_suffix_length=512, use_cuda=True)
+        end_evt.record()
+        torch.cuda.synchronize()
+
+        t_cuda = start_evt.elapsed_time(end_evt)
         diff_cuda = (out_rosa_soft_ref - out_cuda.cpu()).abs().max().item()
         print(f"rosa_soft CUDA Time:          {t_cuda:.2f} ms")
         print(f"CUDA vs Ref Max Abs Diff:     {diff_cuda:.6f}")
     else:
         print("rosa_soft CUDA:               Not Available / Skipped")
+
 
 if __name__ == "__main__":
     compare()

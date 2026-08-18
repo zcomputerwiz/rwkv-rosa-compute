@@ -2,8 +2,8 @@ import torch
 
 
 def rosa_slow_ref(q, k, v):
-    """
-    BlinkDL reference ROSA route search oracle on integer symbol lists.
+    """BlinkDL reference ROSA route search oracle on integer symbol lists.
+
     q, k, v: list of ints of length T
     returns: (idx, ln) lists of length T
     """
@@ -25,11 +25,22 @@ def rosa_slow_ref(q, k, v):
                 break
     return idx, ln
 
-def blinkdl_rosa_4bit_reference(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, emb: torch.Tensor = None) -> torch.Tensor:
-    """
-    BlinkDL ROSA-4bit reference implementation.
+
+def blinkdl_rosa_4bit_reference(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    emb: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """BlinkDL ROSA-4bit reference implementation.
+
     q, k, v: [B, T, C] where C is divisible by 4.
-    emb: optional [1, 1, C] parameter. If provided, applies BlinkDL learned embedding reconstruction (+emb for 1, -emb for 0).
+    emb: optional [1, 1, C] parameter.
+         If emb is None, returns pure signed ROSA output in {-1.0, 0.0, +1.0}:
+             +1.0 = matched value bit was 1
+             -1.0 = matched value bit was 0
+              0.0 = no route matched (unmatched)
+         If emb is provided, returns signed_result * emb.
     """
     B, T, C = q.shape
     bits = 4
@@ -66,11 +77,11 @@ def blinkdl_rosa_4bit_reference(q: torch.Tensor, k: torch.Tensor, v: torch.Tenso
                     for bb in range(bits):
                         ch = g * bits + bb
                         bit = (sym >> bb) & 1
+                        sign = 1.0 if bit == 1 else -1.0
                         if ee is not None:
-                            sign = 1.0 if bit == 1 else -1.0
                             out[b, t, ch] = sign * ee[0, 0, ch].item()
                         else:
-                            out[b, t, ch] = float(bit)
+                            out[b, t, ch] = sign
                 else:
                     for bb in range(bits):
                         ch = g * bits + bb

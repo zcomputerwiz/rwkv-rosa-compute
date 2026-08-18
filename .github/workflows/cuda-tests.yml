@@ -10,9 +10,8 @@ on:
 
 jobs:
   test-cuda:
-    # Requires self-hosted runner with NVIDIA GPU & CUDA environment configured
     runs-on: [self-hosted, GPU]
-    if: false  # Disabled by default until self-hosted GPU runner is configured
+    if: false  # Disabled until self-hosted GPU runner is configured
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -24,12 +23,16 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install dependencies & build rosa_soft CUDA
+      - name: Install dependencies & build rosa_soft CUDA extension
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
           pip install -e .
-          cd external/rosa_soft && pip install -e .
+          cd external/rosa_soft && USE_CUDA=1 pip install -e .
+
+      - name: Verify CUDA Extension Capabilities
+        run: |
+          python -c "import rosa_soft; caps = rosa_soft.BUILD_CAPABILITIES; print(caps); assert caps.rosa_soft_cuda, 'CUDA extension not built!'"
 
       - name: Run CUDA Pytest
         run: |

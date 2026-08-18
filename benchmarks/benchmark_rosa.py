@@ -26,13 +26,16 @@ def run_benchmarks():
     print(f"\n{'T':<8} | {'BlinkDL Ref (ms)':<18} | {'rosa_soft Ref (ms)':<20} | {'rosa_soft CUDA (ms)':<20}")
     print("-" * 75)
 
+    caps = info.get("rosa_soft_build_capabilities")
+    has_cuda = info["cuda_available"] and caps and caps.rosa_soft_cuda
+
     for T in sequence_lengths:
         torch.manual_seed(42)
         q = torch.randn(B, T, C)
         k = torch.randn(B, T, C)
         v = torch.randn(B, T, C)
 
-        # BlinkDL ref (only run for smaller T if too slow)
+        # BlinkDL ref (CPU oracle)
         if T <= 128:
             t0 = time.perf_counter()
             _ = blinkdl_rosa_4bit_reference(q, k, v)
@@ -48,7 +51,7 @@ def run_benchmarks():
         s_soft_ref = f"{t_soft_ref:.2f}"
 
         # rosa_soft CUDA
-        if info['cuda_available'] and info.get('rosa_soft_build_capabilities') and info['rosa_soft_build_capabilities'].rosa_soft_cuda:
+        if has_cuda:
             q_cuda, k_cuda, v_cuda = q.cuda(), k.cuda(), v.cuda()
             _ = rosa_4bit_forward(q_cuda, k_cuda, v_cuda, max_suffix_length=512, use_cuda=True)
             torch.cuda.synchronize()
@@ -66,6 +69,7 @@ def run_benchmarks():
             s_cuda = "N/A"
 
         print(f"{T:<8} | {s_blinkdl:<18} | {s_soft_ref:<20} | {s_cuda:<20}")
+
 
 if __name__ == "__main__":
     run_benchmarks()

@@ -13,6 +13,11 @@
 | Tie-break   |         latest | must match |
 | Unmatched   |           zero | must match |
 
+## Output Semantics
+- **Matched bit = 1**: `+1.0` (or `+emb`)
+- **Matched bit = 0**: `-1.0` (or `-emb`)
+- **Unmatched route**: `0.0`
+
 ## Upstream Provenance
 
 - **RWKV-LM Repository**: `https://github.com/BlinkDL/RWKV-LM.git`
