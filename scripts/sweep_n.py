@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Run N-filler sweep across N in {0, 1, 2, 4, 8, 16, 32}."""
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Sweep N filler token budget for 0A / 0B")
+    parser.add_argument("--architecture", type=str, default="llama", choices=["llama", "rwkv"])
+    parser.add_argument("--length", type=int, default=12)
+    parser.add_argument("--dimension", type=int, default=3)
+    parser.add_argument("--n_values", type=int, nargs="+", default=[0, 1, 2, 4, 8, 16, 32])
+    parser.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44])
+    parser.add_argument("--num_samples", type=int, default=1000)
+    parser.add_argument("--val_samples", type=int, default=200)
+    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--out_dir", type=str, default="results/sweeps")
+    args = parser.parse_args()
+
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    sweep_summary = {}
+
+    for n in args.n_values:
+        print(f"\n--- Running sweep point N = {n} ---")
+        cmd = [
+            sys.executable,
+            "scripts/run_experiment.py",
+            "--architecture", args.architecture,
+            "--length", str(args.length),
+            "--dimension", str(args.dimension),
+            "--num_filler", str(n),
+            "--num_samples", str(args.num_samples),
+            "--val_samples", str(args.val_samples),
+            "--epochs", str(args.epochs),
+            "--seeds", *[str(s) for s in args.seeds],
+            "--out_dir", str(out_dir),
+        ]
+        subprocess.run(cmd, check=True)
+
+        report_file = out_dir / f"{args.architecture}_len{args.length}_N{n}_fmt_filler.json"
+        if report_file.exists():
+            with open(report_file) as f:
+                rep = json.load(f)
+                sweep_summary[f"N_{n}"] = rep["metrics"]
+
+    summary_file = out_dir / f"sweep_{args.architecture}_len{args.length}_dim{args.dimension}.json"
+    with open(summary_file, "w") as f:
+        json.dump(sweep_summary, f, indent=2)
+
+    print(f"\nSweep complete. Summary saved to {summary_file}")
+
+
+if __name__ == "__main__":
+    main()
