@@ -25,6 +25,7 @@ class ModelConfig:
     num_hidden_layers: int = 4
     num_attention_heads: int = 6
     intermediate_size: int = 1536
+    head_dim: int = 64  # Relevant for RWKV-7 where heads = hidden_size // head_dim
     vocab_size: int = 256  # Actual token-set size optimization
     device: str = "cpu"
 

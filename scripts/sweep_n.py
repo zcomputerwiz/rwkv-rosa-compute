@@ -11,6 +11,11 @@ from pathlib import Path
 def main():
     parser = argparse.ArgumentParser(description="Sweep N filler token budget for 0A / 0B")
     parser.add_argument("--architecture", type=str, default="llama", choices=["llama", "rwkv"])
+    parser.add_argument("--hidden_size", type=int, default=384)
+    parser.add_argument("--num_hidden_layers", type=int, default=4)
+    parser.add_argument("--num_attention_heads", type=int, default=6)
+    parser.add_argument("--intermediate_size", type=int, default=1536)
+    parser.add_argument("--head_dim", type=int, default=64)
     parser.add_argument("--length", type=int, default=12)
     parser.add_argument("--dimension", type=int, default=3)
     parser.add_argument("--n_values", type=int, nargs="+", default=[0, 1, 2, 4, 8, 16, 32])
@@ -35,6 +40,11 @@ def main():
             sys.executable,
             "scripts/run_experiment.py",
             "--architecture", args.architecture,
+            "--hidden_size", str(args.hidden_size),
+            "--num_hidden_layers", str(args.num_hidden_layers),
+            "--num_attention_heads", str(args.num_attention_heads),
+            "--intermediate_size", str(args.intermediate_size),
+            "--head_dim", str(args.head_dim),
             "--length", str(args.length),
             "--dimension", str(args.dimension),
             "--num_filler", str(n),

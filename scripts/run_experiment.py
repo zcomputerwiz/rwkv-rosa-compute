@@ -16,6 +16,11 @@ from exp0.train import train_model
 def main():
     parser = argparse.ArgumentParser(description="Run Experiment 0 single configuration across seeds")
     parser.add_argument("--architecture", type=str, default="llama", choices=["llama", "rwkv"])
+    parser.add_argument("--hidden_size", type=int, default=384, help="Model hidden size (default 384)")
+    parser.add_argument("--num_hidden_layers", type=int, default=4, help="Number of layers (default 4)")
+    parser.add_argument("--num_attention_heads", type=int, default=6, help="Transformer attention heads (default 6)")
+    parser.add_argument("--intermediate_size", type=int, default=1536, help="FFN intermediate size (default 1536)")
+    parser.add_argument("--head_dim", type=int, default=64, help="RWKV head dimension (default 64)")
     parser.add_argument("--length", type=int, default=12)
     parser.add_argument("--dimension", type=int, default=3)
     parser.add_argument("--num_filler", type=int, default=None)
@@ -40,12 +45,17 @@ def main():
         num_samples=args.num_samples,
     )
 
+    num_heads = args.num_attention_heads
+    if args.architecture == "rwkv":
+        num_heads = args.hidden_size // args.head_dim
+
     model_cfg = ModelConfig(
         architecture=args.architecture,
-        hidden_size=128,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        intermediate_size=256,
+        hidden_size=args.hidden_size,
+        num_hidden_layers=args.num_hidden_layers,
+        num_attention_heads=num_heads,
+        intermediate_size=args.intermediate_size,
+        head_dim=args.head_dim,
         device="cpu",
     )
 
