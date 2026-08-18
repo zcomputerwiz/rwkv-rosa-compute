@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-import os
-import sys
+import argparse
+import statistics
 import time
 
 import torch
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 from rosa_compute import (
     blinkdl_rosa_4bit_reference,
     get_environment_info,
@@ -13,18 +12,76 @@ from rosa_compute import (
 )
 
 
+def benchmark_cpu_fn(fn, warmups: int, repeats: int) -> tuple[float, float]:
+    """Runs CPU timing loops with warmup and returns (mean_ms, std_ms)."""
+    for _ in range(warmups):
+        _ = fn()
+
+    times = []
+    for _ in range(repeats):
+        t0 = time.perf_counter()
+        _ = fn()
+        t1 = time.perf_counter()
+        times.append((t1 - t0) * 1000)
+
+    mean = statistics.mean(times)
+    std = statistics.stdev(times) if len(times) > 1 else 0.0
+    return mean, std
+
+
+def benchmark_cuda_fn(fn, warmups: int, repeats: int) -> tuple[float, float]:
+    """Runs CUDA timing loops with events and synchronization, returning (mean_ms, std_ms)."""
+    for _ in range(warmups):
+        _ = fn()
+    torch.cuda.synchronize()
+
+    times = []
+    for _ in range(repeats):
+        start_evt = torch.cuda.Event(enable_timing=True)
+        end_evt = torch.cuda.Event(enable_timing=True)
+        start_evt.record()
+        _ = fn()
+        end_evt.record()
+        torch.cuda.synchronize()
+        times.append(start_evt.elapsed_time(end_evt))
+
+    mean = statistics.mean(times)
+    std = statistics.stdev(times) if len(times) > 1 else 0.0
+    return mean, std
+
+
 def run_benchmarks():
+    parser = argparse.ArgumentParser(description="ROSA Compute Latency Benchmark")
+    parser.add_argument("--warmups", type=int, default=3, help="Warmup iterations")
+    parser.add_argument("--repeats", type=int, default=10, help="Measured iterations")
+    parser.add_argument(
+        "--smoke", action="store_true", help="Run fast smoke test with fewer iterations and short sequences"
+    )
+    args = parser.parse_args()
+
+    if args.smoke:
+        warmups = 1
+        repeats = 2
+        sequence_lengths = [32, 64]
+    else:
+        warmups = args.warmups
+        repeats = args.repeats
+        sequence_lengths = [32, 64, 128, 256, 512]
+
     info = get_environment_info()
     print("=== ROSA Execution Latency Benchmark ===")
     print(f"PyTorch Version: {info['torch_version']}")
     print(f"CUDA Available:  {info['cuda_available']}")
+    print(f"Warmup Iters:    {warmups}")
+    print(f"Repeat Iters:    {repeats}")
 
     B = 1
     C = 768
-    sequence_lengths = [32, 64, 128, 256, 512]
 
-    print(f"\n{'T':<8} | {'BlinkDL Ref (ms)':<18} | {'rosa_soft Ref (ms)':<20} | {'rosa_soft CUDA (ms)':<20}")
-    print("-" * 75)
+    print(
+        f"\n{'T':<6} | {'BlinkDL Ref (ms)':<22} | {'rosa_soft Ref (ms)':<22} | {'rosa_soft CUDA (ms)':<22}"
+    )
+    print("-" * 80)
 
     caps = info.get("rosa_soft_build_capabilities")
     has_cuda = info["cuda_available"] and caps and caps.rosa_soft_cuda
@@ -37,38 +94,34 @@ def run_benchmarks():
 
         # BlinkDL ref (CPU oracle)
         if T <= 128:
-            t0 = time.perf_counter()
-            _ = blinkdl_rosa_4bit_reference(q, k, v)
-            t_blinkdl = (time.perf_counter() - t0) * 1000
-            s_blinkdl = f"{t_blinkdl:.2f}"
+            m_b, s_b = benchmark_cpu_fn(
+                lambda: blinkdl_rosa_4bit_reference(q, k, v), warmups, repeats
+            )
+            str_blinkdl = f"{m_b:.2f} ± {s_b:.2f}"
         else:
-            s_blinkdl = "skipped (slow)"
+            str_blinkdl = "skipped (slow)"
 
         # rosa_soft ref
-        t0 = time.perf_counter()
-        _ = rosa_4bit_forward(q, k, v, max_suffix_length=512, use_cuda=False)
-        t_soft_ref = (time.perf_counter() - t0) * 1000
-        s_soft_ref = f"{t_soft_ref:.2f}"
+        m_r, s_r = benchmark_cpu_fn(
+            lambda: rosa_4bit_forward(q, k, v, max_suffix_length=512, use_cuda=False),
+            warmups,
+            repeats,
+        )
+        str_soft_ref = f"{m_r:.2f} ± {s_r:.2f}"
 
         # rosa_soft CUDA
         if has_cuda:
             q_cuda, k_cuda, v_cuda = q.cuda(), k.cuda(), v.cuda()
-            _ = rosa_4bit_forward(q_cuda, k_cuda, v_cuda, max_suffix_length=512, use_cuda=True)
-            torch.cuda.synchronize()
-
-            start_evt = torch.cuda.Event(enable_timing=True)
-            end_evt = torch.cuda.Event(enable_timing=True)
-
-            start_evt.record()
-            _ = rosa_4bit_forward(q_cuda, k_cuda, v_cuda, max_suffix_length=512, use_cuda=True)
-            end_evt.record()
-            torch.cuda.synchronize()
-            t_cuda = start_evt.elapsed_time(end_evt)
-            s_cuda = f"{t_cuda:.2f}"
+            m_c, s_c = benchmark_cuda_fn(
+                lambda: rosa_4bit_forward(q_cuda, k_cuda, v_cuda, max_suffix_length=512, use_cuda=True),
+                warmups,
+                repeats,
+            )
+            str_cuda = f"{m_c:.2f} ± {s_c:.2f}"
         else:
-            s_cuda = "N/A"
+            str_cuda = "N/A"
 
-        print(f"{T:<8} | {s_blinkdl:<18} | {s_soft_ref:<20} | {s_cuda:<20}")
+        print(f"{T:<6} | {str_blinkdl:<22} | {str_soft_ref:<22} | {str_cuda:<22}")
 
 
 if __name__ == "__main__":
