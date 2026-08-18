@@ -66,3 +66,7 @@ python scripts/compare_rosa.py
 # Inspect environment and optional checkpoint
 ROSA_MODEL_PATH=path/to/checkpoint.pth python scripts/inspect_environment.py
 ```
+
+## Attribution and Reference Material
+Experiment 0 and 3SUM task implementation in `src/exp0` are based on:
+- Pfau, J., Merrill, W., & Bowman, S. R. (2024). *Let's Think Dot by Dot: Hidden Computation in Transformer Language Models.* arXiv:2404.15758 (Licensed CC-BY-4.0).

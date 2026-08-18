@@ -14,6 +14,7 @@ authors = [
 ]
 dependencies = [
     "torch",
+    "numpy>=1.24",
 ]
 
 [project.optional-dependencies]
@@ -35,6 +36,7 @@ markers = [
     "integration: full layer or integration tests",
     "slow: tests that take longer to run",
     "checkpoint: tests requiring ROSA checkpoint loading",
+    "exp0: tests for Experiment 0 apparatus and models",
 ]
 
 [tool.ruff]
