@@ -12,6 +12,7 @@ def compile_experiment_report(
     task_cfg: Task3SumConfig,
     per_seed_results: List[Dict[str, Any]],
     majority_class_baseline: float,
+    realized_mixture_counts: Dict[str, int],
 ) -> Dict[str, Any]:
     """Compile comprehensive experiment report conforming to docs/experiments.md metadata requirements."""
     accuracies = [res["best_val_accuracy"] for res in per_seed_results]
@@ -30,6 +31,7 @@ def compile_experiment_report(
             "dimension": task_cfg.dimension,
         },
         "majority_class_baseline": majority_class_baseline,
+        "realized_mixture_counts": realized_mixture_counts,
         "metrics": {
             "mean_accuracy": mean_acc,
             "min_accuracy": min_acc,

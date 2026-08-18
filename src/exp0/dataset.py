@@ -24,18 +24,24 @@ class Vocabulary:
         self.token2id: Dict[str, int] = {}
         self.id2token: Dict[int, str] = {}
         self.pad_token = "<PAD>"
+        self.is_frozen = False
         self.add_token(self.pad_token)
 
     def add_token(self, token: str) -> int:
-        if token not in self.token2id:
-            idx = len(self.token2id)
-            self.token2id[token] = idx
-            self.id2token[idx] = token
-            return idx
-        return self.token2id[token]
+        if token in self.token2id:
+            return self.token2id[token]
+        if self.is_frozen:
+            raise KeyError(f"Vocabulary is frozen. Cannot add new token: {token}")
+        idx = len(self.token2id)
+        self.token2id[token] = idx
+        self.id2token[idx] = token
+        return idx
+
+    def freeze(self):
+        self.is_frozen = True
 
     def encode(self, tokens: List[str]) -> List[int]:
-        return [self.token2id.get(t, 0) for t in tokens]
+        return [self.token2id[t] for t in tokens]
 
     def decode(self, ids: List[int]) -> List[str]:
         return [self.id2token.get(i, "<UNK>") for i in ids]
@@ -45,10 +51,10 @@ class Vocabulary:
 
 
 def build_default_vocab(length: int = 12, dimension: int = 3, mod: int = 10) -> Vocabulary:
-    """Build vocabulary covering all possible tokens across formats A-E for specified length/dimension."""
+    """Build complete, clean default vocabulary for specified length/dimension."""
     vocab = Vocabulary()
 
-    # Separator, filler, neutral, answer tokens
+    # Separators, filler, neutral, answer tokens
     vocab.add_token(":")
     vocab.add_token(".")
     vocab.add_token("#")
@@ -71,7 +77,6 @@ def build_default_vocab(length: int = 12, dimension: int = 3, mod: int = 10) -> 
                 vocab.add_token(f"{labels[i]}{labels[j]}_{dim}")
             for k in range(j + 1, length):
                 for dim in range(dimension):
-                    vocab.add_token(f"MATCH {labels[i]}{labels[j]}{labels[k]}_{dim}")
                     vocab.add_token(f"{labels[i]}{labels[j]}{labels[k]}_{dim}")
 
     # Digits / sums
@@ -82,10 +87,11 @@ def build_default_vocab(length: int = 12, dimension: int = 3, mod: int = 10) -> 
     for val in range(mod):
         vocab.add_token(str(val))
 
-    # Dimension markers for serial CoT
+    # Dimension markers
     for dim in range(dimension):
         vocab.add_token(str(dim))
 
+    vocab.freeze()
     return vocab
 
 
@@ -104,19 +110,23 @@ def encode_input_tuples(instance: Instance3Sum, mod: int = 10) -> torch.Tensor:
 
 
 class Task3SumDataset(Dataset):
-    """PyTorch Dataset for 3SUM experiment."""
+    """PyTorch Dataset for 3SUM experiment supporting training mixtures."""
 
     def __init__(
         self,
         instances: List[Instance3Sum],
-        format_type: str = "parallel_cot",
+        format_type: Optional[str] = None,  # Single format override if specified
         num_filler: Optional[int] = None,
         vocab: Optional[Vocabulary] = None,
         vocab_reduction: bool = True,
         seed: int = 42,
+        parallel_ratio: float = 0.5,
+        filler_ratio: float = 0.5,
+        serial_ratio: float = 0.0,
+        immediate_ratio: float = 0.0,
+        neutral_ratio: float = 0.0,
     ):
         self.instances = instances
-        self.format_type = format_type
         self.num_filler = num_filler
         self.vocab_reduction = vocab_reduction
         self.rng = random.Random(seed)
@@ -132,42 +142,73 @@ class Task3SumDataset(Dataset):
         else:
             self.vocab = vocab
 
+        # Determine mixture format assignment per instance
+        self.assigned_formats: List[str] = []
+        self.realized_counts: Dict[str, int] = {
+            "parallel_cot": 0,
+            "filler": 0,
+            "serial_cot": 0,
+            "immediate": 0,
+            "neutral": 0,
+        }
+
+        if format_type is not None:
+            # Single format override
+            for _ in self.instances:
+                self.assigned_formats.append(format_type)
+                self.realized_counts[format_type] += 1
+        else:
+            # Sample format per instance based on mixture ratios
+            formats = ["parallel_cot", "filler", "serial_cot", "immediate", "neutral"]
+            weights = [parallel_ratio, filler_ratio, serial_ratio, immediate_ratio, neutral_ratio]
+            total_weight = sum(weights)
+            if total_weight <= 0:
+                weights = [0.5, 0.5, 0.0, 0.0, 0.0]
+                total_weight = 1.0
+
+            norm_weights = [w / total_weight for w in weights]
+
+            for _ in self.instances:
+                chosen_format = self.rng.choices(formats, weights=norm_weights, k=1)[0]
+                self.assigned_formats.append(chosen_format)
+                self.realized_counts[chosen_format] += 1
+
     def __len__(self):
         return len(self.instances)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         instance = self.instances[idx]
+        fmt = self.assigned_formats[idx]
 
         input_embeds = encode_input_tuples(instance)
 
-        if self.format_type == "parallel_cot":
+        if fmt == "parallel_cot":
             seq_str = format_a_parallel_cot(instance, vocab_reduction=self.vocab_reduction, rng=self.rng)
-        elif self.format_type == "filler":
+        elif fmt == "filler":
             seq_str = format_b_filler(instance, num_filler=self.num_filler)
-        elif self.format_type == "immediate":
+        elif fmt == "immediate":
             seq_str = format_c_immediate(instance)
-        elif self.format_type == "serial_cot":
+        elif fmt == "serial_cot":
             seq_str = format_d_serial_cot(instance)
-        elif self.format_type == "neutral":
+        elif fmt == "neutral":
             seq_str = format_e_neutral(instance, num_filler=self.num_filler)
         else:
-            raise ValueError(f"Unknown format type: {self.format_type}")
+            raise ValueError(f"Unknown format type: {fmt}")
 
         tokens = seq_str.split()
 
         sep_idx = tokens.index(":") if ":" in tokens else -1
         target_tokens = tokens[sep_idx + 1:] if sep_idx != -1 else tokens
 
-        target_ids = []
-        for t in target_tokens:
-            target_ids.append(self.vocab.add_token(t))
-
+        # Encode tokens using frozen vocabulary
+        target_ids = self.vocab.encode(target_tokens)
         target_tensor = torch.tensor(target_ids, dtype=torch.long)
 
         return {
             "input_tuples": input_embeds,
             "targets": target_tensor,
             "has_3sum": torch.tensor(instance.has_3sum, dtype=torch.bool),
+            "format": fmt,
         }
 
 

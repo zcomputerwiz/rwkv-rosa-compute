@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Experiment 0 single run across multiple seeds."""
+"""Run Experiment 0 single run across multiple seeds with fixed validation set."""
 
 import argparse
 import json
@@ -19,9 +19,13 @@ def main():
     parser.add_argument("--length", type=int, default=12)
     parser.add_argument("--dimension", type=int, default=3)
     parser.add_argument("--num_filler", type=int, default=None)
-    parser.add_argument("--format_type", type=str, default="filler", choices=["parallel_cot", "filler", "immediate", "serial_cot", "neutral"])
+    parser.add_argument("--format_type", type=str, default=None, choices=["parallel_cot", "filler", "immediate", "serial_cot", "neutral"])
+    parser.add_argument("--parallel_ratio", type=float, default=0.5)
+    parser.add_argument("--filler_ratio", type=float, default=0.5)
+    parser.add_argument("--serial_ratio", type=float, default=0.0)
     parser.add_argument("--num_samples", type=int, default=1000)
     parser.add_argument("--val_samples", type=int, default=200)
+    parser.add_argument("--eval_seed", type=int, default=9999, help="Fixed eval seed for validation set")
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44])
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=64)
@@ -38,7 +42,7 @@ def main():
 
     model_cfg = ModelConfig(
         architecture=args.architecture,
-        hidden_size=128,          # Scaled for fast iteration in experiment runner
+        hidden_size=128,
         num_hidden_layers=2,
         num_attention_heads=4,
         intermediate_size=256,
@@ -47,46 +51,69 @@ def main():
 
     vocab = build_default_vocab(length=args.length, dimension=args.dimension)
 
+    # Fixed validation set generated ONCE from eval_seed (T5)
+    val_rng = random.Random(args.eval_seed)
+    val_instances = [generate_instance(length=args.length, dimension=args.dimension, rng=val_rng) for _ in range(args.val_samples)]
+    val_ds = Task3SumDataset(val_instances, format_type="filler", num_filler=task_cfg.num_filler, vocab=vocab, seed=args.eval_seed)
+
+    num_pos = sum(1 for inst in val_instances if inst.has_3sum)
+    majority_baseline = max(num_pos, len(val_instances) - num_pos) / len(val_instances)
+
     per_seed_results = []
-    majority_baselines = []
+    realized_counts_aggregate = {}
 
     for seed in args.seeds:
-        rng = random.Random(seed)
+        train_rng = random.Random(seed)
+        train_instances = [generate_instance(length=args.length, dimension=args.dimension, rng=train_rng) for _ in range(args.num_samples)]
 
-        # Generate train and validation data
-        train_instances = [generate_instance(length=args.length, dimension=args.dimension, rng=rng) for _ in range(args.num_samples)]
-        val_instances = [generate_instance(length=args.length, dimension=args.dimension, rng=rng) for _ in range(args.val_samples)]
+        train_ds = Task3SumDataset(
+            train_instances,
+            format_type=args.format_type,
+            num_filler=task_cfg.num_filler,
+            vocab=vocab,
+            seed=seed,
+            parallel_ratio=args.parallel_ratio,
+            filler_ratio=args.filler_ratio,
+            serial_ratio=args.serial_ratio,
+        )
 
-        num_pos = sum(1 for inst in val_instances if inst.has_3sum)
-        majority_baselines.append(max(num_pos, len(val_instances) - num_pos) / len(val_instances))
-
-        train_ds = Task3SumDataset(train_instances, format_type=args.format_type, num_filler=task_cfg.num_filler, vocab=vocab, seed=seed)
-        val_ds = Task3SumDataset(val_instances, format_type=args.format_type, num_filler=task_cfg.num_filler, vocab=vocab, seed=seed)
+        for fmt, cnt in train_ds.realized_counts.items():
+            realized_counts_aggregate[fmt] = realized_counts_aggregate.get(fmt, 0) + cnt
 
         train_cfg = TrainConfig(
             seed=seed,
             batch_size=args.batch_size,
             learning_rate=args.learning_rate,
             epochs=args.epochs,
-            mixture=args.format_type,
+            mixture=args.format_type if args.format_type else "50_50_cot_filler",
+            parallel_ratio=args.parallel_ratio,
+            filler_ratio=args.filler_ratio,
+            serial_ratio=args.serial_ratio,
         )
 
         _, history = train_model(model_cfg, train_cfg, task_cfg, train_ds, val_ds)
         history["seed"] = seed
         per_seed_results.append(history)
 
-    avg_majority_baseline = sum(majority_baselines) / len(majority_baselines)
-    report = compile_experiment_report(model_cfg, train_cfg, task_cfg, per_seed_results, avg_majority_baseline)
+    report = compile_experiment_report(
+        model_cfg,
+        train_cfg,
+        task_cfg,
+        per_seed_results,
+        majority_class_baseline=majority_baseline,
+        realized_mixture_counts=realized_counts_aggregate,
+    )
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    report_path = out_dir / f"{args.architecture}_len{args.length}_N{task_cfg.num_filler}_fmt_{args.format_type}.json"
+    fmt_tag = args.format_type if args.format_type else "mix_50_50"
+    report_path = out_dir / f"{args.architecture}_len{args.length}_N{task_cfg.num_filler}_fmt_{fmt_tag}.json"
 
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2)
 
     print(f"Report written to {report_path}")
-    print(f"Mean accuracy: {report['metrics']['mean_accuracy']:.4f} (baseline: {avg_majority_baseline:.4f})")
+    print(f"Mean accuracy: {report['metrics']['mean_accuracy']:.4f} (baseline: {majority_baseline:.4f})")
 
 
 if __name__ == "__main__":

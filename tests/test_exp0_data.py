@@ -1,14 +1,10 @@
-"""Unit tests for Milestone 1: 3SUM task generation, sequence formatting, dataset tensorization, and seeding."""
+"""Unit tests for Milestone 1 & T2/T4: 3SUM task generation, sequence formatting, dataset tensorization, vocabulary, and mixture sampling."""
 
 import random
 
-import torch
+import pytest
 
-from exp0.dataset import (
-    Task3SumDataset,
-    build_default_vocab,
-    pad_collate_fn,
-)
+from exp0.dataset import Task3SumDataset, build_default_vocab
 from exp0.sequences import (
     format_a_parallel_cot,
     format_b_filler,
@@ -20,8 +16,8 @@ from exp0.sequences import (
 from exp0.task3sum import Instance3Sum, check_3sum, generate_instance
 
 
+@pytest.mark.exp0
 def test_3sum_check_and_generation():
-    # Test positive instance generation
     rng = random.Random(123)
     pos_inst = generate_instance(length=8, dimension=3, target_has_3sum=True, rng=rng)
     assert pos_inst.has_3sum is True
@@ -29,7 +25,6 @@ def test_3sum_check_and_generation():
     assert has_sol is True
     assert indices == pos_inst.matching_indices
 
-    # Test negative instance generation
     neg_inst = generate_instance(length=8, dimension=3, target_has_3sum=False, rng=rng)
     assert neg_inst.has_3sum is False
     has_sol_neg, indices_neg = check_3sum(neg_inst.tuples)
@@ -37,6 +32,7 @@ def test_3sum_check_and_generation():
     assert indices_neg is None
 
 
+@pytest.mark.exp0
 def test_sequence_formats():
     inst = Instance3Sum(
         tuples=[(0, 5, 0), (7, 3, 0), (3, 2, 0), (1, 1, 1)],
@@ -66,6 +62,7 @@ def test_sequence_formats():
     assert fmt_e.endswith("ANS True")
 
 
+@pytest.mark.exp0
 def test_seeding_reproducibility():
     inst1 = generate_instance(length=10, dimension=3, rng=random.Random(42))
     inst2 = generate_instance(length=10, dimension=3, rng=random.Random(42))
@@ -73,29 +70,28 @@ def test_seeding_reproducibility():
     assert inst1.has_3sum == inst2.has_3sum
 
 
-def test_dataset_tensorization():
+@pytest.mark.exp0
+def test_dataset_mixture_ratios_and_vocab_freeze():
     rng = random.Random(42)
-    instances = [generate_instance(length=6, dimension=3, rng=rng) for _ in range(5)]
+    instances = [generate_instance(length=6, dimension=3, rng=rng) for _ in range(100)]
     vocab = build_default_vocab(length=6, dimension=3)
 
     dataset = Task3SumDataset(
         instances=instances,
-        format_type="filler",
         num_filler=36,
         vocab=vocab,
         seed=42,
+        parallel_ratio=0.5,
+        filler_ratio=0.5,
     )
-    assert len(dataset) == 5
-    sample = dataset[0]
 
-    # Input tuples shape check: n=6, d_input = 10*3 + 6 = 36
-    assert sample["input_tuples"].shape == (6, 36)
-    assert sample["targets"].ndim == 1
-    assert sample["has_3sum"].dtype == torch.bool
+    # Assert 50/50 mixture counts roughly equal across 100 instances
+    counts = dataset.realized_counts
+    assert counts["parallel_cot"] + counts["filler"] == 100
+    assert 40 <= counts["parallel_cot"] <= 60
 
-    # Collate function check
-    batch = [dataset[0], dataset[1]]
-    collated = pad_collate_fn(batch)
-    assert collated["input_tuples"].shape == (2, 6, 36)
-    assert collated["targets"].shape[0] == 2
-    assert collated["loss_mask"].shape == collated["targets"].shape
+    # Test that vocabulary is frozen and does not mutate during dataset access
+    initial_vocab_len = len(vocab)
+    _ = dataset[0]
+    _ = dataset[1]
+    assert len(vocab) == initial_vocab_len

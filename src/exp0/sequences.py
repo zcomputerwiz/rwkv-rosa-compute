@@ -40,8 +40,8 @@ def format_a_parallel_cot(
 
     Lexicographic order of all pairs (i, j) with i < j.
     For pair (i, j), if (x_i + x_j + x_k) % mod == 0 for some k distinct from i, j:
-       write label(i) label(j) label(k) [or reduced: label(i)/label(j) + sum]
-    Else write pair intermediate token / sum.
+       write label(i) label(j) label(k) [or reduced: label(i)/label(j) + sum coordinate]
+    Else write pair intermediate token / sum coordinate.
     """
     if rng is None:
         rng = random.Random()
@@ -73,15 +73,15 @@ def format_a_parallel_cot(
                         break
 
             if vocab_reduction:
-                # Randomly keep first or second char of pair representation
+                # Vocab reduction: randomly pick one coordinate digit from sum_ij and single label char
                 first_char = labels[i]
                 second_char = labels[j]
                 pair_label = first_char if rng.random() < 0.5 else second_char
-                sum_str = "".join(str(s) for s in sum_ij)
+                sum_digit = str(rng.choice(sum_ij))
                 if matching_k is not None:
-                    cot_tokens.append(f"{pair_label} {sum_str} {labels[matching_k]}")
+                    cot_tokens.append(f"{pair_label} {sum_digit} {labels[matching_k]}")
                 else:
-                    cot_tokens.append(f"{pair_label} {sum_str}")
+                    cot_tokens.append(f"{pair_label} {sum_digit}")
             else:
                 pair_label = f"{labels[i]}{labels[j]}"
                 sum_str = "".join(str(s) for s in sum_ij)

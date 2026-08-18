@@ -5,12 +5,46 @@ import random
 import pytest
 
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
-from exp0.dataset import Task3SumDataset, build_default_vocab
+from exp0.dataset import Task3SumDataset, build_default_vocab, pad_collate_fn
 from exp0.evaluate import compile_experiment_report
 from exp0.task3sum import generate_instance
 from exp0.train import train_model
 
 
+@pytest.mark.exp0
+def test_evaluation_readout_is_supervised():
+    """Assert that the evaluated logits position corresponds to the ANS token and is non-masked (-100)."""
+    rng = random.Random(42)
+    length, dimension = 6, 3
+    instances = [generate_instance(length=length, dimension=dimension, rng=rng) for _ in range(2)]
+
+    vocab = build_default_vocab(length=length, dimension=dimension)
+    ans_token_id = vocab.token2id["ANS"]
+    ans_true_id = vocab.token2id["True"]
+    ans_false_id = vocab.token2id["False"]
+
+    dataset = Task3SumDataset(instances, format_type="filler", num_filler=10, vocab=vocab, seed=42)
+    sample = dataset[0]
+
+    targets = sample["targets"]
+    ans_positions = (targets == ans_token_id).nonzero(as_tuple=True)[0]
+    assert len(ans_positions) == 1, "ANS token must exist exactly once in target sequence"
+    ans_pos = ans_positions[0].item()
+
+    assert ans_pos + 1 < len(targets)
+    answer_label_token = targets[ans_pos + 1].item()
+    assert answer_label_token in (ans_true_id, ans_false_id)
+
+    batch = pad_collate_fn([sample])
+    loss_mask = batch["loss_mask"]
+    shift_targets = loss_mask[:, 1:]
+    supervised_target = shift_targets[0, ans_pos].item()
+
+    assert supervised_target != -100, "Evaluated ANS position must be supervised in training loss"
+    assert supervised_target == answer_label_token
+
+
+@pytest.mark.exp0
 def test_train_loop_end_to_end_cpu():
     rng = random.Random(42)
     length = 6
@@ -56,6 +90,7 @@ def test_train_loop_end_to_end_cpu():
     assert 0.0 <= history["best_val_accuracy"] <= 1.0
 
 
+@pytest.mark.exp0
 def test_compile_experiment_report():
     model_cfg = ModelConfig()
     train_cfg = TrainConfig()
@@ -67,9 +102,19 @@ def test_compile_experiment_report():
         {"seed": 44, "best_val_accuracy": 0.85},
     ]
 
-    report = compile_experiment_report(model_cfg, train_cfg, task_cfg, per_seed_results, majority_class_baseline=0.5)
+    realized_counts = {"parallel_cot": 50, "filler": 50}
+
+    report = compile_experiment_report(
+        model_cfg,
+        train_cfg,
+        task_cfg,
+        per_seed_results,
+        majority_class_baseline=0.5,
+        realized_mixture_counts=realized_counts,
+    )
 
     assert report["metrics"]["mean_accuracy"] == pytest.approx(0.85)
     assert report["metrics"]["min_accuracy"] == 0.8
     assert report["metrics"]["max_accuracy"] == 0.9
     assert report["majority_class_baseline"] == 0.5
+    assert report["realized_mixture_counts"] == realized_counts

@@ -15,6 +15,9 @@ def main():
     parser.add_argument("--dimension", type=int, default=3)
     parser.add_argument("--n_values", type=int, nargs="+", default=[0, 1, 2, 4, 8, 16, 32])
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44])
+    parser.add_argument("--parallel_ratio", type=float, default=0.5)
+    parser.add_argument("--filler_ratio", type=float, default=0.5)
+    parser.add_argument("--format_type", type=str, default=None)
     parser.add_argument("--num_samples", type=int, default=1000)
     parser.add_argument("--val_samples", type=int, default=200)
     parser.add_argument("--epochs", type=int, default=3)
@@ -35,15 +38,21 @@ def main():
             "--length", str(args.length),
             "--dimension", str(args.dimension),
             "--num_filler", str(n),
+            "--parallel_ratio", str(args.parallel_ratio),
+            "--filler_ratio", str(args.filler_ratio),
             "--num_samples", str(args.num_samples),
             "--val_samples", str(args.val_samples),
             "--epochs", str(args.epochs),
             "--seeds", *[str(s) for s in args.seeds],
             "--out_dir", str(out_dir),
         ]
+        if args.format_type:
+            cmd.extend(["--format_type", args.format_type])
+
         subprocess.run(cmd, check=True)
 
-        report_file = out_dir / f"{args.architecture}_len{args.length}_N{n}_fmt_filler.json"
+        fmt_tag = args.format_type if args.format_type else "mix_50_50"
+        report_file = out_dir / f"{args.architecture}_len{args.length}_N{n}_fmt_{fmt_tag}.json"
         if report_file.exists():
             with open(report_file) as f:
                 rep = json.load(f)

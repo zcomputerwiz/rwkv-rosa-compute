@@ -51,9 +51,17 @@ def evaluate_accuracy(
     model: nn.Module,
     val_loader: DataLoader,
     device: torch.device,
+    ans_token_id: int,
     ans_true_id: int,
     ans_false_id: int,
 ) -> float:
+    """Evaluate accuracy at the supervised ANS position predicting True/False.
+
+    The sequence format ends with tokens `... ANS <True|False>`.
+    In causal next-token prediction, the token `ANS` predicts the next token (`True`/`False`).
+    We locate the index of `ans_token_id` in `targets` for each sequence in the batch
+    and read `logits[b, ans_pos, :]` to evaluate the answer prediction.
+    """
     model.eval()
     correct = 0
     total = 0
@@ -66,14 +74,21 @@ def evaluate_accuracy(
 
             logits = model(input_tuples, targets)  # (B, seq_len, vocab_size)
 
-            # Final token prediction corresponds to true/false answer
-            final_logits = logits[:, -1, :]  # (B, vocab_size)
-            predictions = torch.argmax(final_logits, dim=-1)
+            batch_size = targets.size(0)
+            for b in range(batch_size):
+                ans_positions = (targets[b] == ans_token_id).nonzero(as_tuple=True)[0]
+                if len(ans_positions) == 0:
+                    ans_pos = logits.size(1) - 2
+                else:
+                    ans_pos = ans_positions[0].item()
 
-            # Map predicted token ID to boolean answer
-            pred_bool = (predictions == ans_true_id)
-            correct += (pred_bool == has_3sum).sum().item()
-            total += has_3sum.size(0)
+                pred_logits = logits[b, ans_pos, :]
+                pred_id = torch.argmax(pred_logits).item()
+
+                pred_bool = (pred_id == ans_true_id)
+                if pred_bool == has_3sum[b].item():
+                    correct += 1
+                total += 1
 
     return correct / total if total > 0 else 0.0
 
@@ -89,6 +104,7 @@ def train_model(
     device = torch.device(model_cfg.device)
 
     vocab = train_dataset.vocab
+    ans_token_id = vocab.token2id.get("ANS", -1)
     ans_true_id = vocab.token2id.get("True", -1)
     ans_false_id = vocab.token2id.get("False", -1)
 
@@ -96,11 +112,11 @@ def train_model(
     model_cfg.vocab_size = max(len(vocab), model_cfg.vocab_size)
     model = create_model(model_cfg, d_input=d_input).to(device)
 
-    # Condition-dependent hyperparameters (Gotcha check: immediate answer vs filler)
+    # Condition-dependent hyperparameters
     is_immediate = (task_cfg.num_filler == 0) or (train_cfg.mixture == "immediate")
     weight_decay = 0.1 if is_immediate else train_cfg.weight_decay
     grad_clip = 0.5 if is_immediate else train_cfg.grad_clip
-    epochs = train_cfg.epochs * 5 if is_immediate else train_cfg.epochs  # Asymmetric longer training for N=0
+    epochs = train_cfg.epochs * 5 if is_immediate else train_cfg.epochs
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -125,20 +141,16 @@ def train_model(
     epoch_val_accuracies = []
     best_val_acc = 0.0
 
-    for epoch in range(epochs):
+    for _ in range(epochs):
         model.train()
-        total_loss = 0.0
-        steps = 0
-
         for batch in train_loader:
             input_tuples = batch["input_tuples"].to(device)
             targets = batch["targets"].to(device)
             loss_mask = batch["loss_mask"].to(device)
 
             optimizer.zero_grad()
-            logits = model(input_tuples, targets)  # (B, seq_len, vocab_size)
+            logits = model(input_tuples, targets)
 
-            # Shift logits and targets for next-token prediction
             shift_logits = logits[:, :-1, :].contiguous().view(-1, logits.size(-1))
             shift_targets = loss_mask[:, 1:].contiguous().view(-1)
 
@@ -148,10 +160,7 @@ def train_model(
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
             optimizer.step()
 
-            total_loss += loss.item()
-            steps += 1
-
-        val_acc = evaluate_accuracy(model, val_loader, device, ans_true_id, ans_false_id)
+        val_acc = evaluate_accuracy(model, val_loader, device, ans_token_id, ans_true_id, ans_false_id)
         epoch_val_accuracies.append(val_acc)
         best_val_acc = max(best_val_acc, val_acc)
 
