@@ -66,6 +66,12 @@ def build_runner_command(
             str(args.epochs),
             "--num_workers",
             str(args.num_workers),
+            "--val_num_workers",
+            str(args.val_num_workers),
+            "--prefetch_factor",
+            str(args.prefetch_factor),
+            "--precision",
+            args.precision,
             "--parallel_ratio",
             str(args.parallel_ratio),
             "--filler_ratio",
@@ -82,7 +88,11 @@ def build_runner_command(
     )
     if args.format_type is not None:
         cmd.extend(["--format_type", args.format_type])
-    cmd.append("--vocab_reduction" if args.vocab_reduction else "--no-vocab_reduction")
+    cmd.append(
+        "--vocab_reduction" if args.vocab_reduction else "--no-vocab_reduction"
+    )
+    cmd.append("--pin_memory" if args.pin_memory else "--no-pin_memory")
+    cmd.append("--fused_adamw" if args.fused_adamw else "--no-fused_adamw")
     return cmd
 
 
@@ -160,6 +170,24 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--val_num_workers", type=int, default=0)
+    parser.add_argument("--prefetch_factor", type=int, default=2)
+    parser.add_argument(
+        "--precision",
+        type=str,
+        default="fp32",
+        choices=["fp32", "bf16", "fp16"],
+    )
+    parser.add_argument(
+        "--fused_adamw",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument(
+        "--pin_memory",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--out_dir", type=str, default="results/sweeps")
     parser.add_argument(
         "--device",
