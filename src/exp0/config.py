@@ -11,7 +11,7 @@ class Task3SumConfig:
     length: int = 12
     dimension: int = 3
     mod: int = 10
-    num_filler: Optional[int] = None  # Defaults to length**2 if None
+    num_filler: Optional[int] = None
     true_rate: float = 0.5
     vocab_reduction: bool = True
     seed: int = 42
@@ -29,16 +29,16 @@ class Task3SumConfig:
 class ModelConfig:
     """Configuration for model backbones and initialization."""
 
-    architecture: str = "llama"  # "llama" or "rwkv"
-    init_mode: str = "random"  # "random" or "pretrained"
+    architecture: str = "llama"
+    init_mode: str = "random"
     rwkv_checkpoint: Optional[str] = None
     rwkv_checkpoint_sha256: Optional[str] = None
     hidden_size: int = 384
     num_hidden_layers: int = 4
     num_attention_heads: int = 6
     intermediate_size: int = 1536
-    head_dim: int = 64  # Relevant for RWKV-7 where heads = hidden_size // head_dim
-    vocab_size: int = 256  # Actual token-set size optimization
+    head_dim: int = 64
+    vocab_size: int = 256
     device: str = "cpu"
 
     def __post_init__(self):
@@ -50,18 +50,33 @@ class ModelConfig:
 
 @dataclass
 class TrainConfig:
-    """Configuration for training and optimization."""
+    """Configuration for training, optimization, and data loading."""
 
     seed: int = 42
     num_workers: int = 0
+    val_num_workers: int = 0
     pin_memory: bool = True
+    prefetch_factor: int = 2
     batch_size: int = 64
     learning_rate: float = 1e-4
     epochs: int = 5
     weight_decay: float = 0.01
     grad_clip: float = 1.0
-    mixture: str = "parallel_cot_filler"  # "parallel_cot_filler", "filler_only", "serial_cot_filler"
+    precision: str = "fp32"
+    fused_adamw: bool = False
+    mixture: str = "parallel_cot_filler"
     parallel_ratio: float = 0.5
     filler_ratio: float = 0.5
     serial_ratio: float = 0.0
     immediate_ratio: float = 0.0
+
+    def __post_init__(self):
+        if self.num_workers < 0 or self.val_num_workers < 0:
+            raise ValueError("DataLoader worker counts must be non-negative.")
+        if self.prefetch_factor <= 0:
+            raise ValueError("prefetch_factor must be greater than zero.")
+        if self.precision not in {"fp32", "bf16", "fp16"}:
+            raise ValueError(
+                "precision must be one of: fp32, bf16, fp16; "
+                f"got {self.precision!r}"
+            )
