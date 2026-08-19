@@ -1,5 +1,6 @@
 """Regression gates for the Experiment 0 transformer positive control."""
 
+import math
 import random
 
 import pytest
@@ -118,7 +119,7 @@ def test_shared_input_projection_reuses_tuple_position_and_digit_columns():
     torch.testing.assert_close(tuple_hidden, target_hidden)
 
 
-def test_llama_backbone_and_head_use_initializer_range_but_input_proj_is_distinct():
+def test_llama_backbone_and_head_use_initializer_range_but_input_proj_is_default():
     torch.manual_seed(11)
     task_cfg = Task3SumConfig(length=6, dimension=3)
     vocab = build_default_vocab(length=6, dimension=3)
@@ -142,10 +143,12 @@ def test_llama_backbone_and_head_use_initializer_range_but_input_proj_is_distinc
     assert q_std == pytest.approx(0.02, abs=0.002)
     assert head_std == pytest.approx(0.02, abs=0.002)
 
-    # The authors construct their custom input adapter after the HF Llama model,
-    # so it retains nn.Linear's default initialization rather than std=0.02.
-    input_std = model.input_proj.weight.std().item()
-    assert abs(input_std - 0.02) > 0.005
+    # nn.Linear.reset_parameters uses U(-1/sqrt(fan_in), +1/sqrt(fan_in)).
+    # Checking its exact support is stable even when that uniform distribution's
+    # standard deviation happens to be numerically close to 0.02.
+    bound = 1.0 / math.sqrt(model.input_feature_dim)
+    assert model.input_proj.weight.abs().max().item() <= bound + 1e-7
+    assert model.input_proj.bias.abs().max().item() <= bound + 1e-7
 
 
 def test_positive_control_lr_lambda_matches_warmup_then_linear_decay():
