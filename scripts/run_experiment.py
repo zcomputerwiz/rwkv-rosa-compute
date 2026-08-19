@@ -9,14 +9,17 @@ from pathlib import Path
 import torch
 
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
-from exp0.dataset import Task3SumDataset, build_default_vocab
+from exp0.dataset import (
+    Task3SumDataset,
+    build_default_vocab,
+    generate_packed_instances,
+)
 from exp0.evaluate import (
     canonical_run_config,
     compile_experiment_report,
     compute_run_id,
 )
 from exp0.rwkv_checkpoint import sha256_file
-from exp0.task3sum import generate_instance
 from exp0.train import train_model
 
 
@@ -47,36 +50,11 @@ def get_parser() -> argparse.ArgumentParser:
         default=None,
         help="Explicit path to a stock pretrained RWKV-7 x070 checkpoint",
     )
-    parser.add_argument(
-        "--hidden_size",
-        type=int,
-        default=384,
-        help="Model hidden size (default 384)",
-    )
-    parser.add_argument(
-        "--num_hidden_layers",
-        type=int,
-        default=4,
-        help="Number of layers (default 4)",
-    )
-    parser.add_argument(
-        "--num_attention_heads",
-        type=int,
-        default=6,
-        help="Transformer attention heads (default 6)",
-    )
-    parser.add_argument(
-        "--intermediate_size",
-        type=int,
-        default=1536,
-        help="FFN intermediate size (default 1536)",
-    )
-    parser.add_argument(
-        "--head_dim",
-        type=int,
-        default=64,
-        help="RWKV head dimension (default 64)",
-    )
+    parser.add_argument("--hidden_size", type=int, default=384)
+    parser.add_argument("--num_hidden_layers", type=int, default=4)
+    parser.add_argument("--num_attention_heads", type=int, default=6)
+    parser.add_argument("--intermediate_size", type=int, default=1536)
+    parser.add_argument("--head_dim", type=int, default=64)
     parser.add_argument("--length", type=int, default=12)
     parser.add_argument("--dimension", type=int, default=3)
     parser.add_argument("--num_filler", type=int, default=None)
@@ -114,6 +92,22 @@ def get_parser() -> argparse.ArgumentParser:
         default="cuda" if torch.cuda.is_available() else "cpu",
     )
     parser.add_argument(
+        "--precision",
+        type=str,
+        default="fp32",
+        choices=["fp32", "bf16", "fp16"],
+        help=(
+            "Training/evaluation autocast precision. fp32 preserves the prior "
+            "protocol; bf16 is recommended for supported CUDA GPUs."
+        ),
+    )
+    parser.add_argument(
+        "--fused_adamw",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use PyTorch fused AdamW on CUDA (opt-in numerical/kernel change).",
+    )
+    parser.add_argument(
         "--vocab_reduction",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -123,15 +117,32 @@ def get_parser() -> argparse.ArgumentParser:
         "--num_workers",
         type=int,
         default=0,
-        help=(
-            "Number of DataLoader workers. On Windows, >0 uses spawn and "
-            "pickles dataset copies; start conservatively."
-        ),
+        help="Training DataLoader workers.",
+    )
+    parser.add_argument(
+        "--val_num_workers",
+        type=int,
+        default=0,
+        help="Validation workers; zero avoids retaining extra validation workers.",
+    )
+    parser.add_argument(
+        "--prefetch_factor",
+        type=int,
+        default=2,
+        help="Batches prefetched per training worker when num_workers > 0.",
+    )
+    parser.add_argument(
+        "--pin_memory",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Pin DataLoader batches for asynchronous CUDA transfer.",
     )
     return parser
 
 
-def _resolve_initialization(args: argparse.Namespace) -> tuple[str, str | None, str | None]:
+def _resolve_initialization(
+    args: argparse.Namespace,
+) -> tuple[str, str | None, str | None]:
     requested_init = getattr(args, "init", None)
     checkpoint_arg = getattr(args, "rwkv_checkpoint", None)
 
@@ -223,6 +234,11 @@ def build_configs(
         filler_ratio=args.filler_ratio,
         serial_ratio=args.serial_ratio,
         num_workers=args.num_workers,
+        val_num_workers=args.val_num_workers,
+        pin_memory=args.pin_memory,
+        prefetch_factor=args.prefetch_factor,
+        precision=args.precision,
+        fused_adamw=args.fused_adamw,
     )
     return task_cfg, model_cfg, train_cfg
 
@@ -275,10 +291,9 @@ def _check_existing_report(
 
 
 def main():
-    parser = get_parser()
-    args = parser.parse_args()
-
+    args = get_parser().parse_args()
     task_cfg, model_cfg, train_cfg_base = build_configs(args)
+
     if args.val_samples <= 0:
         raise ValueError("val_samples must be greater than zero.")
     if args.num_samples <= 0:
@@ -300,19 +315,19 @@ def main():
     if _check_existing_report(report_path, current_run_config):
         return
 
-    vocab = build_default_vocab(length=args.length, dimension=args.dimension)
+    vocab = build_default_vocab(
+        length=args.length,
+        dimension=args.dimension,
+        mod=task_cfg.mod,
+    )
 
-    val_rng = random.Random(args.eval_seed)
-    val_instances = [
-        generate_instance(
-            length=args.length,
-            dimension=args.dimension,
-            mod=task_cfg.mod,
-            rng=val_rng,
-        )
-        for _ in range(args.val_samples)
-    ]
-
+    val_instances = generate_packed_instances(
+        num_samples=args.val_samples,
+        length=args.length,
+        dimension=args.dimension,
+        mod=task_cfg.mod,
+        rng=random.Random(args.eval_seed),
+    )
     filler_val_ds = Task3SumDataset(
         val_instances,
         format_type="filler",
@@ -330,7 +345,7 @@ def main():
         vocab_reduction=args.vocab_reduction,
     )
 
-    num_pos = sum(1 for inst in val_instances if inst.has_3sum)
+    num_pos = int(val_instances.has_3sum.sum().item())
     majority_baseline = max(
         num_pos,
         len(val_instances) - num_pos,
@@ -340,17 +355,13 @@ def main():
     realized_counts_aggregate: dict[str, int] = {}
 
     for seed in args.seeds:
-        train_rng = random.Random(seed)
-        train_instances = [
-            generate_instance(
-                length=args.length,
-                dimension=args.dimension,
-                mod=task_cfg.mod,
-                rng=train_rng,
-            )
-            for _ in range(args.num_samples)
-        ]
-
+        train_instances = generate_packed_instances(
+            num_samples=args.num_samples,
+            length=args.length,
+            dimension=args.dimension,
+            mod=task_cfg.mod,
+            rng=random.Random(seed),
+        )
         train_ds = Task3SumDataset(
             train_instances,
             format_type=args.format_type,
@@ -380,9 +391,14 @@ def main():
             filler_ratio=args.filler_ratio,
             serial_ratio=args.serial_ratio,
             num_workers=args.num_workers,
+            val_num_workers=args.val_num_workers,
+            pin_memory=args.pin_memory,
+            prefetch_factor=args.prefetch_factor,
+            precision=args.precision,
+            fused_adamw=args.fused_adamw,
         )
 
-        _, history = train_model(
+        trained_model, history = train_model(
             model_cfg,
             train_cfg,
             task_cfg,
@@ -394,6 +410,10 @@ def main():
         history["training_seed"] = seed
         history["task_seed"] = seed
         per_seed_results.append(history)
+
+        del trained_model, train_ds, train_instances
+        if model_cfg.device.startswith("cuda") and torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     report = compile_experiment_report(
         model_cfg,

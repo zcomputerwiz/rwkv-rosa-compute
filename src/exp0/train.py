@@ -2,6 +2,7 @@
 
 import random
 import time
+from contextlib import nullcontext
 from dataclasses import replace
 from typing import Any, Dict, Optional, Tuple
 
@@ -22,17 +23,22 @@ def _create_loader(
     train_cfg: TrainConfig,
     device: torch.device,
     shuffle: bool = False,
+    num_workers: Optional[int] = None,
 ) -> DataLoader:
-    """Create a DataLoader with consistent Experiment 0 settings."""
-    return DataLoader(
-        dataset,
-        batch_size=train_cfg.batch_size,
-        shuffle=shuffle,
-        collate_fn=pad_collate_fn,
-        num_workers=train_cfg.num_workers,
-        persistent_workers=train_cfg.num_workers > 0,
-        pin_memory=train_cfg.pin_memory and device.type == "cuda",
-    )
+    """Create a DataLoader with bounded worker/prefetch memory."""
+    workers = train_cfg.num_workers if num_workers is None else num_workers
+    kwargs: Dict[str, Any] = {
+        "dataset": dataset,
+        "batch_size": train_cfg.batch_size,
+        "shuffle": shuffle,
+        "collate_fn": pad_collate_fn,
+        "num_workers": workers,
+        "pin_memory": train_cfg.pin_memory and device.type == "cuda",
+    }
+    if workers > 0:
+        kwargs["persistent_workers"] = True
+        kwargs["prefetch_factor"] = train_cfg.prefetch_factor
+    return DataLoader(**kwargs)
 
 
 def set_seed(seed: int):
@@ -108,6 +114,29 @@ def initialize_model(
     return provenance
 
 
+def _validate_precision(device: torch.device, precision: str) -> None:
+    if precision == "fp32":
+        return
+    if device.type != "cuda":
+        raise ValueError(
+            f"precision={precision} currently requires a CUDA device; "
+            "use fp32 for CPU runs."
+        )
+    if precision == "bf16" and not torch.cuda.is_bf16_supported():
+        raise ValueError("This CUDA device does not report bfloat16 support.")
+
+
+def _autocast_context(device: torch.device, precision: str):
+    if precision == "fp32":
+        return nullcontext()
+    dtype = torch.bfloat16 if precision == "bf16" else torch.float16
+    return torch.autocast(device_type=device.type, dtype=dtype)
+
+
+def _transfer_non_blocking(train_cfg: TrainConfig, device: torch.device) -> bool:
+    return device.type == "cuda" and train_cfg.pin_memory
+
+
 def evaluate_accuracy(
     model: nn.Module,
     val_loader: DataLoader,
@@ -115,35 +144,66 @@ def evaluate_accuracy(
     ans_token_id: int,
     ans_true_id: int,
     ans_false_id: int,
+    precision: str = "fp32",
+    non_blocking: bool = False,
 ) -> float:
-    """Evaluate exact True/False prediction at the supervised ANS position."""
+    """Evaluate exact True/False prediction using only ANS-position logits."""
     model.eval()
     correct = 0
     total = 0
 
     with torch.no_grad():
         for batch in val_loader:
-            input_tuples = batch["input_tuples"].to(device)
-            targets = batch["targets"].to(device)
-            has_3sum = batch["has_3sum"].to(device)
+            input_tuples = batch["input_tuples"].to(
+                device,
+                non_blocking=non_blocking,
+            )
+            targets = batch["targets"].to(
+                device,
+                non_blocking=non_blocking,
+            )
+            has_3sum = batch["has_3sum"].to(
+                device,
+                non_blocking=non_blocking,
+            )
 
-            logits = model(input_tuples, targets)
+            ans_mask = targets.eq(ans_token_id)
+            ans_counts = ans_mask.sum(dim=1)
+            if torch.any(ans_counts != 1):
+                bad_count = int(ans_counts[ans_counts != 1][0].item())
+                raise ValueError(
+                    "Sequence must have exactly one ANS token. "
+                    f"Found {bad_count}."
+                )
+            ans_positions = ans_mask.to(dtype=torch.int64).argmax(dim=1)
 
-            batch_size = targets.size(0)
-            for b in range(batch_size):
-                ans_positions = (targets[b] == ans_token_id).nonzero(as_tuple=True)[0]
-                if len(ans_positions) != 1:
-                    raise ValueError(
-                        "Sequence must have exactly one ANS token. "
-                        f"Found {len(ans_positions)}."
+            with _autocast_context(device, precision):
+                if hasattr(model, "answer_logits"):
+                    answer_logits = model.answer_logits(
+                        input_tuples,
+                        targets,
+                        ans_positions,
                     )
-                ans_pos = ans_positions[0].item()
+                else:
+                    logits = model(input_tuples, targets)
+                    batch_indices = torch.arange(
+                        targets.shape[0],
+                        device=device,
+                    )
+                    answer_logits = logits[
+                        batch_indices,
+                        ans_positions,
+                        :,
+                    ]
 
-                pred_id = torch.argmax(logits[b, ans_pos, :]).item()
-                expected_id = ans_true_id if has_3sum[b].item() else ans_false_id
-                if pred_id == expected_id:
-                    correct += 1
-                total += 1
+            predictions = answer_logits.argmax(dim=-1)
+            expected = torch.where(
+                has_3sum,
+                torch.full_like(predictions, ans_true_id),
+                torch.full_like(predictions, ans_false_id),
+            )
+            correct += int(predictions.eq(expected).sum().item())
+            total += targets.shape[0]
 
     return correct / total if total > 0 else 0.0
 
@@ -159,6 +219,7 @@ def train_model(
     """Train one Experiment 0 seed and evaluate fixed filler/CoT views."""
     set_seed(train_cfg.seed)
     device = torch.device(model_cfg.device)
+    _validate_precision(device, train_cfg.precision)
 
     vocab = train_dataset.vocab
     ans_token_id = vocab.token2id.get("ANS", -1)
@@ -172,17 +233,14 @@ def train_model(
             f"False={ans_false_id}"
         )
 
-    # Experiment 0's output vocabulary is derived from the task schema rather
-    # than selected independently. Resolve it on a local config so the caller's
-    # ModelConfig remains immutable across seeds/runs.
     resolved_model_cfg = replace(model_cfg, vocab_size=len(vocab))
-
     d_input = task_cfg.mod * task_cfg.dimension + task_cfg.length
     model = create_model(resolved_model_cfg, d_input=d_input)
     initialization = initialize_model(model, resolved_model_cfg)
     model = model.to(device)
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
-    # Condition-dependent hyperparameters are part of the documented 0A protocol.
     is_immediate = (task_cfg.num_filler == 0) or (
         train_cfg.mixture == "immediate"
     )
@@ -190,26 +248,50 @@ def train_model(
     grad_clip = 0.5 if is_immediate else train_cfg.grad_clip
     epochs = train_cfg.epochs * 5 if is_immediate else train_cfg.epochs
 
+    if train_cfg.fused_adamw and device.type != "cuda":
+        raise ValueError("fused_adamw requires CUDA.")
+    optimizer_kwargs: Dict[str, Any] = {}
+    if train_cfg.fused_adamw:
+        optimizer_kwargs["fused"] = True
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=train_cfg.learning_rate,
         weight_decay=weight_decay,
+        **optimizer_kwargs,
     )
     criterion = nn.CrossEntropyLoss(ignore_index=-100)
+    scaler = (
+        torch.amp.GradScaler("cuda")
+        if train_cfg.precision == "fp16"
+        else None
+    )
 
-    train_loader = _create_loader(train_dataset, train_cfg, device, shuffle=True)
+    train_loader = _create_loader(
+        train_dataset,
+        train_cfg,
+        device,
+        shuffle=True,
+    )
     filler_val_loader = _create_loader(
         filler_val_dataset,
         train_cfg,
         device,
         shuffle=False,
+        num_workers=train_cfg.val_num_workers,
     )
     cot_val_loader = (
-        _create_loader(cot_val_dataset, train_cfg, device, shuffle=False)
+        _create_loader(
+            cot_val_dataset,
+            train_cfg,
+            device,
+            shuffle=False,
+            num_workers=train_cfg.val_num_workers,
+        )
         if cot_val_dataset is not None
         else None
     )
 
+    non_blocking = _transfer_non_blocking(train_cfg, device)
     epoch_train_losses = []
     epoch_filler_accuracies = []
     epoch_cot_accuracies = []
@@ -226,24 +308,38 @@ def train_model(
         batch_losses = []
         for batch in train_loader:
             data_wait += time.perf_counter() - t_last
-            input_tuples = batch["input_tuples"].to(device)
-            targets = batch["targets"].to(device)
-            loss_mask = batch["loss_mask"].to(device)
-
-            optimizer.zero_grad()
-            logits = model(input_tuples, targets)
-
-            shift_logits = logits[:, :-1, :].contiguous().view(
-                -1,
-                logits.size(-1),
+            input_tuples = batch["input_tuples"].to(
+                device,
+                non_blocking=non_blocking,
             )
-            shift_targets = loss_mask[:, 1:].contiguous().view(-1)
+            targets = batch["targets"].to(
+                device,
+                non_blocking=non_blocking,
+            )
+            loss_mask = batch["loss_mask"].to(
+                device,
+                non_blocking=non_blocking,
+            )
 
-            loss = criterion(shift_logits, shift_targets)
-            loss.backward()
+            optimizer.zero_grad(set_to_none=True)
+            with _autocast_context(device, train_cfg.precision):
+                loss_logits = model.loss_logits(input_tuples, targets)
+                shift_targets = loss_mask[:, 1:].reshape(-1)
+                loss = criterion(
+                    loss_logits.reshape(-1, loss_logits.size(-1)),
+                    shift_targets,
+                )
 
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
-            optimizer.step()
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                optimizer.step()
 
             batch_losses.append(loss.item())
             t_last = time.perf_counter()
@@ -260,6 +356,8 @@ def train_model(
             ans_token_id,
             ans_true_id,
             ans_false_id,
+            precision=train_cfg.precision,
+            non_blocking=non_blocking,
         )
         epoch_filler_accuracies.append(filler_acc)
         best_filler_acc = max(best_filler_acc, filler_acc)
@@ -272,9 +370,17 @@ def train_model(
                 ans_token_id,
                 ans_true_id,
                 ans_false_id,
+                precision=train_cfg.precision,
+                non_blocking=non_blocking,
             )
             epoch_cot_accuracies.append(cot_acc)
             best_cot_acc = max(best_cot_acc, cot_acc)
+
+    cuda_peak_allocated = None
+    cuda_peak_reserved = None
+    if device.type == "cuda":
+        cuda_peak_allocated = torch.cuda.max_memory_allocated(device)
+        cuda_peak_reserved = torch.cuda.max_memory_reserved(device)
 
     history: Dict[str, Any] = {
         "epoch_train_losses": epoch_train_losses,
@@ -291,6 +397,21 @@ def train_model(
         "samples_per_second": (len(train_dataset) * epochs)
         / max(sum(epoch_times), 1e-9),
         "resolved_vocab_size": len(vocab),
+        "precision": train_cfg.precision,
+        "fused_adamw": train_cfg.fused_adamw,
+        "non_blocking_transfers": non_blocking,
+        "train_dataset_storage_bytes": getattr(
+            train_dataset,
+            "packed_storage_nbytes",
+            None,
+        ),
+        "validation_dataset_storage_bytes": getattr(
+            filler_val_dataset,
+            "packed_storage_nbytes",
+            None,
+        ),
+        "cuda_peak_memory_allocated_bytes": cuda_peak_allocated,
+        "cuda_peak_memory_reserved_bytes": cuda_peak_reserved,
         "initialization": initialization,
     }
 

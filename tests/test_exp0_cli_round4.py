@@ -33,6 +33,11 @@ def _sweep_args(**overrides) -> argparse.Namespace:
         "learning_rate": 1e-4,
         "epochs": 3,
         "num_workers": 2,
+        "val_num_workers": 0,
+        "prefetch_factor": 1,
+        "precision": "fp32",
+        "fused_adamw": False,
+        "pin_memory": True,
         "device": "cpu",
         "out_dir": "results/sweeps",
     }
@@ -56,9 +61,14 @@ def test_build_runner_command():
     assert cmd[cmd.index("--eval_seed") + 1] == "9999"
     assert cmd[cmd.index("--learning_rate") + 1] == "0.0001"
     assert cmd[cmd.index("--num_workers") + 1] == "2"
+    assert cmd[cmd.index("--val_num_workers") + 1] == "0"
+    assert cmd[cmd.index("--prefetch_factor") + 1] == "1"
+    assert cmd[cmd.index("--precision") + 1] == "fp32"
     assert "--seeds" in cmd
     assert "42" in cmd and "43" in cmd and "44" in cmd
     assert "--vocab_reduction" in cmd
+    assert "--pin_memory" in cmd
+    assert "--no-fused_adamw" in cmd
 
     assert "--vocab_size" not in cmd
     assert "--weight_decay" not in cmd
@@ -76,22 +86,29 @@ def test_build_runner_command_forwards_checkpoint():
         num_hidden_layers=12,
         intermediate_size=3072,
         num_attention_heads=12,
+        precision="bf16",
+        fused_adamw=True,
     )
     cmd = build_runner_command(args, 4, Path("results/test"))
 
     assert cmd[cmd.index("--init") + 1] == "pretrained"
     assert cmd[cmd.index("--rwkv_checkpoint") + 1] == "models/rwkv.pth"
+    assert cmd[cmd.index("--precision") + 1] == "bf16"
+    assert "--fused_adamw" in cmd
 
 
 def test_llama_defaults_to_random_initialization():
     args = run_experiment.get_parser().parse_args(
         ["--architecture", "llama", "--device", "cpu"]
     )
-    _, model_cfg, _ = run_experiment.build_configs(args)
+    _, model_cfg, train_cfg = run_experiment.build_configs(args)
 
     assert model_cfg.init_mode == "random"
     assert model_cfg.rwkv_checkpoint is None
     assert model_cfg.rwkv_checkpoint_sha256 is None
+    assert train_cfg.precision == "fp32"
+    assert train_cfg.fused_adamw is False
+    assert train_cfg.val_num_workers == 0
 
 
 def test_rwkv_requires_pretrained_checkpoint_or_explicit_random():
@@ -167,6 +184,8 @@ def test_sweep_id_changes_with_scientific_configuration():
     base = _sweep_args()
     changed_ffn = _sweep_args(intermediate_size=3072)
     changed_seeds = _sweep_args(seeds=[42, 99])
+    changed_precision = _sweep_args(precision="bf16")
 
     assert compute_sweep_id(base) != compute_sweep_id(changed_ffn)
     assert compute_sweep_id(base) != compute_sweep_id(changed_seeds)
+    assert compute_sweep_id(base) != compute_sweep_id(changed_precision)
