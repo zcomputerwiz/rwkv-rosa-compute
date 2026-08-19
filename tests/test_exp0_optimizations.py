@@ -153,13 +153,11 @@ def test_loss_and_answer_projection_match_full_logits():
         answer_positions,
     ]
     # The answer-only projection uses a smaller GEMM than the full-vocabulary
-    # projection, so different BLAS kernels may differ by a few FP32 ulps.
-    torch.testing.assert_close(
-        answer_logits,
-        expected_answers,
-        rtol=1e-6,
-        atol=1e-7,
-    )
+    # projection. Different BLAS kernels can differ by a handful of FP32 ulps,
+    # especially for values near zero. Bound the absolute numerical error and
+    # require the evaluated class decision to remain exactly identical.
+    max_abs_error = (answer_logits - expected_answers).abs().max().item()
+    assert max_abs_error < 1e-6
     assert torch.equal(
         answer_logits.argmax(dim=-1),
         expected_answers.argmax(dim=-1),
