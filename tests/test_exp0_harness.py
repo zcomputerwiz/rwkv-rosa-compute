@@ -1,34 +1,50 @@
-"""Unit tests for Milestone 3: Training and evaluation harness."""
+"""Tests for the Experiment 0 training, runner, and reporting harness."""
 
+import json
 import random
-from unittest.mock import mock_open, patch
+import sys
+from unittest.mock import patch
 
 import pytest
 
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
 from exp0.dataset import Task3SumDataset, build_default_vocab, pad_collate_fn
-from exp0.evaluate import compile_experiment_report, compute_run_id
+from exp0.evaluate import (
+    canonical_run_config,
+    compile_experiment_report,
+    compute_run_id,
+)
 from exp0.task3sum import generate_instance
+from exp0.train import create_model
+from scripts import run_experiment
 
 
-@pytest.mark.exp0
 def test_evaluation_readout_is_supervised():
-    """Assert that the evaluated logits position corresponds to the ANS token and is non-masked (-100)."""
+    """The evaluated ANS position must also be supervised by the training loss."""
     rng = random.Random(42)
     length, dimension = 6, 3
-    instances = [generate_instance(length=length, dimension=dimension, rng=rng) for _ in range(2)]
+    instances = [
+        generate_instance(length=length, dimension=dimension, rng=rng)
+        for _ in range(2)
+    ]
 
     vocab = build_default_vocab(length=length, dimension=dimension)
     ans_token_id = vocab.token2id["ANS"]
     ans_true_id = vocab.token2id["True"]
     ans_false_id = vocab.token2id["False"]
 
-    dataset = Task3SumDataset(instances, format_type="filler", num_filler=10, vocab=vocab, seed=42)
+    dataset = Task3SumDataset(
+        instances,
+        format_type="filler",
+        num_filler=10,
+        vocab=vocab,
+        seed=42,
+    )
     sample = dataset[0]
 
     targets = sample["targets"]
     ans_positions = (targets == ans_token_id).nonzero(as_tuple=True)[0]
-    assert len(ans_positions) == 1, "ANS token must exist exactly once in target sequence"
+    assert len(ans_positions) == 1
     ans_pos = ans_positions[0].item()
 
     assert ans_pos + 1 < len(targets)
@@ -36,97 +52,129 @@ def test_evaluation_readout_is_supervised():
     assert answer_label_token in (ans_true_id, ans_false_id)
 
     batch = pad_collate_fn([sample])
-    loss_mask = batch["loss_mask"]
-    shift_targets = loss_mask[:, 1:]
+    shift_targets = batch["loss_mask"][:, 1:]
     supervised_target = shift_targets[0, ans_pos].item()
 
-    assert supervised_target != -100, "Evaluated ANS position must be supervised in training loss"
+    assert supervised_target != -100
     assert supervised_target == answer_label_token
 
 
-@pytest.mark.exp0
-@patch("exp0.train.train_model")
-def test_train_loop_end_to_end_cpu(mock_train_model):
-    mock_history = {
-        "epoch_train_losses": [0.5],
-        "epoch_filler_accuracies": [0.8],
-        "epoch_cot_accuracies": [0.7],
-        "best_filler_accuracy": 0.8,
-        "best_cot_accuracy": 0.7,
-        "best_val_accuracy": 0.8,
-        "epochs_trained": 1,
-        "epoch_seconds": [1.0],
-        "total_train_seconds": 1.0,
-        "data_wait_seconds": 0.1,
-        "samples_per_second": 10.0,
-    }
-    mock_train_model.return_value = (None, mock_history)
+def test_runner_training_wiring_uses_real_train_signature(tmp_path, monkeypatch):
+    """Exercise the real runner -> train_model API seam without doing training."""
+    from exp0.train import train_model as real_train_model
 
-    rng = random.Random(42)
-    length = 6
-    dimension = 3
-    num_samples = 20
-    val_samples = 10
+    argv = [
+        "run_experiment.py",
+        "--architecture",
+        "llama",
+        "--hidden_size",
+        "16",
+        "--num_hidden_layers",
+        "1",
+        "--num_attention_heads",
+        "1",
+        "--intermediate_size",
+        "32",
+        "--length",
+        "4",
+        "--dimension",
+        "2",
+        "--num_samples",
+        "2",
+        "--val_samples",
+        "2",
+        "--epochs",
+        "0",
+        "--seeds",
+        "42",
+        "--format_type",
+        "filler",
+        "--out_dir",
+        str(tmp_path),
+        "--device",
+        "cpu",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
 
-    train_instances = [generate_instance(length=length, dimension=dimension, rng=rng) for _ in range(num_samples)]
-    val_instances = [generate_instance(length=length, dimension=dimension, rng=rng) for _ in range(val_samples)]
+    with patch(
+        "scripts.run_experiment.train_model",
+        wraps=real_train_model,
+    ) as train_spy:
+        run_experiment.main()
 
-    vocab = build_default_vocab(length=length, dimension=dimension)
+    train_spy.assert_called_once()
+    kwargs = train_spy.call_args.kwargs
+    assert kwargs["filler_val_dataset"] is not None
+    assert kwargs["cot_val_dataset"] is not None
+    assert len(kwargs["filler_val_dataset"]) == 2
+    assert len(kwargs["cot_val_dataset"]) == 2
 
-    train_ds = Task3SumDataset(train_instances, format_type="filler", num_filler=10, vocab=vocab, seed=42)
-    filler_val_ds = Task3SumDataset(val_instances, format_type="filler", num_filler=10, vocab=vocab, seed=42)
-    cot_val_ds = Task3SumDataset(val_instances, format_type="parallel_cot", num_filler=10, vocab=vocab, seed=42)
+    reports = list(tmp_path.glob("*.json"))
+    assert len(reports) == 1
+    with open(reports[0], encoding="utf-8") as f:
+        report = json.load(f)
+    assert report["initialization"]["mode"] == "random"
 
+
+def test_create_model_honors_rwkv_head_dim():
     model_cfg = ModelConfig(
-        architecture="llama",
-        hidden_size=64,
+        architecture="rwkv",
+        init_mode="random",
+        hidden_size=128,
         num_hidden_layers=1,
-        num_attention_heads=2,
-        intermediate_size=128,
+        num_attention_heads=4,
+        intermediate_size=256,
+        head_dim=32,
         device="cpu",
     )
 
-    train_cfg = TrainConfig(
-        seed=42,
-        batch_size=8,
-        learning_rate=1e-3,
-        epochs=1,
-    )
+    model = create_model(model_cfg, d_input=32)
 
-    task_cfg = Task3SumConfig(
-        length=length,
-        dimension=dimension,
-        num_filler=10,
-        num_samples=num_samples,
-    )
-
-    model, history = mock_train_model(model_cfg, train_cfg, task_cfg, train_ds, filler_val_dataset=filler_val_ds, cot_val_dataset=cot_val_ds)
-
-    assert "best_filler_accuracy" in history
-    assert "best_cot_accuracy" in history
-    assert len(history["epoch_filler_accuracies"]) == 1
+    time_mix = model.backbone.layers[0].time_mix
+    assert time_mix.head_dim == 32
+    assert time_mix.num_heads == 4
 
 
+def _per_seed_results():
+    return [
+        {
+            "seed": 42,
+            "task_seed": 42,
+            "training_seed": 42,
+            "best_filler_accuracy": 0.8,
+            "best_cot_accuracy": 0.7,
+            "best_val_accuracy": 0.8,
+        },
+        {
+            "seed": 43,
+            "task_seed": 43,
+            "training_seed": 43,
+            "best_filler_accuracy": 0.9,
+            "best_cot_accuracy": 0.8,
+            "best_val_accuracy": 0.9,
+        },
+        {
+            "seed": 44,
+            "task_seed": 44,
+            "training_seed": 44,
+            "best_filler_accuracy": 0.85,
+            "best_cot_accuracy": 0.75,
+            "best_val_accuracy": 0.85,
+        },
+    ]
 
-@pytest.mark.exp0
+
 def test_compile_experiment_report():
     model_cfg = ModelConfig()
     train_cfg = TrainConfig()
     task_cfg = Task3SumConfig()
-
-    per_seed_results = [
-        {"seed": 42, "task_seed": 42, "training_seed": 42, "best_filler_accuracy": 0.8, "best_cot_accuracy": 0.7, "best_val_accuracy": 0.8},
-        {"seed": 43, "task_seed": 43, "training_seed": 43, "best_filler_accuracy": 0.9, "best_cot_accuracy": 0.8, "best_val_accuracy": 0.9},
-        {"seed": 44, "task_seed": 44, "training_seed": 44, "best_filler_accuracy": 0.85, "best_cot_accuracy": 0.75, "best_val_accuracy": 0.85},
-    ]
-
     realized_counts = {"parallel_cot": 50, "filler": 50}
 
     report = compile_experiment_report(
         model_cfg,
         train_cfg,
         task_cfg,
-        per_seed_results,
+        _per_seed_results(),
         majority_class_baseline=0.5,
         realized_mixture_counts=realized_counts,
         eval_seed=123,
@@ -143,18 +191,24 @@ def test_compile_experiment_report():
     assert report["eval_seed"] == 123
     assert report["val_samples"] == 500
     assert report["seeds_run"] == [42, 43, 44]
+    assert report["run_config"]["evaluation"]["seeds_run"] == [42, 43, 44]
 
 
-@pytest.mark.exp0
 def test_compile_experiment_report_provenance():
     model_cfg = ModelConfig()
     train_cfg = TrainConfig(seed=111)
     task_cfg = Task3SumConfig(seed=222)
+    per_seed_results = _per_seed_results()[:2]
 
-    per_seed_results = [
-        {"seed": 42, "task_seed": 42, "training_seed": 42, "best_filler_accuracy": 0.8},
-        {"seed": 43, "task_seed": 43, "training_seed": 43, "best_filler_accuracy": 0.9},
-    ]
+    initialization = {
+        "mode": "pretrained",
+        "pretrained_scope": "backbone_only",
+        "checkpoint_path": "/models/rwkv.pth",
+        "checkpoint_sha256": "a" * 64,
+        "strict_backbone_load": True,
+    }
+    for result in per_seed_results:
+        result["initialization"] = initialization
 
     report = compile_experiment_report(
         model_cfg,
@@ -167,99 +221,121 @@ def test_compile_experiment_report_provenance():
         val_samples=500,
     )
 
-    # Top-level seeds should be removed
     assert "seed" not in report["task_config"]
     assert "seed" not in report["training_protocol"]
-
-    # Per-seed details should preserve them
     assert report["per_seed_details"][0]["seed"] == 42
     assert report["per_seed_details"][0]["task_seed"] == 42
     assert report["per_seed_details"][0]["training_seed"] == 42
+    assert report["initialization"] == initialization
+    assert len(report["run_id"]) == 16
 
-    # run_id must be present
-    assert "run_id" in report
 
-
-@pytest.mark.exp0
-def test_compute_run_id_deterministic():
+def test_compute_run_id_covers_full_model_configuration():
     model_cfg = ModelConfig(architecture="llama")
     train_cfg = TrainConfig(batch_size=32)
     task_cfg = Task3SumConfig(length=10)
 
-    id1 = compute_run_id(model_cfg, train_cfg, task_cfg, eval_seed=123, val_samples=1000, seeds_run=[1, 2, 3])
-    id2 = compute_run_id(model_cfg, train_cfg, task_cfg, eval_seed=123, val_samples=1000, seeds_run=[3, 2, 1])
+    run_id = compute_run_id(
+        model_cfg,
+        train_cfg,
+        task_cfg,
+        eval_seed=123,
+        val_samples=1000,
+        seeds_run=[1, 2, 3],
+    )
+    reordered = compute_run_id(
+        model_cfg,
+        train_cfg,
+        task_cfg,
+        eval_seed=123,
+        val_samples=1000,
+        seeds_run=[3, 2, 1],
+    )
+    assert run_id == reordered
 
-    # Same config and same seeds (different order) should yield same run_id
-    assert id1 == id2
+    changed_ffn = ModelConfig(architecture="llama", intermediate_size=3072)
+    assert run_id != compute_run_id(
+        changed_ffn,
+        train_cfg,
+        task_cfg,
+        eval_seed=123,
+        val_samples=1000,
+        seeds_run=[1, 2, 3],
+    )
 
-    # Change a scientifically relevant variable
-    task_cfg.length = 12
-    id3 = compute_run_id(model_cfg, train_cfg, task_cfg, eval_seed=123, val_samples=1000, seeds_run=[1, 2, 3])
+    changed_head_dim = ModelConfig(architecture="llama", head_dim=32)
+    assert run_id != compute_run_id(
+        changed_head_dim,
+        train_cfg,
+        task_cfg,
+        eval_seed=123,
+        val_samples=1000,
+        seeds_run=[1, 2, 3],
+    )
 
-    assert id1 != id3
+    pretrained = ModelConfig(
+        architecture="rwkv",
+        init_mode="pretrained",
+        rwkv_checkpoint="/machine/a/model.pth",
+        rwkv_checkpoint_sha256="b" * 64,
+    )
+    same_checkpoint_elsewhere = ModelConfig(
+        architecture="rwkv",
+        init_mode="pretrained",
+        rwkv_checkpoint="/machine/b/model.pth",
+        rwkv_checkpoint_sha256="b" * 64,
+    )
+    assert compute_run_id(
+        pretrained,
+        train_cfg,
+        task_cfg,
+        123,
+        1000,
+        [1],
+    ) == compute_run_id(
+        same_checkpoint_elsewhere,
+        train_cfg,
+        task_cfg,
+        123,
+        1000,
+        [1],
+    )
 
 
-@patch("scripts.run_experiment.compute_run_id")
-@patch("scripts.run_experiment.build_configs")
-@patch("scripts.run_experiment.get_parser")
-@patch("pathlib.Path.exists")
-@patch("builtins.open", new_callable=mock_open, read_data='{"run_id": "match_123"}')
-def test_run_experiment_skip_existing(mock_file, mock_exists, mock_parser, mock_build, mock_compute, capsys):
-    import argparse
+def test_canonical_run_config_is_stored_without_checkpoint_path():
+    model_cfg = ModelConfig(
+        architecture="rwkv",
+        init_mode="pretrained",
+        rwkv_checkpoint="/machine/model.pth",
+        rwkv_checkpoint_sha256="c" * 64,
+    )
+    config = canonical_run_config(
+        model_cfg,
+        TrainConfig(),
+        Task3SumConfig(),
+        9999,
+        2000,
+        [42],
+    )
 
-    from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
-    from scripts.run_experiment import main
+    assert "rwkv_checkpoint" not in config["model"]
+    assert config["model"]["rwkv_checkpoint_sha256"] == "c" * 64
 
-    mock_exists.return_value = True
-    mock_compute.return_value = "match_123"
 
-    mock_parser_obj = argparse.ArgumentParser()
-    mock_parser_obj.add_argument("--architecture", default="llama")
-    mock_parser_obj.add_argument("--out_dir", default="results")
-    mock_parser_obj.add_argument("--length", default=10)
-    mock_parser_obj.add_argument("--format_type", default="filler")
-    mock_parser_obj.add_argument("--eval_seed", default=99)
-    mock_parser_obj.add_argument("--val_samples", default=100)
-    mock_parser_obj.add_argument("--seeds", default=[1])
-    mock_parser.return_value = mock_parser_obj
+def test_existing_report_skip_requires_full_config_match(tmp_path, capsys):
+    report_path = tmp_path / "report.json"
+    current_config = {"model": {"hidden_size": 384}, "evaluation": {"seed": 1}}
+    report_path.write_text(
+        json.dumps({"run_id": "collision", "run_config": current_config}),
+        encoding="utf-8",
+    )
 
-    mock_build.return_value = (Task3SumConfig(num_filler=5), ModelConfig(), TrainConfig())
-
-    with patch("sys.argv", ["run_experiment.py", "--architecture", "llama"]):
-        main()
-
+    assert run_experiment._check_existing_report(report_path, current_config)
     captured = capsys.readouterr()
-    assert "already exists and matches run_id match_123. Skipping run." in captured.out
+    assert "full run_config matches" in captured.out
 
-
-@patch("scripts.run_experiment.compute_run_id")
-@patch("scripts.run_experiment.build_configs")
-@patch("scripts.run_experiment.get_parser")
-@patch("pathlib.Path.exists")
-@patch("builtins.open", new_callable=mock_open, read_data='{"run_id": "old_123"}')
-def test_run_experiment_fail_mismatch(mock_file, mock_exists, mock_parser, mock_build, mock_compute):
-    import argparse
-
-    import pytest
-
-    from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
-    from scripts.run_experiment import main
-
-    mock_exists.return_value = True
-    mock_compute.return_value = "new_123"
-
-    mock_parser_obj = argparse.ArgumentParser()
-    mock_parser_obj.add_argument("--architecture", default="llama")
-    mock_parser_obj.add_argument("--out_dir", default="results")
-    mock_parser_obj.add_argument("--length", default=10)
-    mock_parser_obj.add_argument("--format_type", default="filler")
-    mock_parser_obj.add_argument("--eval_seed", default=99)
-    mock_parser_obj.add_argument("--val_samples", default=100)
-    mock_parser_obj.add_argument("--seeds", default=[1])
-    mock_parser.return_value = mock_parser_obj
-
-    mock_build.return_value = (Task3SumConfig(num_filler=5), ModelConfig(), TrainConfig())
-
-    with patch("sys.argv", ["run_experiment.py", "--architecture", "llama"]):
-        with pytest.raises(ValueError, match="exists but run_id does not match"):
-            main()
+    with pytest.raises(ValueError, match="full run_config does not match"):
+        run_experiment._check_existing_report(
+            report_path,
+            {"model": {"hidden_size": 768}, "evaluation": {"seed": 1}},
+        )
