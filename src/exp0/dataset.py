@@ -4,6 +4,7 @@ import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence
 
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 
@@ -158,10 +159,12 @@ def generate_packed_instances(
     mod: int = 10,
     rng: Optional[random.Random] = None,
 ) -> PackedInstances:
-    """Generate instances directly into compact tensor storage.
+    """Generate instances directly into compact shared tensor storage.
 
     Generation consumes the same RNG stream, in the same order, as repeatedly
     calling :func:`generate_instance`; only the retained representation changes.
+    NumPy buffers are filled in-place and wrapped once with ``torch.from_numpy``
+    to avoid one tiny Tensor allocation per generated sample.
     """
     if num_samples < 0:
         raise ValueError("num_samples must be non-negative.")
@@ -170,9 +173,9 @@ def generate_packed_instances(
     if rng is None:
         rng = random.Random()
 
-    tuples = torch.empty((num_samples, length, dimension), dtype=torch.uint8)
-    has_3sum = torch.empty(num_samples, dtype=torch.bool)
-    matching_indices = torch.full((num_samples, 3), -1, dtype=torch.int16)
+    tuple_array = np.empty((num_samples, length, dimension), dtype=np.uint8)
+    label_array = np.empty(num_samples, dtype=np.bool_)
+    match_array = np.full((num_samples, 3), -1, dtype=np.int16)
 
     for idx in range(num_samples):
         instance = generate_instance(
@@ -181,17 +184,15 @@ def generate_packed_instances(
             mod=mod,
             rng=rng,
         )
-        tuples[idx].copy_(torch.tensor(instance.tuples, dtype=torch.uint8))
-        has_3sum[idx] = instance.has_3sum
+        tuple_array[idx] = instance.tuples
+        label_array[idx] = instance.has_3sum
         if instance.matching_indices is not None:
-            matching_indices[idx].copy_(
-                torch.tensor(instance.matching_indices, dtype=torch.int16)
-            )
+            match_array[idx] = instance.matching_indices
 
     return PackedInstances(
-        tuples=tuples,
-        has_3sum=has_3sum,
-        matching_indices=matching_indices,
+        tuples=torch.from_numpy(tuple_array),
+        has_3sum=torch.from_numpy(label_array),
+        matching_indices=torch.from_numpy(match_array),
     )
 
 
@@ -263,12 +264,10 @@ class Task3SumDataset(Dataset):
         if format_type is not None and format_type not in _FORMAT_TO_CODE:
             raise ValueError(f"Unknown format type: {format_type}")
 
-        self._format_codes = torch.empty(len(instances), dtype=torch.uint8)
         self.realized_counts: Dict[str, int] = {name: 0 for name in _FORMATS}
-
         if format_type is not None:
             code = _FORMAT_TO_CODE[format_type]
-            self._format_codes.fill_(code)
+            format_array = np.full(len(instances), code, dtype=np.uint8)
             self.realized_counts[format_type] = len(instances)
         else:
             rng = random.Random(seed)
@@ -285,10 +284,13 @@ class Task3SumDataset(Dataset):
                 total_weight = 1.0
             norm_weights = [weight / total_weight for weight in weights]
 
+            format_array = np.empty(len(instances), dtype=np.uint8)
             for idx in range(len(instances)):
                 chosen = rng.choices(_FORMATS, weights=norm_weights, k=1)[0]
-                self._format_codes[idx] = _FORMAT_TO_CODE[chosen]
+                format_array[idx] = _FORMAT_TO_CODE[chosen]
                 self.realized_counts[chosen] += 1
+
+        self._format_codes = torch.from_numpy(format_array)
 
     def __len__(self) -> int:
         return len(self.instances)
