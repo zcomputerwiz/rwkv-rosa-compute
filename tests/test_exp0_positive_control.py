@@ -23,7 +23,7 @@ from scripts.run_experiment import build_configs, get_parser
 pytestmark = pytest.mark.exp0
 
 
-def test_rope_matches_manual_pair_rotation_and_is_position_sensitive():
+def test_rope_matches_llama_split_half_rotation_and_is_position_sensitive():
     rotary = RotaryEmbedding(head_dim=4, base=10000.0)
     base = torch.tensor([1.0, 2.0, 3.0, 4.0])
     q = base.view(1, 1, 1, 4).expand(1, 1, 2, 4).clone()
@@ -36,12 +36,12 @@ def test_rope_matches_manual_pair_rotation_and_is_position_sensitive():
 
     angle0 = torch.tensor(1.0)
     angle1 = torch.tensor(0.01)
-    expected_pos1 = torch.tensor(
+    expected_pos1 = torch.stack(
         [
-            1.0 * torch.cos(angle0) - 2.0 * torch.sin(angle0),
-            1.0 * torch.sin(angle0) + 2.0 * torch.cos(angle0),
-            3.0 * torch.cos(angle1) - 4.0 * torch.sin(angle1),
-            3.0 * torch.sin(angle1) + 4.0 * torch.cos(angle1),
+            1.0 * torch.cos(angle0) - 3.0 * torch.sin(angle0),
+            2.0 * torch.cos(angle1) - 4.0 * torch.sin(angle1),
+            3.0 * torch.cos(angle0) + 1.0 * torch.sin(angle0),
+            4.0 * torch.cos(angle1) + 2.0 * torch.sin(angle1),
         ]
     )
     torch.testing.assert_close(q_rot[0, 0, 1], expected_pos1)
@@ -67,6 +67,11 @@ def test_runner_retains_paper_n_squared_filler_budget():
     assert task_cfg.num_filler == 36
     assert task_cfg.include_separator_token is True
     assert model_cfg.llama_rope_theta == 10000.0
+
+
+def test_separator_dropping_protocol_is_rejected():
+    with pytest.raises(ValueError, match="requires the supervised continuation separator"):
+        Task3SumConfig(include_separator_token=False)
 
 
 def test_dataset_keeps_separator_and_marks_cot_semantics():
