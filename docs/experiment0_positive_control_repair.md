@@ -20,12 +20,15 @@ The paper and the authors' public `JacobPfau/fillerTokens` implementation establ
 
 1. The positive control uses a scaled-down randomly initialized Llama transformer with 4 layers, hidden size 384 and 6 attention heads.
 2. Tuple inputs contain hard-coded multi-hot digit and position features.
-3. The transformer itself also receives normal positional information; the paper explicitly notes additional positional information in the input/CoT stream.
+3. The transformer also receives normal Llama positional information.
 4. A boundary token (`P` in the authors' code) separates the multi-hot input vectors from the supervised continuation.
-5. Filler runs use `n^2` repeated filler tokens. This budget is retained exactly.
-6. Parallel CoT vocabulary reduction randomly chooses one summand-position token and one coordinate digit, so exact token accuracy has an intentional stochastic ceiling.
-7. The authors' evaluator separates intermediate CoT positional-token accuracy, matched-index accuracy and sum-token accuracy. Final answer accuracy on a supplied ground-truth CoT is not by itself a measure of independent 3SUM computation.
-8. Full published training uses 10,000,000 training samples, 2,000 validation samples, five epochs for filler/CoT and 25 epochs for immediate-answer runs.
+5. The authors wrap the Hugging Face Llama in one shared `nn.Linear` input adapter. Reduced CoT tuple-index and digit features reuse feature coordinates also used by the original tuple inputs.
+6. The Llama configuration uses `initializer_range = 0.02`; the custom input adapter is constructed afterward and retains `nn.Linear`'s default initialization.
+7. Filler runs use `n^2` repeated filler tokens. This budget is retained exactly.
+8. Parallel CoT vocabulary reduction randomly chooses one summand-position token and one coordinate digit, so exact token accuracy has an intentional stochastic ceiling.
+9. The authors' evaluator separates intermediate CoT positional-token accuracy, matched-index accuracy and sum-token accuracy. Final answer accuracy on a supplied ground-truth CoT is not by itself a measure of independent 3SUM computation.
+10. Their Match-3 training runner uses AdamW with betas `(0.9, 0.95)` and a 5% linear warmup followed by linear decay toward zero.
+11. Full published training uses 10,000,000 training samples, 2,000 validation samples, five epochs for filler/CoT and 25 epochs for immediate-answer runs.
 
 Primary references:
 
@@ -34,7 +37,7 @@ Primary references:
 
 ## Phase 1 — Restore Llama positional information
 
-Implement standard Llama-style rotary position encoding (RoPE) on attention Q/K projections.
+Implement standard Hugging Face Llama split-half rotary position encoding (RoPE) on attention Q/K projections.
 
 Requirements:
 
@@ -42,7 +45,7 @@ Requirements:
 - preserve causal SDPA;
 - keep RoPE base (`theta`) in `ModelConfig` so it participates in run identity;
 - reject invalid odd attention head dimensions;
-- add an independent pair-rotation regression and a position-sensitivity regression.
+- add an independent split-half rotation regression and a position-sensitivity regression.
 
 The previous positionless transformer should no longer be considered a valid 0A positive-control implementation.
 
@@ -65,9 +68,67 @@ Consequences:
 - the first intermediate token now participates in next-token supervision;
 - all CoT diagnostic slots have an actual preceding target-stream state;
 - `ANS` evaluation remains unchanged semantically;
-- the protocol choice is recorded as `Task3SumConfig.include_separator_token` and therefore changes deterministic run identity.
+- the protocol is recorded as `Task3SumConfig.include_separator_token = true` and the old separator-dropping mode is rejected.
 
-## Phase 3 — Replace the misleading CoT diagnostic
+## Phase 3 — Restore shared Match-3 input features
+
+The pre-repair wrapper used:
+
+```text
+tuple multi-hot -> tuple_proj
+continuation id -> unrelated target_embed
+```
+
+This breaks an important transfer path in the authors' implementation. Their vector dataset feeds both problem vectors and continuation vectors through one input `nn.Linear`, and reduced CoT indices/digits reuse the corresponding tuple-position/digit feature columns.
+
+The repaired seam uses one shared `input_proj`:
+
+```text
+tuple digit / position feature ─┐
+                               ├─ same input_proj column -> hidden state
+corresponding CoT digit / label ┘
+```
+
+Special tokens without a tuple-feature analogue receive dedicated input-feature columns.
+
+The efficient implementation does not materialize large target one-hot tensors. A continuation token maps to a feature-column index and obtains the corresponding column of `input_proj.weight`, plus the shared linear bias. This is algebraically identical to applying the linear layer to a one-hot feature vector.
+
+The repaired shared-feature protocol is required and participates in model provenance/run identity.
+
+### Initialization fidelity
+
+For Llama 0A:
+
+```text
+Llama backbone Linear weights  ~ Normal(0, 0.02)
+output classifier head          ~ Normal(0, 0.02)
+shared Match-3 input_proj       PyTorch nn.Linear default initialization
+RMSNorm weights                 ones
+```
+
+This mirrors the authors' construction order: Hugging Face initializes the Llama model using `initializer_range=0.02`, then their `InputEmbedCausalTransformer` creates the custom input linear separately.
+
+RWKV backbone checkpoint loading remains unchanged; Experiment 0's shared synthetic-task input interface stays randomly initialized.
+
+## Phase 4 — Match the positive-control optimizer schedule
+
+Use the authors' Match-3 optimizer defaults:
+
+```text
+optimizer       AdamW
+beta1           0.9
+beta2           0.95
+base LR         1e-4 unless explicitly overridden
+warmup          first 5% of optimizer steps
+schedule        linear warmup, then linear decay toward zero
+weight decay    existing protocol value
+```
+
+The implementation keeps the schedule defined for tiny CI runs by using at least one warmup step.
+
+These settings are explicit fields of `TrainConfig`, enter deterministic run identity, and are reported with each seed's history. Precision remains an independent recorded knob; the repository does not silently force FP16 simply because the source runner used mixed precision.
+
+## Phase 5 — Replace the misleading CoT diagnostic
 
 The old metric named `cot_accuracy` measured:
 
@@ -81,7 +142,7 @@ New reports retain this quantity only as:
 cot_answer_given_cot_accuracy
 ```
 
-and explicitly document that it is leakage-aware/non-causal evidence.
+and explicitly document that it is a leakage-aware diagnostic, not independent-computation evidence.
 
 The informative intermediate diagnostics are:
 
@@ -110,40 +171,45 @@ Semantic metrics accept any target that is computationally equivalent for the sa
 
 `cot_result_nll` measures teacher-forced negative log-likelihood over result slots only. It excludes pair-position tokens and the final answer.
 
-## Phase 4 — Add training-answer visibility
+## Phase 6 — Add training-fit visibility
 
-Record answer accuracy on the training batches during the existing forward pass:
+Record answer accuracy from each training batch's existing forward pass:
 
 ```text
-epoch_train_answer_accuracies
-best_train_answer_accuracy
+epoch_online_train_answer_accuracies
+best_online_train_answer_accuracy
 ```
 
 This adds no second model forward.
 
-The metric distinguishes two failure modes that training loss alone cannot separate:
+The word **online** is intentional. A batch is scored before its own optimizer update, so this is a low-overhead fit diagnostic rather than a frozen end-of-epoch pass over the entire training set.
+
+It still usefully distinguishes:
 
 ```text
-training answer remains near chance
-    → optimization / wiring / capacity issue
+online training answer remains near chance
+    → optimization / wiring / capacity concern
 
-training answer becomes high while validation remains chance
-    → generalization / sample-complexity issue
+online training answer becomes high while validation remains chance
+    → generalization / sample-complexity concern
 ```
 
-## Phase 5 — Add explicit apparatus gates
+## Phase 7 — Add explicit apparatus gates
 
 ### Gate A — structural/unit tests
 
 CPU CI must prove:
 
-- RoPE matches an independent pairwise rotation calculation;
+- RoPE matches an independent Hugging Face Llama split-half rotation calculation;
 - identical content at different positions receives different rotary transforms;
 - the default filler budget remains exactly `n^2`;
 - the separator is retained and supervised;
+- tuple positions/digits and corresponding CoT labels/digits reuse shared input-projection columns;
+- Llama backbone/head initialization follows the configured `0.02` range while the input adapter retains `nn.Linear` initialization;
+- the warmup/decay lambda matches the positive-control schedule;
 - every parallel-CoT diagnostic target belongs to its semantic-valid set;
 - a scripted model can score 100% on final answer-given-CoT while scoring 0% on result semantics, proving the diagnostic distinguishes leakage from computation;
-- RoPE/separator changes participate in deterministic run identity.
+- the repaired protocol fields participate in deterministic run identity.
 
 ### Gate B — tiny fixed-set overfit
 
@@ -152,8 +218,8 @@ A very small length-3/dimension-1 immediate dataset is trained and evaluated on 
 Expected result:
 
 ```text
-training answer accuracy >= 95%
-validation-on-same-set accuracy >= 95%
+best online training answer accuracy >= 95%
+validation-on-same-set accuracy         >= 95%
 ```
 
 Failure means the apparatus cannot even memorize a tiny fixed problem set and larger negative results are uninterpretable.
@@ -178,9 +244,9 @@ python scripts/run_experiment.py `
   --out_dir results/easy_generalization
 ```
 
-This is a runtime diagnostic rather than a fixed CI threshold because generalization depends on optimization scale and should remain visible as experimental evidence rather than becoming a fragile unit test.
+This is a runtime diagnostic rather than a fixed CI threshold because held-out generalization depends on optimization scale and should remain visible as experimental evidence rather than becoming a fragile unit test.
 
-## Phase 6 — Re-run the replication progressively
+## Phase 8 — Re-run the replication progressively
 
 Do not immediately jump to the published 10M-example run.
 
@@ -197,7 +263,7 @@ After Gates A-C are satisfactory, scale length-6/dimension-3 training geometrica
 At each scale inspect together:
 
 ```text
-training answer accuracy
+online training answer accuracy
 filler validation accuracy
 CoT pair/result generation diagnostics
 CoT result NLL
@@ -208,6 +274,6 @@ Only after the apparatus produces a credible positive-control learning curve sho
 
 ## Interpretation rule
 
-The pre-repair August 2026 Llama runs are diagnostic artifacts, not negative experimental results. They were executed with a positionless transformer and without a supervised continuation-boundary state, while the old CoT metric could saturate from the supplied CoT answer certificate.
+The pre-repair August 2026 Llama runs are diagnostic artifacts, not negative experimental results. They were executed with a positionless transformer, without the supervised continuation-boundary state, with separate tuple/token input representations that removed the source implementation's shared-feature transfer path, and under different optimizer dynamics. The old CoT metric could also saturate from the supplied CoT answer certificate.
 
 The repaired protocol intentionally preserves the paper's `n^2` filler budget and dense parallel-CoT supervision while making the intermediate computation measurable.
