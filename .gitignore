@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Model checkpoints and generated test fixtures — never commit binaries
+*.pt
+*.pth
+*.safetensors
+tests/fixtures/

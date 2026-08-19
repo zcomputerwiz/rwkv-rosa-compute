@@ -4,8 +4,9 @@
 import argparse
 import json
 import random
-import torch
 from pathlib import Path
+
+import torch
 
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
 from exp0.dataset import Task3SumDataset, build_default_vocab

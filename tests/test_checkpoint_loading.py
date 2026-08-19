@@ -13,6 +13,70 @@ from rosa_compute import (
 )
 
 
+def _get_expected_0_1b_schema() -> dict[str, tuple[int, ...]]:
+    schema: dict[str, tuple[int, ...]] = {
+        "emb.weight": (65536, 768),
+        "ln_out.weight": (768,),
+        "ln_out.bias": (768,),
+        "head.weight": (65536, 768),
+    }
+    for i in range(12):
+        if i == 0:
+            schema["blocks.0.ln0.weight"] = (768,)
+            schema["blocks.0.ln0.bias"] = (768,)
+        schema[f"blocks.{i}.ln2.weight"] = (768,)
+        schema[f"blocks.{i}.ln2.bias"] = (768,)
+        schema[f"blocks.{i}.ln3.weight"] = (768,)
+        schema[f"blocks.{i}.ln3.bias"] = (768,)
+        schema[f"blocks.{i}.rosa.x_q"] = (1, 1, 768)
+        schema[f"blocks.{i}.rosa.x_k"] = (1, 1, 768)
+        schema[f"blocks.{i}.rosa.x_v"] = (1, 1, 768)
+        schema[f"blocks.{i}.rosa.q.weight"] = (768, 768)
+        schema[f"blocks.{i}.rosa.q.bias"] = (768,)
+        schema[f"blocks.{i}.rosa.k.weight"] = (768, 768)
+        schema[f"blocks.{i}.rosa.k.bias"] = (768,)
+        schema[f"blocks.{i}.rosa.v.weight"] = (768, 768)
+        schema[f"blocks.{i}.rosa.v.bias"] = (768,)
+        schema[f"blocks.{i}.rosa.rosa_qkv.emb"] = (1, 1, 768)
+        schema[f"blocks.{i}.rosa.o.weight"] = (768, 768)
+        schema[f"blocks.{i}.rosa.o.bias"] = (768,)
+        schema[f"blocks.{i}.ffn.x_k"] = (1, 1, 768)
+        schema[f"blocks.{i}.ffn.key.weight"] = (3072, 768)
+        schema[f"blocks.{i}.ffn.value.weight"] = (768, 3072)
+    return schema
+
+
+def test_upstream_target_checkpoint_compatibility():
+    """Verifies that ROSAModelSkeleton at 0.1B scale produces the exact expected state dict schema.
+
+    Uses meta device for zero tensor allocation.
+    """
+    config = ROSAConfig(
+        n_layer=12,
+        n_embd=768,
+        vocab_size=65536,
+        rosa_groups=192,
+        dtype=torch.float16,
+    )
+    with torch.device("meta"):
+        model = ROSAModelSkeleton(config)
+
+    actual_schema = {k: tuple(v.shape) for k, v in model.state_dict().items()}
+    expected_schema = _get_expected_0_1b_schema()
+
+    missing_keys = set(expected_schema.keys()) - set(actual_schema.keys())
+    unexpected_keys = set(actual_schema.keys()) - set(expected_schema.keys())
+
+    assert len(missing_keys) == 0, f"Missing state dict keys: {missing_keys}"
+    assert len(unexpected_keys) == 0, f"Unexpected state dict keys: {unexpected_keys}"
+
+    for key, expected_shape in expected_schema.items():
+        actual_shape = actual_schema[key]
+        assert actual_shape == expected_shape, (
+            f"Shape mismatch for key {key}: expected {expected_shape}, got {actual_shape}"
+        )
+
+
 def test_checkpoint_validation_synthetic():
     config = ROSAConfig(n_layer=1, n_embd=16, vocab_size=100, rosa_groups=4)
     model = ROSAModelSkeleton(config)
@@ -93,7 +157,9 @@ def test_checkpoint_roundtrip_and_inspect():
 
         # Load back into new model instance
         new_model = ROSAModelSkeleton(config)
-        new_model.load_state_dict(state_dict)
+        res = new_model.load_state_dict(state_dict, strict=False)
+        assert len(res.missing_keys) == 0
+        assert len(res.unexpected_keys) == 0
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)

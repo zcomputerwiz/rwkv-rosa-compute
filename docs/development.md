@@ -17,5 +17,5 @@ CUDA kernels must reproduce the reference behavior; CUDA is an optimization, not
 
 ## 6. Testing & CI Strategy
 - **CPU Tests**: Executed via `python -m pytest -v` on GitHub Actions across supported Python versions (3.10, 3.11, 3.12).
-- **CUDA Tests**: Gated by `@pytest.mark.cuda`. Triggered on self-hosted GPU runners (`[self-hosted, linux, gpu]`).
+- **CUDA Tests**: Gated by `@pytest.mark.cuda`. Triggered on self-hosted GPU runners (`[self-hosted, linux, gpu]`). Note: Without an active self-hosted runner with these labels, dispatched runs will queue indefinitely until a runner connects.
 - **Code Linting**: Enforced via `ruff check .` with `external/` submodules excluded from local policy.

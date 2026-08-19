@@ -7,6 +7,12 @@ import torch.nn as nn
 _rosa_soft_path = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../../external/rosa_soft")
 )
+if not os.path.exists(_rosa_soft_path):
+    raise ImportError(
+        f"rosa_soft submodule path not found at {_rosa_soft_path}. "
+        "Please run 'git submodule update --init --recursive' to initialize submodules."
+    )
+
 if _rosa_soft_path not in sys.path:
     sys.path.insert(0, _rosa_soft_path)
 

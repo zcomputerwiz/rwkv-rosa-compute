@@ -8,9 +8,9 @@ from rosa_compute import (
 )
 
 
-def test_three_way_forward_equivalence_cpu():
-    """Verifies that BlinkDL reference and rosa_soft reference produce identical
-    signed ROSA outputs {-1.0, 0.0, +1.0} on CPU across various shapes up to C=768.
+def test_two_way_forward_equivalence_cpu():
+    """Verifies that BlinkDL reference and rosa_soft CPU reference produce identical
+    signed ROSA outputs {-1.0, 0.0, +1.0} across various shapes up to C=768.
     """
     test_shapes = [
         (1, 4, 16),
@@ -81,4 +81,6 @@ def test_embedding_double_application_regression():
     applied_once = apply_blinkdl_embedding(signed_rosa, emb)
     applied_twice = apply_blinkdl_embedding(applied_once, emb)
 
-    assert not torch.equal(applied_once, applied_twice)
+    # Assert numeric separation threshold rather than fragile inequality
+    diff = (applied_once - applied_twice).abs().max().item()
+    assert diff > 1.0, f"Expected double-application difference > 1.0, got {diff}"
