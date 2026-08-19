@@ -1,5 +1,5 @@
 """Training loop for Experiment 0 models."""
-
+import time
 import random
 from typing import Any, Dict, Tuple
 
@@ -141,9 +141,13 @@ def train_model(
     epoch_val_accuracies = []
     best_val_acc = 0.0
 
-    for _ in range(epochs):
+    epoch_times, data_wait = [], 0.0
+    for epoch in range(epochs):
+        t_epoch = time.perf_counter()
         model.train()
+        t_last = time.perf_counter()
         for batch in train_loader:
+            data_wait += time.perf_counter() - t_last
             input_tuples = batch["input_tuples"].to(device)
             targets = batch["targets"].to(device)
             loss_mask = batch["loss_mask"].to(device)
@@ -159,6 +163,9 @@ def train_model(
 
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
             optimizer.step()
+            t_last = time.perf_counter()
+
+        epoch_times.append(time.perf_counter() - t_epoch)
 
         val_acc = evaluate_accuracy(model, val_loader, device, ans_token_id, ans_true_id, ans_false_id)
         epoch_val_accuracies.append(val_acc)
@@ -170,6 +177,10 @@ def train_model(
         "epochs_trained": epochs,
         "weight_decay": weight_decay,
         "grad_clip": grad_clip,
+        "epoch_seconds": epoch_times,
+        "total_train_seconds": sum(epoch_times),
+        "data_wait_seconds": data_wait,
+        "samples_per_second": (len(train_dataset) * epochs) / sum(epoch_times),
     }
 
     return model, history
