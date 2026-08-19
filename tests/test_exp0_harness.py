@@ -43,6 +43,7 @@ def test_evaluation_readout_is_supervised():
     sample = dataset[0]
 
     targets = sample["targets"]
+    assert targets[0].item() == vocab.token2id[":"]
     ans_positions = (targets == ans_token_id).nonzero(as_tuple=True)[0]
     assert len(ans_positions) == 1
     ans_pos = ans_positions[0].item()
@@ -114,6 +115,12 @@ def test_runner_training_wiring_uses_real_train_signature(tmp_path, monkeypatch)
     with open(reports[0], encoding="utf-8") as f:
         report = json.load(f)
     assert report["initialization"]["mode"] == "random"
+    assert report["model"]["llama_rope_theta"] == 10000.0
+    assert report["model"]["llama_initializer_range"] == 0.02
+    assert report["model"]["match3_shared_input_features"] is True
+    assert report["task_config"]["include_separator_token"] is True
+    assert report["training_protocol"]["adam_beta2"] == 0.95
+    assert report["training_protocol"]["lr_schedule"] == "linear_warmup_decay"
 
 
 def test_create_model_honors_rwkv_head_dim_and_kernel():
@@ -154,32 +161,33 @@ def test_create_model_honors_rwkv_head_dim_and_kernel():
 
 
 def _per_seed_results():
-    return [
-        {
-            "seed": 42,
-            "task_seed": 42,
-            "training_seed": 42,
-            "best_filler_accuracy": 0.8,
-            "best_cot_accuracy": 0.7,
-            "best_val_accuracy": 0.8,
-        },
-        {
-            "seed": 43,
-            "task_seed": 43,
-            "training_seed": 43,
-            "best_filler_accuracy": 0.9,
-            "best_cot_accuracy": 0.8,
-            "best_val_accuracy": 0.9,
-        },
-        {
-            "seed": 44,
-            "task_seed": 44,
-            "training_seed": 44,
-            "best_filler_accuracy": 0.85,
-            "best_cot_accuracy": 0.75,
-            "best_val_accuracy": 0.85,
-        },
-    ]
+    results = []
+    for seed, filler, train_acc, cot_answer, semantic in [
+        (42, 0.8, 0.90, 1.0, 0.60),
+        (43, 0.9, 0.95, 1.0, 0.70),
+        (44, 0.85, 0.92, 1.0, 0.65),
+    ]:
+        results.append(
+            {
+                "seed": seed,
+                "task_seed": seed,
+                "training_seed": seed,
+                "best_filler_accuracy": filler,
+                "best_val_accuracy": filler,
+                "best_online_train_answer_accuracy": train_acc,
+                "best_cot_diagnostics": {
+                    "cot_answer_given_cot_accuracy": cot_answer,
+                    "cot_pair_position_token_accuracy": 0.45,
+                    "cot_pair_position_semantic_accuracy": 0.80,
+                    "cot_sum_token_accuracy": 0.35,
+                    "cot_sum_semantic_accuracy": semantic,
+                    "cot_match_index_accuracy": 0.75,
+                    "cot_result_semantic_accuracy": semantic,
+                    "cot_result_nll": 0.9,
+                },
+            }
+        )
+    return results
 
 
 def test_compile_experiment_report():
@@ -199,17 +207,31 @@ def test_compile_experiment_report():
         val_samples=500,
     )
 
-    assert report["metrics"]["filler_accuracy"] == pytest.approx(0.85)
-    assert report["metrics"]["cot_accuracy"] == pytest.approx(0.75)
-    assert report["metrics"]["mean_accuracy"] == pytest.approx(0.85)
-    assert report["metrics"]["min_accuracy"] == 0.8
-    assert report["metrics"]["max_accuracy"] == 0.9
+    metrics = report["metrics"]
+    assert metrics["filler_accuracy"] == pytest.approx(0.85)
+    assert metrics["best_online_training_answer_accuracy"] == pytest.approx(
+        0.9233333
+    )
+    assert metrics["cot_answer_given_cot_accuracy"] == 1.0
+    assert metrics["cot_result_semantic_accuracy"] == pytest.approx(0.65)
+    assert "cot_accuracy" not in metrics
+    assert metrics["mean_accuracy"] == pytest.approx(0.85)
+    assert metrics["min_accuracy"] == 0.8
+    assert metrics["max_accuracy"] == 0.9
     assert report["majority_class_baseline"] == 0.5
     assert report["realized_mixture_counts"] == realized_counts
     assert report["eval_seed"] == 123
     assert report["val_samples"] == 500
     assert report["seeds_run"] == [42, 43, 44]
     assert report["run_config"]["evaluation"]["seeds_run"] == [42, 43, 44]
+    assert report["run_config"]["task_config"]["include_separator_token"] is True
+    assert report["run_config"]["model"]["match3_shared_input_features"] is True
+    assert "online fit diagnostic" in report["metric_semantics"][
+        "best_online_training_answer_accuracy"
+    ]
+    assert "teacher-forced" in report["metric_semantics"][
+        "cot_answer_given_cot_accuracy"
+    ]
 
 
 def test_compile_experiment_report_provenance():
@@ -248,7 +270,7 @@ def test_compile_experiment_report_provenance():
     assert len(report["run_id"]) == 16
 
 
-def test_compute_run_id_covers_full_model_configuration():
+def test_compute_run_id_covers_full_model_and_protocol_configuration():
     model_cfg = ModelConfig(architecture="llama")
     train_cfg = TrainConfig(batch_size=32)
     task_cfg = Task3SumConfig(length=10)
@@ -273,22 +295,35 @@ def test_compute_run_id_covers_full_model_configuration():
 
     changed_ffn = ModelConfig(architecture="llama", intermediate_size=3072)
     assert run_id != compute_run_id(
-        changed_ffn,
-        train_cfg,
-        task_cfg,
-        eval_seed=123,
-        val_samples=1000,
-        seeds_run=[1, 2, 3],
+        changed_ffn, train_cfg, task_cfg, 123, 1000, [1, 2, 3]
     )
 
     changed_head_dim = ModelConfig(architecture="llama", head_dim=32)
     assert run_id != compute_run_id(
-        changed_head_dim,
-        train_cfg,
-        task_cfg,
-        eval_seed=123,
-        val_samples=1000,
-        seeds_run=[1, 2, 3],
+        changed_head_dim, train_cfg, task_cfg, 123, 1000, [1, 2, 3]
+    )
+
+    changed_rope = ModelConfig(architecture="llama", llama_rope_theta=500000.0)
+    assert run_id != compute_run_id(
+        changed_rope, train_cfg, task_cfg, 123, 1000, [1, 2, 3]
+    )
+
+    changed_init_range = ModelConfig(
+        architecture="llama",
+        llama_initializer_range=0.01,
+    )
+    assert run_id != compute_run_id(
+        changed_init_range, train_cfg, task_cfg, 123, 1000, [1, 2, 3]
+    )
+
+    changed_beta = TrainConfig(batch_size=32, adam_beta2=0.999)
+    assert run_id != compute_run_id(
+        model_cfg, changed_beta, task_cfg, 123, 1000, [1, 2, 3]
+    )
+
+    changed_schedule = TrainConfig(batch_size=32, lr_schedule="constant")
+    assert run_id != compute_run_id(
+        model_cfg, changed_schedule, task_cfg, 123, 1000, [1, 2, 3]
     )
 
     pretrained = ModelConfig(
@@ -304,19 +339,9 @@ def test_compute_run_id_covers_full_model_configuration():
         rwkv_checkpoint_sha256="b" * 64,
     )
     assert compute_run_id(
-        pretrained,
-        train_cfg,
-        task_cfg,
-        123,
-        1000,
-        [1],
+        pretrained, train_cfg, task_cfg, 123, 1000, [1]
     ) == compute_run_id(
-        same_checkpoint_elsewhere,
-        train_cfg,
-        task_cfg,
-        123,
-        1000,
-        [1],
+        same_checkpoint_elsewhere, train_cfg, task_cfg, 123, 1000, [1]
     )
 
     reference_rwkv = ModelConfig(
@@ -330,19 +355,9 @@ def test_compute_run_id_covers_full_model_configuration():
         rwkv_kernel="cuda",
     )
     assert compute_run_id(
-        reference_rwkv,
-        train_cfg,
-        task_cfg,
-        123,
-        1000,
-        [1],
+        reference_rwkv, train_cfg, task_cfg, 123, 1000, [1]
     ) != compute_run_id(
-        cuda_rwkv,
-        train_cfg,
-        task_cfg,
-        123,
-        1000,
-        [1],
+        cuda_rwkv, train_cfg, task_cfg, 123, 1000, [1]
     )
 
 

@@ -6,6 +6,7 @@ import pytest
 
 from scripts import run_experiment
 from scripts.sweep_n import build_runner_command, compute_sweep_id
+from scripts.sweep_n import get_parser as get_sweep_parser
 
 
 def _sweep_args(**overrides) -> argparse.Namespace:
@@ -79,6 +80,11 @@ def test_build_runner_command():
     assert "--lr" not in cmd
 
 
+def test_sweep_default_learning_rate_matches_positive_control():
+    args = get_sweep_parser().parse_args([])
+    assert args.learning_rate == pytest.approx(1e-4)
+
+
 def test_build_runner_command_forwards_checkpoint_and_kernel():
     args = _sweep_args(
         architecture="rwkv",
@@ -105,12 +111,14 @@ def test_llama_defaults_to_random_initialization():
     args = run_experiment.get_parser().parse_args(
         ["--architecture", "llama", "--device", "cpu"]
     )
-    _, model_cfg, train_cfg = run_experiment.build_configs(args)
+    task_cfg, model_cfg, train_cfg = run_experiment.build_configs(args)
 
     assert model_cfg.init_mode == "random"
     assert model_cfg.rwkv_checkpoint is None
     assert model_cfg.rwkv_checkpoint_sha256 is None
     assert model_cfg.rwkv_kernel == "reference"
+    assert model_cfg.llama_rope_theta == 10000.0
+    assert task_cfg.include_separator_token is True
     assert train_cfg.precision == "fp32"
     assert train_cfg.fused_adamw is False
     assert train_cfg.val_num_workers == 0

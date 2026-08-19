@@ -14,6 +14,7 @@ class Task3SumConfig:
     num_filler: Optional[int] = None
     true_rate: float = 0.5
     vocab_reduction: bool = True
+    include_separator_token: bool = True
     seed: int = 42
     num_samples: int = 10000
 
@@ -22,6 +23,11 @@ class Task3SumConfig:
             raise ValueError(
                 f"Modulus other than 10 is not supported in Experiment 0, "
                 f"got mod={self.mod}"
+            )
+        if not self.include_separator_token:
+            raise ValueError(
+                "Experiment 0 requires the supervised continuation separator. "
+                "The pre-repair separator-dropping protocol is not supported."
             )
 
 
@@ -39,6 +45,9 @@ class ModelConfig:
     num_attention_heads: int = 6
     intermediate_size: int = 1536
     head_dim: int = 64
+    llama_rope_theta: float = 10000.0
+    llama_initializer_range: float = 0.02
+    match3_shared_input_features: bool = True
     vocab_size: int = 256
     device: str = "cpu"
 
@@ -55,7 +64,19 @@ class ModelConfig:
         if self.architecture != "rwkv" and self.rwkv_kernel != "reference":
             raise ValueError("rwkv_kernel='cuda' is only valid for RWKV models.")
         if self.rwkv_kernel == "cuda" and self.head_dim != 64:
-            raise ValueError("The pinned RWKV-7 CUDA kernel currently requires head_dim=64.")
+            raise ValueError(
+                "The pinned RWKV-7 CUDA kernel currently requires head_dim=64."
+            )
+        if self.llama_rope_theta <= 0:
+            raise ValueError("llama_rope_theta must be greater than zero.")
+        if self.llama_initializer_range <= 0:
+            raise ValueError("llama_initializer_range must be greater than zero.")
+        if not self.match3_shared_input_features:
+            raise ValueError(
+                "Experiment 0 requires shared Match-3 tuple/CoT input features. "
+                "The pre-repair separate tuple/token embedding protocol is not "
+                "supported."
+            )
 
 
 @dataclass
@@ -72,6 +93,10 @@ class TrainConfig:
     epochs: int = 5
     weight_decay: float = 0.01
     grad_clip: float = 1.0
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.95
+    lr_schedule: str = "linear_warmup_decay"
+    warmup_fraction: float = 0.05
     precision: str = "fp32"
     fused_adamw: bool = False
     mixture: str = "parallel_cot_filler"
@@ -85,6 +110,15 @@ class TrainConfig:
             raise ValueError("DataLoader worker counts must be non-negative.")
         if self.prefetch_factor <= 0:
             raise ValueError("prefetch_factor must be greater than zero.")
+        if not 0.0 < self.adam_beta1 < 1.0 or not 0.0 < self.adam_beta2 < 1.0:
+            raise ValueError("Adam beta values must be strictly between zero and one.")
+        if self.lr_schedule not in {"constant", "linear_warmup_decay"}:
+            raise ValueError(
+                "lr_schedule must be one of: constant, linear_warmup_decay; "
+                f"got {self.lr_schedule!r}"
+            )
+        if not 0.0 <= self.warmup_fraction < 1.0:
+            raise ValueError("warmup_fraction must be in [0, 1).")
         if self.precision not in {"fp32", "bf16", "fp16"}:
             raise ValueError(
                 "precision must be one of: fp32, bf16, fp16; "

@@ -13,6 +13,7 @@ import torch
 sys.path.append(str(Path(__file__).parent.parent))
 
 import scripts.run_experiment as run_experiment
+from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
 from exp0.rwkv_checkpoint import sha256_file
 
 N_VALUES = [0, 1, 2, 4, 8, 16, 32]
@@ -98,6 +99,23 @@ def build_runner_command(
     return cmd
 
 
+def _fixed_positive_control_protocol() -> dict:
+    """Record non-CLI protocol defaults that still define sweep identity."""
+    model = ModelConfig()
+    train = TrainConfig()
+    task = Task3SumConfig()
+    return {
+        "llama_rope_theta": model.llama_rope_theta,
+        "llama_initializer_range": model.llama_initializer_range,
+        "match3_shared_input_features": model.match3_shared_input_features,
+        "include_separator_token": task.include_separator_token,
+        "adam_beta1": train.adam_beta1,
+        "adam_beta2": train.adam_beta2,
+        "lr_schedule": train.lr_schedule,
+        "warmup_fraction": train.warmup_fraction,
+    }
+
+
 def canonical_sweep_config(args: argparse.Namespace) -> dict:
     """Return a deterministic sweep identity excluding machine-specific paths."""
     config = vars(args).copy()
@@ -108,6 +126,7 @@ def canonical_sweep_config(args: argparse.Namespace) -> dict:
     )
     config["seeds"] = sorted(config["seeds"])
     config["n_values"] = N_VALUES
+    config["fixed_protocol"] = _fixed_positive_control_protocol()
     return config
 
 
@@ -175,7 +194,7 @@ def get_parser() -> argparse.ArgumentParser:
         default=True,
     )
     parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--learning_rate", type=float, default=3e-4)
+    parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--val_num_workers", type=int, default=0)
@@ -249,7 +268,22 @@ def main():
                 "report_path": str(summary_path),
                 "run_id": report.get("run_id"),
                 "filler_accuracy": metrics.get("filler_accuracy"),
-                "cot_accuracy": metrics.get("cot_accuracy"),
+                "online_training_answer_accuracy": metrics.get(
+                    "best_online_training_answer_accuracy"
+                ),
+                "cot_answer_given_cot_accuracy": metrics.get(
+                    "cot_answer_given_cot_accuracy"
+                ),
+                "cot_result_semantic_accuracy": metrics.get(
+                    "cot_result_semantic_accuracy"
+                ),
+                "cot_match_index_accuracy": metrics.get(
+                    "cot_match_index_accuracy"
+                ),
+                "cot_sum_semantic_accuracy": metrics.get(
+                    "cot_sum_semantic_accuracy"
+                ),
+                "cot_result_nll": metrics.get("cot_result_nll"),
             }
         )
 
