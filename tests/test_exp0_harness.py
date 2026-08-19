@@ -116,7 +116,11 @@ def test_runner_training_wiring_uses_real_train_signature(tmp_path, monkeypatch)
         report = json.load(f)
     assert report["initialization"]["mode"] == "random"
     assert report["model"]["llama_rope_theta"] == 10000.0
+    assert report["model"]["llama_initializer_range"] == 0.02
+    assert report["model"]["match3_shared_input_features"] is True
     assert report["task_config"]["include_separator_token"] is True
+    assert report["training_protocol"]["adam_beta2"] == 0.95
+    assert report["training_protocol"]["lr_schedule"] == "linear_warmup_decay"
 
 
 def test_create_model_honors_rwkv_head_dim_and_kernel():
@@ -170,7 +174,7 @@ def _per_seed_results():
                 "training_seed": seed,
                 "best_filler_accuracy": filler,
                 "best_val_accuracy": filler,
-                "best_train_answer_accuracy": train_acc,
+                "best_online_train_answer_accuracy": train_acc,
                 "best_cot_diagnostics": {
                     "cot_answer_given_cot_accuracy": cot_answer,
                     "cot_pair_position_token_accuracy": 0.45,
@@ -205,7 +209,9 @@ def test_compile_experiment_report():
 
     metrics = report["metrics"]
     assert metrics["filler_accuracy"] == pytest.approx(0.85)
-    assert metrics["best_training_answer_accuracy"] == pytest.approx(0.9233333)
+    assert metrics["best_online_training_answer_accuracy"] == pytest.approx(
+        0.9233333
+    )
     assert metrics["cot_answer_given_cot_accuracy"] == 1.0
     assert metrics["cot_result_semantic_accuracy"] == pytest.approx(0.65)
     assert "cot_accuracy" not in metrics
@@ -219,6 +225,10 @@ def test_compile_experiment_report():
     assert report["seeds_run"] == [42, 43, 44]
     assert report["run_config"]["evaluation"]["seeds_run"] == [42, 43, 44]
     assert report["run_config"]["task_config"]["include_separator_token"] is True
+    assert report["run_config"]["model"]["match3_shared_input_features"] is True
+    assert "online fit diagnostic" in report["metric_semantics"][
+        "best_online_training_answer_accuracy"
+    ]
     assert "teacher-forced" in report["metric_semantics"][
         "cot_answer_given_cot_accuracy"
     ]
@@ -296,6 +306,24 @@ def test_compute_run_id_covers_full_model_and_protocol_configuration():
     changed_rope = ModelConfig(architecture="llama", llama_rope_theta=500000.0)
     assert run_id != compute_run_id(
         changed_rope, train_cfg, task_cfg, 123, 1000, [1, 2, 3]
+    )
+
+    changed_init_range = ModelConfig(
+        architecture="llama",
+        llama_initializer_range=0.01,
+    )
+    assert run_id != compute_run_id(
+        changed_init_range, train_cfg, task_cfg, 123, 1000, [1, 2, 3]
+    )
+
+    changed_beta = TrainConfig(batch_size=32, adam_beta2=0.999)
+    assert run_id != compute_run_id(
+        model_cfg, changed_beta, task_cfg, 123, 1000, [1, 2, 3]
+    )
+
+    changed_schedule = TrainConfig(batch_size=32, lr_schedule="constant")
+    assert run_id != compute_run_id(
+        model_cfg, changed_schedule, task_cfg, 123, 1000, [1, 2, 3]
     )
 
     pretrained = ModelConfig(
