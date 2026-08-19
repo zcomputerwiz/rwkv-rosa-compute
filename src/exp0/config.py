@@ -3,6 +3,12 @@
 from dataclasses import dataclass
 from typing import Optional
 
+from exp0.task3sum import (
+    DEFAULT_CORRUPTION_RATE,
+    GENERATOR_MODES,
+    SOURCE_GENERATOR,
+)
+
 
 @dataclass
 class Task3SumConfig:
@@ -15,6 +21,8 @@ class Task3SumConfig:
     true_rate: float = 0.5
     vocab_reduction: bool = True
     include_separator_token: bool = True
+    generator_mode: str = SOURCE_GENERATOR
+    corruption_rate: float = DEFAULT_CORRUPTION_RATE
     seed: int = 42
     num_samples: int = 10000
 
@@ -29,6 +37,13 @@ class Task3SumConfig:
                 "Experiment 0 requires the supervised continuation separator. "
                 "The pre-repair separator-dropping protocol is not supported."
             )
+        if self.generator_mode not in GENERATOR_MODES:
+            raise ValueError(
+                f"generator_mode must be one of {GENERATOR_MODES}; "
+                f"got {self.generator_mode!r}"
+            )
+        if self.corruption_rate < 1.0:
+            raise ValueError("corruption_rate must be >= 1.0.")
 
 
 @dataclass
