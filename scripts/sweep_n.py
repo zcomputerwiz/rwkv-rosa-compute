@@ -28,6 +28,8 @@ def build_runner_command(
         "scripts/run_experiment.py",
         "--architecture",
         args.architecture,
+        "--rwkv_kernel",
+        args.rwkv_kernel,
     ]
     if args.init is not None:
         cmd.extend(["--init", args.init])
@@ -135,6 +137,12 @@ def get_parser() -> argparse.ArgumentParser:
         choices=["random", "pretrained"],
     )
     parser.add_argument("--rwkv_checkpoint", type=str, default=None)
+    parser.add_argument(
+        "--rwkv_kernel",
+        type=str,
+        default="reference",
+        choices=["reference", "cuda"],
+    )
     parser.add_argument("--hidden_size", type=int, default=384)
     parser.add_argument("--num_hidden_layers", type=int, default=4)
     parser.add_argument("--num_attention_heads", type=int, default=6)
