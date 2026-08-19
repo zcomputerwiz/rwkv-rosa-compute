@@ -5,11 +5,8 @@ from pathlib import Path
 import pytest
 
 from scripts import run_experiment
-from scripts.sweep_n import (
-    build_runner_command,
-    compute_sweep_id,
-    get_parser as get_sweep_parser,
-)
+from scripts.sweep_n import build_runner_command, compute_sweep_id
+from scripts.sweep_n import get_parser as get_sweep_parser
 
 
 def _sweep_args(**overrides) -> argparse.Namespace:
