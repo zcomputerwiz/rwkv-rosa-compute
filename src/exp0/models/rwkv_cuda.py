@@ -15,6 +15,7 @@ import torch.nn.functional as F
 
 CHUNK_LEN = 16
 SUPPORTED_HEAD_DIM = 64
+PAD_RAW_W = -30.0
 _KERNEL_LOADED = False
 _KERNEL_LOAD_ERROR: Exception | None = None
 
@@ -157,10 +158,15 @@ class _RWKV7ClampW(torch.autograd.Function):
         return tuple(grads)
 
 
-def _pad_time(tensor: torch.Tensor, pad: int) -> torch.Tensor:
+def _pad_time(
+    tensor: torch.Tensor,
+    pad: int,
+    *,
+    value: float = 0.0,
+) -> torch.Tensor:
     if pad == 0:
         return tensor
-    return F.pad(tensor, (0, 0, 0, pad))
+    return F.pad(tensor, (0, 0, 0, pad), value=value)
 
 
 def rwkv7_cuda_recurrence(
@@ -196,8 +202,12 @@ def rwkv7_cuda_recurrence(
     heads = channels // head_dim
     pad = (-timesteps) % CHUNK_LEN
 
-    def prepare(x: torch.Tensor) -> torch.Tensor:
-        x = _pad_time(x, pad)
+    def prepare(
+        x: torch.Tensor,
+        *,
+        pad_value: float = 0.0,
+    ) -> torch.Tensor:
+        x = _pad_time(x, pad, value=pad_value)
         return x.to(torch.bfloat16).contiguous().view(
             batch,
             timesteps + pad,
@@ -205,8 +215,14 @@ def rwkv7_cuda_recurrence(
             head_dim,
         )
 
-    inputs: Iterable[torch.Tensor] = (r, raw_w, k, v, a, b)
-    r4, w4, k4, v4, a4, b4 = [prepare(x) for x in inputs]
+    # The synthetic tail must not affect real causal outputs. Zero k/v/a/b is
+    # sufficient for that. Give raw_w a strongly negative value so the kernel's
+    # sigmoid(raw_w) is ~0 and padded steps have ~identity decay. This avoids
+    # unnecessarily amplifying roundoff when the backward kernel reconstructs
+    # states through the padded tail.
+    inputs: Iterable[torch.Tensor] = (r, k, v, a, b)
+    r4, k4, v4, a4, b4 = [prepare(x) for x in inputs]
+    w4 = prepare(raw_w, pad_value=PAD_RAW_W)
     out = _RWKV7ClampW.apply(r4, w4, k4, v4, a4, b4)
     out = out.view(batch, timesteps + pad, channels)
     # Slicing a padded B>1 tensor leaves a larger batch stride. TimeMix uses
