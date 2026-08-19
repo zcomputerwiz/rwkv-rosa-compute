@@ -42,9 +42,14 @@ def load_rwkv7_cuda_kernel() -> None:
     """Compile/load the pinned upstream RWKV-7 recurrence kernel once."""
     global _KERNEL_LOADED, _KERNEL_LOAD_ERROR
 
-    if _KERNEL_LOADED or _operator_registered():
-        _KERNEL_LOADED = True
+    if _KERNEL_LOADED:
         return
+    if _operator_registered():
+        raise RuntimeError(
+            "A rwkv7_clampw operator was already registered before Experiment 0 "
+            "loaded its pinned kernel. Refusing to reuse an unverified build; "
+            "start a clean Python process."
+        )
     if _KERNEL_LOAD_ERROR is not None:
         raise RuntimeError("RWKV-7 CUDA kernel previously failed to load") from _KERNEL_LOAD_ERROR
     if not torch.cuda.is_available():
@@ -65,13 +70,14 @@ def load_rwkv7_cuda_kernel() -> None:
 
     from torch.utils.cpp_extension import load
 
+    # Mirror the flags in the pinned upstream x070 train_temp implementation.
     flags = [
         "-res-usage",
         f"-D_N_={SUPPORTED_HEAD_DIM}",
         f"-D_CHUNK_LEN_={CHUNK_LEN}",
         "--use_fast_math",
         "-O3",
-        "-Xptxas=-O3",
+        "-Xptxas -O3",
         "--extra-device-vectorization",
     ]
     try:
@@ -203,4 +209,6 @@ def rwkv7_cuda_recurrence(
     r4, w4, k4, v4, a4, b4 = [prepare(x) for x in inputs]
     out = _RWKV7ClampW.apply(r4, w4, k4, v4, a4, b4)
     out = out.view(batch, timesteps + pad, channels)
-    return out[:, :timesteps, :]
+    # Slicing a padded B>1 tensor leaves a larger batch stride. TimeMix uses
+    # .view() immediately afterward, so return a contiguous logical sequence.
+    return out[:, :timesteps, :].contiguous()
