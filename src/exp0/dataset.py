@@ -21,6 +21,11 @@ from exp0.task3sum import Instance3Sum, generate_instance
 _FORMATS = ("parallel_cot", "filler", "serial_cot", "immediate", "neutral")
 _FORMAT_TO_CODE = {name: idx for idx, name in enumerate(_FORMATS)}
 
+COT_DIAG_NONE = 0
+COT_DIAG_PAIR_POSITION = 1
+COT_DIAG_SUM_RESULT = 2
+COT_DIAG_MATCH_RESULT = 3
+
 
 class Vocabulary:
     """Vocabulary mapping string tokens to discrete integer token IDs."""
@@ -117,7 +122,10 @@ class PackedInstances:
         if self.matching_indices.ndim != 2 or self.matching_indices.shape[1] != 3:
             raise ValueError("Packed matching indices must have shape [N, 3].")
         count = self.tuples.shape[0]
-        if self.has_3sum.shape[0] != count or self.matching_indices.shape[0] != count:
+        if (
+            self.has_3sum.shape[0] != count
+            or self.matching_indices.shape[0] != count
+        ):
             raise ValueError("Packed instance tensors must contain the same N.")
 
     def __len__(self) -> int:
@@ -224,6 +232,89 @@ def encode_packed_input_tuples(
     return encoded
 
 
+def _matching_k_for_pair(
+    instance: Instance3Sum,
+    i: int,
+    j: int,
+    mod: int = 10,
+) -> tuple[tuple[int, ...], Optional[int]]:
+    dimension = len(instance.tuples[0])
+    sum_ij = tuple(
+        (instance.tuples[i][dim] + instance.tuples[j][dim]) % mod
+        for dim in range(dimension)
+    )
+    target = tuple((-value) % mod for value in sum_ij)
+
+    for k, value in enumerate(instance.tuples):
+        if k != i and k != j and value == target:
+            return sum_ij, k
+    return sum_ij, None
+
+
+def _parallel_cot_diagnostics(
+    instance: Instance3Sum,
+    vocab: Vocabulary,
+    target_tokens: List[str],
+    vocab_reduction: bool,
+    include_separator_token: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build semantic target metadata for teacher-forced CoT generation.
+
+    The reduced CoT deliberately randomizes which summand index and coordinate
+    digit are emitted. Exact next-token accuracy therefore has an irreducible
+    stochastic component. ``valid_ids`` records every token that is
+    semantically correct for the sampled pair so evaluation can report both
+    paper-style exact accuracy and stochasticity-aware semantic accuracy.
+    """
+    dimension = len(instance.tuples[0])
+    max_valid = max(2, dimension)
+    diag_type = torch.full(
+        (len(target_tokens),),
+        COT_DIAG_NONE,
+        dtype=torch.int8,
+    )
+    valid_ids = torch.full(
+        (len(target_tokens), max_valid),
+        -1,
+        dtype=torch.long,
+    )
+
+    labels = get_token_labels(len(instance.tuples))
+    cursor = 1 if include_separator_token else 0
+
+    for i in range(len(instance.tuples)):
+        for j in range(i + 1, len(instance.tuples)):
+            pair_pos = cursor
+            result_pos = cursor + 1
+            if result_pos >= len(target_tokens):
+                raise ValueError("Parallel CoT diagnostic layout exceeds target length.")
+
+            diag_type[pair_pos] = COT_DIAG_PAIR_POSITION
+            if vocab_reduction:
+                valid_ids[pair_pos, 0] = vocab.token2id[labels[i]]
+                valid_ids[pair_pos, 1] = vocab.token2id[labels[j]]
+            else:
+                valid_ids[pair_pos, 0] = vocab.token2id[f"{labels[i]}{labels[j]}"]
+
+            sum_ij, matching_k = _matching_k_for_pair(instance, i, j)
+            if matching_k is not None:
+                diag_type[result_pos] = COT_DIAG_MATCH_RESULT
+                valid_ids[result_pos, 0] = vocab.token2id[labels[matching_k]]
+            else:
+                diag_type[result_pos] = COT_DIAG_SUM_RESULT
+                if vocab_reduction:
+                    unique_digits = list(dict.fromkeys(str(value) for value in sum_ij))
+                    for offset, token in enumerate(unique_digits):
+                        valid_ids[result_pos, offset] = vocab.token2id[token]
+                else:
+                    sum_token = "".join(str(value) for value in sum_ij)
+                    valid_ids[result_pos, 0] = vocab.token2id[sum_token]
+
+            cursor += 2
+
+    return diag_type, valid_ids
+
+
 class Task3SumDataset(Dataset):
     """3SUM dataset with compact format assignment and optional packed backing."""
 
@@ -234,6 +325,7 @@ class Task3SumDataset(Dataset):
         num_filler: Optional[int] = None,
         vocab: Optional[Vocabulary] = None,
         vocab_reduction: bool = True,
+        include_separator_token: bool = True,
         seed: int = 42,
         parallel_ratio: float = 0.5,
         filler_ratio: float = 0.5,
@@ -245,6 +337,7 @@ class Task3SumDataset(Dataset):
         self.seed = seed
         self.num_filler = num_filler
         self.vocab_reduction = vocab_reduction
+        self.include_separator_token = include_separator_token
 
         if isinstance(instances, PackedInstances):
             length = instances.length
@@ -342,14 +435,40 @@ class Task3SumDataset(Dataset):
             raise ValueError(f"Unknown format type: {fmt}")
 
         tokens = seq_str.split()
-        sep_idx = tokens.index(":") if ":" in tokens else -1
-        target_tokens = tokens[sep_idx + 1 :] if sep_idx != -1 else tokens
+        if ":" not in tokens:
+            raise ValueError("Experiment 0 sequence is missing the ':' separator token.")
+        sep_idx = tokens.index(":")
+        target_tokens = tokens[
+            sep_idx if self.include_separator_token else sep_idx + 1 :
+        ]
         target_ids = self.vocab.encode(target_tokens)
+
+        max_valid = max(2, len(instance.tuples[0]))
+        cot_diag_type = torch.full(
+            (len(target_tokens),),
+            COT_DIAG_NONE,
+            dtype=torch.int8,
+        )
+        cot_valid_ids = torch.full(
+            (len(target_tokens), max_valid),
+            -1,
+            dtype=torch.long,
+        )
+        if fmt == "parallel_cot":
+            cot_diag_type, cot_valid_ids = _parallel_cot_diagnostics(
+                instance,
+                self.vocab,
+                target_tokens,
+                self.vocab_reduction,
+                self.include_separator_token,
+            )
 
         return {
             "input_tuples": input_embeds,
             "targets": torch.tensor(target_ids, dtype=torch.long),
             "has_3sum": torch.tensor(instance.has_3sum, dtype=torch.bool),
+            "cot_diag_type": cot_diag_type,
+            "cot_valid_ids": cot_valid_ids,
             "format": fmt,
         }
 
@@ -357,7 +476,7 @@ class Task3SumDataset(Dataset):
 def pad_collate_fn(
     batch: List[Dict[str, torch.Tensor | str]],
 ) -> Dict[str, torch.Tensor]:
-    """Pad variable-length target sequences and create loss targets."""
+    """Pad variable-length target sequences and create loss/diagnostic tensors."""
     input_tuples = torch.stack(
         [item["input_tuples"] for item in batch]  # type: ignore[list-item]
     )
@@ -377,15 +496,37 @@ def pad_collate_fn(
         fill_value=-100,
         dtype=torch.long,
     )
+    padded_diag_types = torch.full(
+        (len(batch), max_len),
+        COT_DIAG_NONE,
+        dtype=torch.int8,
+    )
+    max_valid = max(
+        item["cot_valid_ids"].shape[1]  # type: ignore[union-attr]
+        for item in batch
+    )
+    padded_valid_ids = torch.full(
+        (len(batch), max_len, max_valid),
+        -1,
+        dtype=torch.long,
+    )
 
-    for idx, target in enumerate(targets_list):
+    for idx, item in enumerate(batch):
+        target = item["targets"]
+        diag_type = item["cot_diag_type"]
+        valid_ids = item["cot_valid_ids"]
         seq_len = target.size(0)  # type: ignore[union-attr]
+        valid_width = valid_ids.shape[1]  # type: ignore[union-attr]
         padded_targets[idx, :seq_len] = target  # type: ignore[index]
         loss_masks[idx, :seq_len] = target  # type: ignore[index]
+        padded_diag_types[idx, :seq_len] = diag_type  # type: ignore[index]
+        padded_valid_ids[idx, :seq_len, :valid_width] = valid_ids  # type: ignore[index]
 
     return {
         "input_tuples": input_tuples,
         "targets": padded_targets,
         "loss_mask": loss_masks,
         "has_3sum": has_3sum,
+        "cot_diag_type": padded_diag_types,
+        "cot_valid_ids": padded_valid_ids,
     }
