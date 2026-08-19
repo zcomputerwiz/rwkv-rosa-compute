@@ -152,16 +152,30 @@ def test_loss_and_answer_projection_match_full_logits():
         torch.arange(full_logits.shape[0]),
         answer_positions,
     ]
-    # The answer-only projection uses a smaller GEMM than the full-vocabulary
-    # projection. Different BLAS kernels can differ by a handful of FP32 ulps,
-    # especially for values near zero. Bound the absolute numerical error and
-    # require the evaluated class decision to remain exactly identical.
     max_abs_error = (answer_logits - expected_answers).abs().max().item()
     assert max_abs_error < 1e-6
     assert torch.equal(
         answer_logits.argmax(dim=-1),
         expected_answers.argmax(dim=-1),
     )
+
+
+def test_detached_loss_accumulation_matches_legacy_python_mean():
+    """Removing per-batch loss.item() must not change the reported epoch mean."""
+    losses = [
+        torch.tensor(1.125, dtype=torch.float32),
+        torch.tensor(0.75, dtype=torch.float32),
+        torch.tensor(2.5, dtype=torch.float32),
+        torch.tensor(0.0625, dtype=torch.float32),
+    ]
+    legacy_mean = sum(loss.item() for loss in losses) / len(losses)
+
+    loss_sum = torch.zeros((), dtype=torch.float64)
+    for loss in losses:
+        loss_sum.add_(loss.detach())
+    optimized_mean = (loss_sum / len(losses)).item()
+
+    assert optimized_mean == legacy_mean
 
 
 class _AnswerOnlyModel(nn.Module):
