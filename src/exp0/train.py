@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader
 
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
 from exp0.dataset import Task3SumDataset, pad_collate_fn
+from exp0.diagnostics import evaluate_cot_diagnostics
 from exp0.models.base import InputEmbedWrapper
 from exp0.models.llama import LlamaBackbone
 from exp0.models.rwkv import RWKV7Backbone
@@ -56,6 +57,7 @@ def create_model(model_cfg: ModelConfig, d_input: int) -> InputEmbedWrapper:
             num_layers=model_cfg.num_hidden_layers,
             num_heads=model_cfg.num_attention_heads,
             intermediate_size=model_cfg.intermediate_size,
+            rope_theta=model_cfg.llama_rope_theta,
         )
     elif model_cfg.architecture == "rwkv":
         backbone = RWKV7Backbone(
@@ -161,6 +163,18 @@ def _sync_cuda(device: torch.device) -> None:
         torch.cuda.synchronize(device)
 
 
+def _answer_predictions_from_loss_logits(
+    loss_logits: torch.Tensor,
+    targets: torch.Tensor,
+    ans_token_id: int,
+) -> torch.Tensor:
+    """Read the next-token prediction made at each ANS position."""
+    ans_mask = targets[:, :-1].eq(ans_token_id)
+    ans_positions = ans_mask.to(dtype=torch.int64).argmax(dim=1)
+    batch_indices = torch.arange(targets.shape[0], device=targets.device)
+    return loss_logits[batch_indices, ans_positions].argmax(dim=-1)
+
+
 def evaluate_accuracy(
     model: nn.Module,
     val_loader: DataLoader,
@@ -178,8 +192,6 @@ def evaluate_accuracy(
 
     with torch.no_grad():
         for batch in val_loader:
-            # Validate the structural ANS contract on the CPU copy before moving
-            # the batch. This avoids a GPU truth-value synchronization per batch.
             targets_cpu = batch["targets"]
             ans_mask_cpu = targets_cpu.eq(ans_token_id)
             ans_counts = ans_mask_cpu.sum(dim=1)
@@ -196,10 +208,7 @@ def evaluate_accuracy(
                 device,
                 non_blocking=non_blocking,
             )
-            targets = targets_cpu.to(
-                device,
-                non_blocking=non_blocking,
-            )
+            targets = targets_cpu.to(device, non_blocking=non_blocking)
             has_3sum = batch["has_3sum"].to(
                 device,
                 non_blocking=non_blocking,
@@ -239,6 +248,39 @@ def evaluate_accuracy(
 
     correct = int(correct_device.item()) if total else 0
     return correct / total if total > 0 else 0.0
+
+
+def _best_cot_diagnostics(
+    epoch_diagnostics: list[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not epoch_diagnostics:
+        return {}
+
+    metric_names = [
+        "cot_answer_given_cot_accuracy",
+        "cot_pair_position_token_accuracy",
+        "cot_pair_position_semantic_accuracy",
+        "cot_sum_token_accuracy",
+        "cot_sum_semantic_accuracy",
+        "cot_match_index_accuracy",
+        "cot_result_semantic_accuracy",
+    ]
+    best: Dict[str, Any] = {}
+    for name in metric_names:
+        values = [
+            item[name]
+            for item in epoch_diagnostics
+            if item.get(name) is not None
+        ]
+        best[name] = max(values) if values else None
+
+    nll_values = [
+        item["cot_result_nll"]
+        for item in epoch_diagnostics
+        if item.get("cot_result_nll") is not None
+    ]
+    best["cot_result_nll"] = min(nll_values) if nll_values else None
+    return best
 
 
 def train_model(
@@ -326,18 +368,16 @@ def train_model(
     )
 
     non_blocking = _transfer_non_blocking(train_cfg, device)
-    epoch_train_losses = []
-    epoch_filler_accuracies = []
-    epoch_cot_accuracies = []
+    epoch_train_losses: list[float] = []
+    epoch_train_answer_accuracies: list[float] = []
+    epoch_filler_accuracies: list[float] = []
+    epoch_cot_diagnostics: list[Dict[str, Any]] = []
     best_filler_acc = 0.0
-    best_cot_acc = 0.0
+    best_train_answer_acc = 0.0
 
-    epoch_times = []
+    epoch_times: list[float] = []
     data_wait = 0.0
 
-    # Ensure model initialization / transfers are outside the first epoch timer.
-    # Thereafter validation ends with one accuracy scalar read, so the preceding
-    # CUDA work is already complete before the next epoch begins.
     _sync_cuda(device)
     for _epoch in range(epochs):
         t_epoch = time.perf_counter()
@@ -345,6 +385,12 @@ def train_model(
         t_last = time.perf_counter()
         loss_sum = torch.zeros((), device=device, dtype=torch.float64)
         loss_count = 0
+        train_answer_correct = torch.zeros(
+            (),
+            device=device,
+            dtype=torch.int64,
+        )
+        train_answer_count = 0
 
         for batch in train_loader:
             data_wait += time.perf_counter() - t_last
@@ -360,6 +406,10 @@ def train_model(
                 device,
                 non_blocking=non_blocking,
             )
+            has_3sum = batch["has_3sum"].to(
+                device,
+                non_blocking=non_blocking,
+            )
 
             optimizer.zero_grad(set_to_none=True)
             with _autocast_context(device, train_cfg.precision):
@@ -369,6 +419,22 @@ def train_model(
                     loss_logits.reshape(-1, loss_logits.size(-1)),
                     shift_targets,
                 )
+
+            with torch.no_grad():
+                answer_predictions = _answer_predictions_from_loss_logits(
+                    loss_logits,
+                    targets,
+                    ans_token_id,
+                )
+                expected_answers = torch.where(
+                    has_3sum,
+                    torch.full_like(answer_predictions, ans_true_id),
+                    torch.full_like(answer_predictions, ans_false_id),
+                )
+                train_answer_correct.add_(
+                    answer_predictions.eq(expected_answers).sum()
+                )
+                train_answer_count += targets.shape[0]
 
             if scaler is not None:
                 scaler.scale(loss).backward()
@@ -381,20 +447,22 @@ def train_model(
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
                 optimizer.step()
 
-            # PR #9 introduced loss.item() solely to record epoch-mean training
-            # loss. Detaching preserves that reporting purpose without retaining
-            # autograd graphs; accumulating on-device avoids a CUDA sync per batch.
             loss_sum.add_(loss.detach())
             loss_count += 1
             t_last = time.perf_counter()
 
-        # One synchronization at the epoch boundary preserves accurate wall-clock
-        # epoch_seconds / samples_per_second after removing per-batch loss.item().
         _sync_cuda(device)
         epoch_times.append(time.perf_counter() - t_epoch)
         epoch_train_losses.append(
             (loss_sum / loss_count).item() if loss_count else 0.0
         )
+        train_answer_acc = (
+            int(train_answer_correct.item()) / train_answer_count
+            if train_answer_count
+            else 0.0
+        )
+        epoch_train_answer_accuracies.append(train_answer_acc)
+        best_train_answer_acc = max(best_train_answer_acc, train_answer_acc)
 
         filler_acc = evaluate_accuracy(
             model,
@@ -410,7 +478,7 @@ def train_model(
         best_filler_acc = max(best_filler_acc, filler_acc)
 
         if cot_val_loader is not None:
-            cot_acc = evaluate_accuracy(
+            diagnostics = evaluate_cot_diagnostics(
                 model,
                 cot_val_loader,
                 device,
@@ -420,8 +488,7 @@ def train_model(
                 precision=train_cfg.precision,
                 non_blocking=non_blocking,
             )
-            epoch_cot_accuracies.append(cot_acc)
-            best_cot_acc = max(best_cot_acc, cot_acc)
+            epoch_cot_diagnostics.append(diagnostics)
 
     cuda_peak_allocated = None
     cuda_peak_reserved = None
@@ -431,6 +498,8 @@ def train_model(
 
     history: Dict[str, Any] = {
         "epoch_train_losses": epoch_train_losses,
+        "epoch_train_answer_accuracies": epoch_train_answer_accuracies,
+        "best_train_answer_accuracy": best_train_answer_acc,
         "epoch_filler_accuracies": epoch_filler_accuracies,
         "epoch_val_accuracies": epoch_filler_accuracies,
         "best_filler_accuracy": best_filler_acc,
@@ -465,8 +534,13 @@ def train_model(
         "initialization": initialization,
     }
 
-    if cot_val_loader is not None:
-        history["epoch_cot_accuracies"] = epoch_cot_accuracies
-        history["best_cot_accuracy"] = best_cot_acc
+    if epoch_cot_diagnostics:
+        history["epoch_cot_diagnostics"] = epoch_cot_diagnostics
+        history["best_cot_diagnostics"] = _best_cot_diagnostics(
+            epoch_cot_diagnostics
+        )
+        history["cot_diagnostic_counts"] = epoch_cot_diagnostics[-1][
+            "cot_diagnostic_counts"
+        ]
 
     return model, history
