@@ -107,6 +107,7 @@ def test_llama_cuda_training_smoke(precision, fused_adamw):
     assert history["cuda_peak_memory_allocated_bytes"] > 0
     assert history["cuda_peak_memory_reserved_bytes"] > 0
     assert history["loss_reporting_syncs_per_epoch"] == 1
+    assert history["validation_result_syncs_per_pass"] == 1
     assert history["non_blocking_transfers"] is True
 
 
@@ -226,6 +227,7 @@ def test_rwkv7_fused_cuda_forward_matches_reference_with_tail_padding():
     )
 
     assert fused.shape == reference.shape
+    assert fused.is_contiguous()
     assert torch.isfinite(fused).all()
     torch.testing.assert_close(
         fused.float(),
@@ -269,3 +271,43 @@ def test_rwkv7_fused_cuda_backward_tracks_reference():
             rtol=8e-2,
             atol=8e-2,
         )
+
+
+@pytest.mark.slow
+def test_rwkv7_fused_cuda_full_model_forward_backward():
+    """Exercise kernel integration through the whole Experiment 0 wrapper."""
+    _require_cuda_toolkit()
+    if not torch.cuda.is_bf16_supported():
+        pytest.skip("CUDA device does not support BF16")
+
+    torch.manual_seed(1234)
+    model = create_model(
+        ModelConfig(
+            architecture="rwkv",
+            init_mode="random",
+            rwkv_kernel="cuda",
+            hidden_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=1,
+            intermediate_size=128,
+            head_dim=64,
+            vocab_size=64,
+            device="cuda",
+        ),
+        d_input=12,
+    ).cuda()
+    # 6 tuple positions + 11 target positions gives a 17-step backbone sequence,
+    # deliberately exercising the fused wrapper's chunk-tail padding.
+    input_tuples = torch.randn(2, 6, 12, device="cuda")
+    targets = torch.randint(0, 64, (2, 11), device="cuda")
+
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        logits = model.loss_logits(input_tuples, targets)
+        loss = logits.float().square().mean()
+    loss.backward()
+
+    assert logits.shape == (2, 10, 64)
+    assert torch.isfinite(loss)
+    grads = [parameter.grad for parameter in model.parameters() if parameter.grad is not None]
+    assert grads
+    assert all(torch.isfinite(grad).all() for grad in grads)
