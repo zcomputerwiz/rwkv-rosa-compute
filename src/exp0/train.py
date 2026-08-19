@@ -238,6 +238,8 @@ def train_model(
     model = create_model(resolved_model_cfg, d_input=d_input)
     initialization = initialize_model(model, resolved_model_cfg)
     model = model.to(device)
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
     is_immediate = (task_cfg.num_filler == 0) or (
         train_cfg.mixture == "immediate"
@@ -374,6 +376,12 @@ def train_model(
             epoch_cot_accuracies.append(cot_acc)
             best_cot_acc = max(best_cot_acc, cot_acc)
 
+    cuda_peak_allocated = None
+    cuda_peak_reserved = None
+    if device.type == "cuda":
+        cuda_peak_allocated = torch.cuda.max_memory_allocated(device)
+        cuda_peak_reserved = torch.cuda.max_memory_reserved(device)
+
     history: Dict[str, Any] = {
         "epoch_train_losses": epoch_train_losses,
         "epoch_filler_accuracies": epoch_filler_accuracies,
@@ -402,6 +410,8 @@ def train_model(
             "packed_storage_nbytes",
             None,
         ),
+        "cuda_peak_memory_allocated_bytes": cuda_peak_allocated,
+        "cuda_peak_memory_reserved_bytes": cuda_peak_reserved,
         "initialization": initialization,
     }
 
