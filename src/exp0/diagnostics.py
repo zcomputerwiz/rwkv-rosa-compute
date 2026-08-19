@@ -134,16 +134,14 @@ def evaluate_cot_diagnostics(
             counters["match_count"].add_(match_mask.sum())
 
             counters["result_semantic"].add_(semantic[result_mask].sum())
-            result_count = result_mask.sum()
-            counters["result_count"].add_(result_count)
-            if bool(result_mask.any().cpu()):
-                result_nll_sum.add_(
-                    F.cross_entropy(
-                        logits[result_mask].float(),
-                        next_targets[result_mask],
-                        reduction="sum",
-                    ).to(torch.float64)
-                )
+            counters["result_count"].add_(result_mask.sum())
+
+            per_token_nll = F.cross_entropy(
+                logits.float().reshape(-1, logits.shape[-1]),
+                next_targets.reshape(-1),
+                reduction="none",
+            ).view_as(next_targets)
+            result_nll_sum.add_(per_token_nll[result_mask].sum().to(torch.float64))
 
             ans_positions = ans_positions_cpu.to(
                 device,
