@@ -63,6 +63,7 @@ def create_model(model_cfg: ModelConfig, d_input: int) -> InputEmbedWrapper:
             num_layers=model_cfg.num_hidden_layers,
             intermediate_size=model_cfg.intermediate_size,
             head_dim=model_cfg.head_dim,
+            rwkv_kernel=model_cfg.rwkv_kernel,
         )
     else:
         raise ValueError(f"Unknown architecture: {model_cfg.architecture}")
@@ -126,6 +127,24 @@ def _validate_precision(device: torch.device, precision: str) -> None:
         raise ValueError("This CUDA device does not report bfloat16 support.")
 
 
+def _validate_cuda_backend(
+    model_cfg: ModelConfig,
+    train_cfg: TrainConfig,
+    device: torch.device,
+) -> None:
+    if model_cfg.rwkv_kernel != "cuda":
+        return
+    if model_cfg.architecture != "rwkv":
+        raise ValueError("rwkv_kernel='cuda' requires architecture='rwkv'.")
+    if device.type != "cuda":
+        raise ValueError("rwkv_kernel='cuda' requires a CUDA device.")
+    if train_cfg.precision != "bf16":
+        raise ValueError(
+            "The pinned RWKV-7 CUDA recurrence is BF16-only. "
+            "Use --precision bf16 with --rwkv_kernel cuda."
+        )
+
+
 def _autocast_context(device: torch.device, precision: str):
     if precision == "fp32":
         return nullcontext()
@@ -135,6 +154,11 @@ def _autocast_context(device: torch.device, precision: str):
 
 def _transfer_non_blocking(train_cfg: TrainConfig, device: torch.device) -> bool:
     return device.type == "cuda" and train_cfg.pin_memory
+
+
+def _sync_cuda(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
 
 
 def evaluate_accuracy(
@@ -220,6 +244,7 @@ def train_model(
     set_seed(train_cfg.seed)
     device = torch.device(model_cfg.device)
     _validate_precision(device, train_cfg.precision)
+    _validate_cuda_backend(model_cfg, train_cfg, device)
 
     vocab = train_dataset.vocab
     ans_token_id = vocab.token2id.get("ANS", -1)
@@ -301,11 +326,17 @@ def train_model(
     epoch_times = []
     data_wait = 0.0
     for _epoch in range(epochs):
+        # loss.item() previously synchronized CUDA every batch while collecting
+        # reporting-only loss values. Synchronize once per epoch instead: this
+        # preserves accurate wall-clock throughput while allowing normal CPU/GPU
+        # overlap within the training loop.
+        _sync_cuda(device)
         t_epoch = time.perf_counter()
         model.train()
         t_last = time.perf_counter()
+        loss_sum = torch.zeros((), device=device, dtype=torch.float64)
+        loss_count = 0
 
-        batch_losses = []
         for batch in train_loader:
             data_wait += time.perf_counter() - t_last
             input_tuples = batch["input_tuples"].to(
@@ -341,13 +372,15 @@ def train_model(
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
                 optimizer.step()
 
-            batch_losses.append(loss.item())
+            loss_sum += loss.detach().to(torch.float64)
+            loss_count += 1
             t_last = time.perf_counter()
 
-        epoch_train_losses.append(
-            sum(batch_losses) / len(batch_losses) if batch_losses else 0.0
-        )
+        _sync_cuda(device)
         epoch_times.append(time.perf_counter() - t_epoch)
+        epoch_train_losses.append(
+            (loss_sum / loss_count).item() if loss_count else 0.0
+        )
 
         filler_acc = evaluate_accuracy(
             model,
@@ -399,6 +432,8 @@ def train_model(
         "resolved_vocab_size": len(vocab),
         "precision": train_cfg.precision,
         "fused_adamw": train_cfg.fused_adamw,
+        "rwkv_kernel": model_cfg.rwkv_kernel,
+        "loss_reporting_syncs_per_epoch": 1 if device.type == "cuda" else 0,
         "non_blocking_transfers": non_blocking,
         "train_dataset_storage_bytes": getattr(
             train_dataset,
