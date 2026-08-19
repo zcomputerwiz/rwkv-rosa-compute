@@ -127,6 +127,7 @@ class Task3SumDataset(Dataset):
         neutral_ratio: float = 0.0,
     ):
         self.instances = instances
+        self.seed = seed
         self.num_filler = num_filler
         self.vocab_reduction = vocab_reduction
         self.rng = random.Random(seed)
@@ -180,10 +181,13 @@ class Task3SumDataset(Dataset):
         instance = self.instances[idx]
         fmt = self.assigned_formats[idx]
 
+        # Deterministic per-item RNG
+        item_rng = random.Random(f"{self.seed}_{idx}")
+
         input_embeds = encode_input_tuples(instance)
 
         if fmt == "parallel_cot":
-            seq_str = format_a_parallel_cot(instance, vocab_reduction=self.vocab_reduction, rng=self.rng)
+            seq_str = format_a_parallel_cot(instance, vocab_reduction=self.vocab_reduction, rng=item_rng)
         elif fmt == "filler":
             seq_str = format_b_filler(instance, num_filler=self.num_filler)
         elif fmt == "immediate":

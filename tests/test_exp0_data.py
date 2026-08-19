@@ -3,6 +3,7 @@
 import random
 
 import pytest
+import torch
 
 from exp0.dataset import Task3SumDataset, build_default_vocab
 from exp0.sequences import (
@@ -95,3 +96,90 @@ def test_dataset_mixture_ratios_and_vocab_freeze():
     _ = dataset[0]
     _ = dataset[1]
     assert len(vocab) == initial_vocab_len
+
+@pytest.mark.exp0
+def test_parallel_cot_length_invariant():
+    """Test length invariance and exact token counts for parallel CoT."""
+    from math import comb
+    for vocab_red in [True, False]:
+        for length, dimension in [(8, 2), (12, 3), (16, 4)]:
+            lengths = set()
+            for _ in range(200):
+                # deliberately mixed pos/neg examples
+                inst = generate_instance(length=length, dimension=dimension, target_has_3sum=None)
+                fmt_a = format_a_parallel_cot(inst, vocab_reduction=vocab_red)
+                tokens = fmt_a.split()
+
+                # Check formatting: Matching pairs emit exactly two tokens
+                # This is a bit complex to assert universally without knowing which pair is matching,
+                # but the test checks lengths, which implicitly verifies matching pairs don't add extra length.
+
+                # Full string split by whitespace token count:
+                lengths.add(len(tokens))
+
+            assert len(lengths) == 1
+            common_len = list(lengths)[0]
+
+            # Assert exact counts where practical: length + 1 + 2 * C(length, 2) + 2
+            # Wait, format_a_parallel_cot output starts with:
+            # prefix (length tokens + 1 colon token)
+            # + for each pair (i, j) i < j: pair emits 2 tokens
+            # + ans_str ("ANS" "True"/"False" -> 2 tokens)
+            expected_len = length + 1 + 2 * comb(length, 2) + 2
+            assert common_len == expected_len
+
+            if length == 12 and dimension == 3:
+                assert common_len == 147
+
+@pytest.mark.exp0
+def test_serial_cot_length_distributions():
+    """Test serial CoT length distributions overlap for pos/neg."""
+    for length, dimension in [(8, 2), (12, 3)]:
+        pos_lengths = []
+        neg_lengths = []
+        for _ in range(200):
+            target = random.choice([True, False])
+            inst = generate_instance(length=length, dimension=dimension, target_has_3sum=target)
+            fmt_d = format_d_serial_cot(inst)
+            tokens = fmt_d.split()
+            if target:
+                pos_lengths.append(len(tokens))
+            else:
+                neg_lengths.append(len(tokens))
+
+        # Distributions must overlap
+        pos_range = (min(pos_lengths), max(pos_lengths))
+        neg_range = (min(neg_lengths), max(neg_lengths))
+        assert not (pos_range[1] < neg_range[0] or neg_range[1] < pos_range[0])
+
+@pytest.mark.exp0
+def test_dataset_determinism():
+    """Test deterministic per-item randomness."""
+    instances = [generate_instance(length=8, dimension=2) for _ in range(20)]
+    vocab = build_default_vocab(length=8, dimension=2)
+
+    # Create two identical datasets
+    ds1 = Task3SumDataset(instances=instances, format_type="parallel_cot", vocab=vocab, seed=42)
+    ds2 = Task3SumDataset(instances=instances, format_type="parallel_cot", vocab=vocab, seed=42)
+
+    # Different seed dataset
+    ds3 = Task3SumDataset(instances=instances, format_type="parallel_cot", vocab=vocab, seed=99)
+
+    # 1. Repeated reads of the same item are identical
+    out_0_read1 = ds1[0]["targets"].clone()
+    out_0_read2 = ds1[0]["targets"].clone()
+    assert torch.equal(out_0_read1, out_0_read2)
+
+    # 2. Access order does not change targets
+    _ = ds2[5]
+    _ = ds2[1]
+    out_0_ds2 = ds2[0]["targets"].clone()
+    assert torch.equal(out_0_read1, out_0_ds2)
+
+    # 3. Different seeds alter randomized formatting for at least some examples
+    diff_found = False
+    for i in range(20):
+        if not torch.equal(ds1[i]["targets"], ds3[i]["targets"]):
+            diff_found = True
+            break
+    assert diff_found
