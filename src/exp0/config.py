@@ -24,6 +24,11 @@ class Task3SumConfig:
                 f"Modulus other than 10 is not supported in Experiment 0, "
                 f"got mod={self.mod}"
             )
+        if not self.include_separator_token:
+            raise ValueError(
+                "Experiment 0 requires the supervised continuation separator. "
+                "The pre-repair separator-dropping protocol is not supported."
+            )
 
 
 @dataclass
