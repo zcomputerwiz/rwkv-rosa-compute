@@ -34,6 +34,8 @@ class ModelConfig:
 class TrainConfig:
     """Configuration for training and optimization."""
     seed: int = 42
+    num_workers: int = 0
+    pin_memory: bool = True
     batch_size: int = 64
     learning_rate: float = 1e-4
     epochs: int = 5
