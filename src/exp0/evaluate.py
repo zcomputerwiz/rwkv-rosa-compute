@@ -6,6 +6,22 @@ from dataclasses import asdict
 from typing import Any, Dict, List
 
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
+from exp0.dataset import build_default_vocab
+
+
+def _resolved_model_dict(
+    model_cfg: ModelConfig,
+    task_cfg: Task3SumConfig,
+) -> Dict[str, Any]:
+    """Return model metadata with task-derived interface dimensions resolved."""
+    model_dict = asdict(model_cfg)
+    model_dict["vocab_size"] = len(
+        build_default_vocab(
+            length=task_cfg.length,
+            dimension=task_cfg.dimension,
+        )
+    )
+    return model_dict
 
 
 def canonical_run_config(
@@ -17,7 +33,7 @@ def canonical_run_config(
     seeds_run: List[int],
 ) -> Dict[str, Any]:
     """Return the complete deterministic configuration used for run identity."""
-    model_dict = asdict(model_cfg)
+    model_dict = _resolved_model_dict(model_cfg, task_cfg)
     # Checkpoint content, not its machine-specific path, defines model identity.
     model_dict.pop("rwkv_checkpoint", None)
 
@@ -118,11 +134,22 @@ def compile_experiment_report(
     min_acc = min(filler_accuracies) if filler_accuracies else 0.0
     max_acc = max(filler_accuracies) if filler_accuracies else 0.0
 
-    model_dict = asdict(model_cfg)
+    model_dict = _resolved_model_dict(model_cfg, task_cfg)
     train_dict = asdict(train_cfg)
     task_dict = asdict(task_cfg)
     train_dict.pop("seed", None)
     task_dict.pop("seed", None)
+
+    resolved_vocab_sizes = {
+        result["resolved_vocab_size"]
+        for result in per_seed_results
+        if "resolved_vocab_size" in result
+    }
+    if resolved_vocab_sizes and resolved_vocab_sizes != {model_dict["vocab_size"]}:
+        raise ValueError(
+            "Training/report vocabulary resolution disagrees across seeds: "
+            f"expected {model_dict['vocab_size']}, got {sorted(resolved_vocab_sizes)}."
+        )
 
     seeds_run = [res["seed"] for res in per_seed_results]
     run_config = canonical_run_config(
