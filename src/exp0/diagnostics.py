@@ -52,21 +52,25 @@ def evaluate_cot_diagnostics(
     """
     model.eval()
 
+    counter_names = (
+        "pair_exact",
+        "pair_semantic",
+        "pair_count",
+        "sum_exact",
+        "sum_semantic",
+        "sum_count",
+        "match_exact",
+        "match_count",
+        "result_semantic",
+        "result_count",
+        "answer_correct",
+        "answer_count",
+    )
     counters = {
-        "pair_exact": 0,
-        "pair_semantic": 0,
-        "pair_count": 0,
-        "sum_exact": 0,
-        "sum_semantic": 0,
-        "sum_count": 0,
-        "match_exact": 0,
-        "match_count": 0,
-        "result_semantic": 0,
-        "result_count": 0,
-        "answer_correct": 0,
-        "answer_count": 0,
+        name: torch.zeros((), dtype=torch.int64, device=device)
+        for name in counter_names
     }
-    result_nll_sum = 0.0
+    result_nll_sum = torch.zeros((), dtype=torch.float64, device=device)
 
     with torch.no_grad():
         for batch in val_loader:
@@ -118,29 +122,27 @@ def evaluate_cot_diagnostics(
             match_mask = next_types.eq(COT_DIAG_MATCH_RESULT)
             result_mask = sum_mask | match_mask
 
-            counters["pair_exact"] += int(exact[pair_mask].sum().item())
-            counters["pair_semantic"] += int(semantic[pair_mask].sum().item())
-            counters["pair_count"] += int(pair_mask.sum().item())
+            counters["pair_exact"].add_(exact[pair_mask].sum())
+            counters["pair_semantic"].add_(semantic[pair_mask].sum())
+            counters["pair_count"].add_(pair_mask.sum())
 
-            counters["sum_exact"] += int(exact[sum_mask].sum().item())
-            counters["sum_semantic"] += int(semantic[sum_mask].sum().item())
-            counters["sum_count"] += int(sum_mask.sum().item())
+            counters["sum_exact"].add_(exact[sum_mask].sum())
+            counters["sum_semantic"].add_(semantic[sum_mask].sum())
+            counters["sum_count"].add_(sum_mask.sum())
 
-            counters["match_exact"] += int(exact[match_mask].sum().item())
-            counters["match_count"] += int(match_mask.sum().item())
+            counters["match_exact"].add_(exact[match_mask].sum())
+            counters["match_count"].add_(match_mask.sum())
 
-            counters["result_semantic"] += int(
-                semantic[result_mask].sum().item()
-            )
-            result_count = int(result_mask.sum().item())
-            counters["result_count"] += result_count
-            if result_count:
-                result_nll_sum += float(
+            counters["result_semantic"].add_(semantic[result_mask].sum())
+            result_count = result_mask.sum()
+            counters["result_count"].add_(result_count)
+            if bool(result_mask.any().cpu()):
+                result_nll_sum.add_(
                     F.cross_entropy(
                         logits[result_mask].float(),
                         next_targets[result_mask],
                         reduction="sum",
-                    ).item()
+                    ).to(torch.float64)
                 )
 
             ans_positions = ans_positions_cpu.to(
@@ -154,50 +156,58 @@ def evaluate_cot_diagnostics(
                 torch.full_like(answer_predictions, ans_true_id),
                 torch.full_like(answer_predictions, ans_false_id),
             )
-            counters["answer_correct"] += int(
-                answer_predictions.eq(expected_answers).sum().item()
+            counters["answer_correct"].add_(
+                answer_predictions.eq(expected_answers).sum()
             )
-            counters["answer_count"] += targets.shape[0]
+            counters["answer_count"].add_(targets.shape[0])
+
+    # One host transfer at the end keeps CUDA validation asynchronous across
+    # batches while still returning ordinary JSON-serializable Python values.
+    counter_values = {
+        name: int(value.item())
+        for name, value in counters.items()
+    }
+    result_nll_value = float(result_nll_sum.item())
 
     return {
         "cot_answer_given_cot_accuracy": _safe_ratio(
-            counters["answer_correct"],
-            counters["answer_count"],
+            counter_values["answer_correct"],
+            counter_values["answer_count"],
         ),
         "cot_pair_position_token_accuracy": _safe_ratio(
-            counters["pair_exact"],
-            counters["pair_count"],
+            counter_values["pair_exact"],
+            counter_values["pair_count"],
         ),
         "cot_pair_position_semantic_accuracy": _safe_ratio(
-            counters["pair_semantic"],
-            counters["pair_count"],
+            counter_values["pair_semantic"],
+            counter_values["pair_count"],
         ),
         "cot_sum_token_accuracy": _safe_ratio(
-            counters["sum_exact"],
-            counters["sum_count"],
+            counter_values["sum_exact"],
+            counter_values["sum_count"],
         ),
         "cot_sum_semantic_accuracy": _safe_ratio(
-            counters["sum_semantic"],
-            counters["sum_count"],
+            counter_values["sum_semantic"],
+            counter_values["sum_count"],
         ),
         "cot_match_index_accuracy": _safe_ratio(
-            counters["match_exact"],
-            counters["match_count"],
+            counter_values["match_exact"],
+            counter_values["match_count"],
         ),
         "cot_result_semantic_accuracy": _safe_ratio(
-            counters["result_semantic"],
-            counters["result_count"],
+            counter_values["result_semantic"],
+            counter_values["result_count"],
         ),
         "cot_result_nll": (
-            result_nll_sum / counters["result_count"]
-            if counters["result_count"]
+            result_nll_value / counter_values["result_count"]
+            if counter_values["result_count"]
             else None
         ),
         "cot_diagnostic_counts": {
-            "pair_position_tokens": counters["pair_count"],
-            "sum_results": counters["sum_count"],
-            "match_results": counters["match_count"],
-            "all_results": counters["result_count"],
-            "answers": counters["answer_count"],
+            "pair_position_tokens": counter_values["pair_count"],
+            "sum_results": counter_values["sum_count"],
+            "match_results": counter_values["match_count"],
+            "all_results": counter_values["result_count"],
+            "answers": counter_values["answer_count"],
         },
     }
