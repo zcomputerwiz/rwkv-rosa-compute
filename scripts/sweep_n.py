@@ -9,6 +9,10 @@ from pathlib import Path
 
 import torch
 
+sys.path.append(str(Path(__file__).parent.parent))
+
+import scripts.run_experiment as run_experiment
+
 
 def build_runner_command(args, n: int, run_out: Path) -> list[str]:
     return [
@@ -67,9 +71,15 @@ def main():
         print(f"=== Running {args.architecture} with N={n} ===")
         subprocess.run(cmd, check=True)
 
-        report_files = list(run_out.glob("*.json"))
-        if report_files:
-            summary_path = report_files[0]
+        # Reconstruct exactly what run_experiment would have computed for report_path
+        parser = run_experiment.get_parser()
+        cmd_args = cmd[2:] # skip sys.executable and script name
+        parsed_args = parser.parse_args(cmd_args)
+
+        task_cfg, model_cfg, train_cfg = run_experiment.build_configs(parsed_args)
+        summary_path = run_experiment.get_report_path(parsed_args, task_cfg, model_cfg, train_cfg)
+
+        if summary_path.exists():
             with open(summary_path, "r", encoding="utf-8") as f:
                 rep = json.load(f)
 

@@ -10,12 +10,12 @@ import torch
 
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
 from exp0.dataset import Task3SumDataset, build_default_vocab
-from exp0.evaluate import compile_experiment_report
+from exp0.evaluate import compile_experiment_report, compute_run_id
 from exp0.task3sum import generate_instance
 from exp0.train import train_model
 
 
-def main():
+def get_parser():
     parser = argparse.ArgumentParser(description="Run Experiment 0 single configuration across seeds")
     parser.add_argument("--architecture", type=str, default="llama", choices=["llama", "rwkv"])
     parser.add_argument("--hidden_size", type=int, default=384, help="Model hidden size (default 384)")
@@ -41,8 +41,9 @@ def main():
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--vocab_reduction", action=argparse.BooleanOptionalAction, default=True, help="Enable/disable vocab reduction")
     parser.add_argument("--num_workers", type=int, default=0, help="Number of DataLoader workers. Note: On Windows, >0 uses spawn and pickles dataset copies. For 32 GB target RAM, start conservatively at 2 and monitor.")
-    args = parser.parse_args()
+    return parser
 
+def build_configs(args):
     task_cfg = Task3SumConfig(
         length=args.length,
         dimension=args.dimension,
@@ -62,8 +63,49 @@ def main():
         num_attention_heads=num_heads,
         intermediate_size=args.intermediate_size,
         head_dim=args.head_dim,
-        device=args.device,     # was: device="cpu",
+        device=args.device,
     )
+
+    train_cfg = TrainConfig(
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        epochs=args.epochs,
+        mixture=args.format_type if args.format_type else "50_50_cot_filler",
+        parallel_ratio=args.parallel_ratio,
+        filler_ratio=args.filler_ratio,
+        serial_ratio=args.serial_ratio,
+    )
+    train_cfg.num_workers = args.num_workers
+    return task_cfg, model_cfg, train_cfg
+
+def get_report_path(args, task_cfg, model_cfg, train_cfg):
+    run_id = compute_run_id(model_cfg, train_cfg, task_cfg, args.eval_seed, args.val_samples, args.seeds)
+    fmt_tag = args.format_type if args.format_type else "mix_50_50"
+    filename = f"{args.architecture}_len{args.length}_N{task_cfg.num_filler}_fmt_{fmt_tag}_{run_id}.json"
+    return Path(args.out_dir) / filename
+
+def main():
+    parser = get_parser()
+    args = parser.parse_args()
+
+    task_cfg, model_cfg, train_cfg_base = build_configs(args)
+
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    report_path = get_report_path(args, task_cfg, model_cfg, train_cfg_base)
+
+    if report_path.exists():
+        with open(report_path, "r") as f:
+            existing_report = json.load(f)
+
+        current_run_id = compute_run_id(model_cfg, train_cfg_base, task_cfg, args.eval_seed, args.val_samples, args.seeds)
+
+        if existing_report.get("run_id") == current_run_id:
+            print(f"Report {report_path} already exists and matches run_id {current_run_id}. Skipping run.")
+            return
+        else:
+            raise ValueError(f"Report {report_path} exists but run_id does not match! Existing: {existing_report.get('run_id')}, Current: {current_run_id}. Will not overwrite.")
+
 
     vocab = build_default_vocab(length=args.length, dimension=args.dimension)
 
@@ -110,6 +152,7 @@ def main():
             serial_ratio=args.serial_ratio,
         )
         train_cfg.num_workers = args.num_workers
+        task_cfg.seed = seed
 
         _, history = train_model(model_cfg, train_cfg, task_cfg, train_ds, filler_val_dataset=filler_val_ds, cot_val_dataset=cot_val_ds)
         history["seed"] = seed
@@ -119,7 +162,7 @@ def main():
 
     report = compile_experiment_report(
         model_cfg,
-        train_cfg,
+        train_cfg_base,
         task_cfg,
         per_seed_results,
         majority_class_baseline=majority_baseline,
@@ -127,11 +170,6 @@ def main():
         eval_seed=args.eval_seed,
         val_samples=args.val_samples,
     )
-
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    fmt_tag = args.format_type if args.format_type else "mix_50_50"
-    report_path = out_dir / f"{args.architecture}_len{args.length}_N{task_cfg.num_filler}_fmt_{fmt_tag}.json"
 
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2)

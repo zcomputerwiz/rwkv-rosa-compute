@@ -1,10 +1,10 @@
 import pytest
-import torch
 
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
 from exp0.dataset import Task3SumDataset
 from exp0.task3sum import generate_instance
 from exp0.train import train_model
+
 
 def get_tiny_configs():
     task_cfg = Task3SumConfig(num_samples=16)
