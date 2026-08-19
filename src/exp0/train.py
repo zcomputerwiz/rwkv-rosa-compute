@@ -173,16 +173,30 @@ def evaluate_accuracy(
 ) -> float:
     """Evaluate exact True/False prediction using only ANS-position logits."""
     model.eval()
-    correct = 0
     total = 0
+    correct_device = torch.zeros((), dtype=torch.int64, device=device)
 
     with torch.no_grad():
         for batch in val_loader:
+            # Validate the structural ANS contract on the CPU copy before moving
+            # the batch. This avoids a GPU truth-value synchronization per batch.
+            targets_cpu = batch["targets"]
+            ans_mask_cpu = targets_cpu.eq(ans_token_id)
+            ans_counts = ans_mask_cpu.sum(dim=1)
+            bad = ans_counts.ne(1)
+            if torch.any(bad):
+                bad_count = int(ans_counts[bad][0].item())
+                raise ValueError(
+                    "Sequence must have exactly one ANS token. "
+                    f"Found {bad_count}."
+                )
+            ans_positions_cpu = ans_mask_cpu.to(dtype=torch.int64).argmax(dim=1)
+
             input_tuples = batch["input_tuples"].to(
                 device,
                 non_blocking=non_blocking,
             )
-            targets = batch["targets"].to(
+            targets = targets_cpu.to(
                 device,
                 non_blocking=non_blocking,
             )
@@ -190,16 +204,10 @@ def evaluate_accuracy(
                 device,
                 non_blocking=non_blocking,
             )
-
-            ans_mask = targets.eq(ans_token_id)
-            ans_counts = ans_mask.sum(dim=1)
-            if torch.any(ans_counts != 1):
-                bad_count = int(ans_counts[ans_counts != 1][0].item())
-                raise ValueError(
-                    "Sequence must have exactly one ANS token. "
-                    f"Found {bad_count}."
-                )
-            ans_positions = ans_mask.to(dtype=torch.int64).argmax(dim=1)
+            ans_positions = ans_positions_cpu.to(
+                device,
+                non_blocking=non_blocking,
+            )
 
             with _autocast_context(device, precision):
                 if hasattr(model, "answer_logits"):
@@ -226,9 +234,10 @@ def evaluate_accuracy(
                 torch.full_like(predictions, ans_true_id),
                 torch.full_like(predictions, ans_false_id),
             )
-            correct += int(predictions.eq(expected).sum().item())
+            correct_device.add_(predictions.eq(expected).sum())
             total += targets.shape[0]
 
+    correct = int(correct_device.item()) if total else 0
     return correct / total if total > 0 else 0.0
 
 
@@ -325,12 +334,12 @@ def train_model(
 
     epoch_times = []
     data_wait = 0.0
+
+    # Ensure model initialization / transfers are outside the first epoch timer.
+    # Thereafter validation ends with one accuracy scalar read, so the preceding
+    # CUDA work is already complete before the next epoch begins.
+    _sync_cuda(device)
     for _epoch in range(epochs):
-        # loss.item() previously synchronized CUDA every batch while collecting
-        # reporting-only loss values. Synchronize once per epoch instead: this
-        # preserves accurate wall-clock throughput while allowing normal CPU/GPU
-        # overlap within the training loop.
-        _sync_cuda(device)
         t_epoch = time.perf_counter()
         model.train()
         t_last = time.perf_counter()
@@ -372,10 +381,15 @@ def train_model(
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
                 optimizer.step()
 
-            loss_sum += loss.detach().to(torch.float64)
+            # PR #9 introduced loss.item() solely to record epoch-mean training
+            # loss. Detaching preserves that reporting purpose without retaining
+            # autograd graphs; accumulating on-device avoids a CUDA sync per batch.
+            loss_sum.add_(loss.detach())
             loss_count += 1
             t_last = time.perf_counter()
 
+        # One synchronization at the epoch boundary preserves accurate wall-clock
+        # epoch_seconds / samples_per_second after removing per-batch loss.item().
         _sync_cuda(device)
         epoch_times.append(time.perf_counter() - t_epoch)
         epoch_train_losses.append(
@@ -434,6 +448,7 @@ def train_model(
         "fused_adamw": train_cfg.fused_adamw,
         "rwkv_kernel": model_cfg.rwkv_kernel,
         "loss_reporting_syncs_per_epoch": 1 if device.type == "cuda" else 0,
+        "validation_result_syncs_per_pass": 1 if device.type == "cuda" else 0,
         "non_blocking_transfers": non_blocking,
         "train_dataset_storage_bytes": getattr(
             train_dataset,
