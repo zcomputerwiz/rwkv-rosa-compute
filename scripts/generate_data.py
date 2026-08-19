@@ -109,7 +109,7 @@ def get_dataset_output_dir(args: argparse.Namespace) -> Path:
     vocab_tag = "vred" if args.vocab_reduction else "fullvocab"
     run_name = (
         f"len{args.length}_dim{args.dimension}_N{num_filler}_"
-        f"seed{args.seed}_{vocab_tag}"
+        f"S{args.num_samples}_seed{args.seed}_{vocab_tag}"
     )
     return Path(args.out_dir) / run_name
 
