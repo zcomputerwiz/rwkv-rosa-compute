@@ -54,13 +54,15 @@ def set_seed(seed: int):
 def _build_match3_target_feature_map(
     vocab,
     task_cfg: Task3SumConfig,
+    *,
+    compact_reduced_features: bool = True,
 ) -> tuple[torch.Tensor, int]:
     """Map continuation vocab ids onto the shared Match-3 input feature space.
 
-    The authors' reduced Match-3 representation reuses tuple-position feature
-    columns for later CoT index tokens and reuses digit feature columns for
-    later reduced sum digits. All other tokens receive dedicated feature
-    columns after the original tuple feature block.
+    The reduced positive-control path needs only tuple-position columns, digit
+    columns, and a small set of word features. When serial or non-reduced CoT is
+    actually used, callers disable compaction so otherwise-structured tokens
+    retain distinct fallback columns.
     """
     d_input = task_cfg.mod * task_cfg.dimension + task_cfg.length
     labels = get_token_labels(task_cfg.length)
@@ -68,6 +70,18 @@ def _build_match3_target_feature_map(
 
     mapping = torch.empty(len(vocab), dtype=torch.long)
     next_feature = d_input
+    special_features: dict[str, int] = {}
+    compact_special_tokens = {
+        vocab.pad_token,
+        ":",
+        ".",
+        "#",
+        "ANS",
+        "True",
+        "False",
+    }
+    other_feature: int | None = None
+
     for token_id in range(len(vocab)):
         token = vocab.id2token[token_id]
         if token in label_to_position:
@@ -75,9 +89,24 @@ def _build_match3_target_feature_map(
                 task_cfg.mod * task_cfg.dimension + label_to_position[token]
             )
         elif len(token) == 1 and token.isdigit() and int(token) < task_cfg.mod:
-            # A reduced CoT sum digit is encoded in the same first-coordinate
-            # digit block used by the authors' vector dataset.
+            # The authors' vectorizer maps a reduced standalone sum digit into
+            # the first coordinate's digit block.
             mapping[token_id] = int(token)
+        elif compact_reduced_features:
+            if token in compact_special_tokens:
+                if token not in special_features:
+                    special_features[token] = next_feature
+                    next_feature += 1
+                mapping[token_id] = special_features[token]
+            else:
+                # These vocabulary entries do not occur in the reduced
+                # parallel/filler/immediate/neutral protocol. Keep one reserved
+                # column so the projection's fan-in reflects the active vector
+                # feature space instead of the much larger output vocabulary.
+                if other_feature is None:
+                    other_feature = next_feature
+                    next_feature += 1
+                mapping[token_id] = other_feature
         else:
             mapping[token_id] = next_feature
             next_feature += 1
@@ -112,6 +141,7 @@ def create_model(
     *,
     vocab=None,
     task_cfg: Task3SumConfig | None = None,
+    compact_reduced_features: bool = True,
 ) -> InputEmbedWrapper:
     """Construct the configured backbone and Experiment 0 task interface."""
     if model_cfg.architecture == "llama":
@@ -141,6 +171,7 @@ def create_model(
         target_feature_indices, input_feature_dim = _build_match3_target_feature_map(
             vocab,
             task_cfg,
+            compact_reduced_features=compact_reduced_features,
         )
 
     model = InputEmbedWrapper(
@@ -417,11 +448,16 @@ def train_model(
 
     resolved_model_cfg = replace(model_cfg, vocab_size=len(vocab))
     d_input = task_cfg.mod * task_cfg.dimension + task_cfg.length
+    compact_reduced_features = (
+        task_cfg.vocab_reduction
+        and train_dataset.realized_counts.get("serial_cot", 0) == 0
+    )
     model = create_model(
         resolved_model_cfg,
         d_input=d_input,
         vocab=vocab,
         task_cfg=task_cfg,
+        compact_reduced_features=compact_reduced_features,
     )
     initialization = initialize_model(model, resolved_model_cfg)
     model = model.to(device)
@@ -646,6 +682,7 @@ def train_model(
         / max(sum(epoch_times), 1e-9),
         "resolved_vocab_size": len(vocab),
         "input_feature_dim": model.input_feature_dim,
+        "compact_reduced_input_features": compact_reduced_features,
         "precision": train_cfg.precision,
         "fused_adamw": train_cfg.fused_adamw,
         "rwkv_kernel": model_cfg.rwkv_kernel,
