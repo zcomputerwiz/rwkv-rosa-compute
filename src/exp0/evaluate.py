@@ -104,6 +104,37 @@ def _initialization_from_results(
     }
 
 
+def _mean_present(values: List[float | None]) -> float | None:
+    present = [value for value in values if value is not None]
+    if not present:
+        return None
+    return sum(present) / len(present)
+
+
+def _aggregate_cot_diagnostics(
+    per_seed_results: List[Dict[str, Any]],
+) -> Dict[str, float | None]:
+    metric_names = [
+        "cot_answer_given_cot_accuracy",
+        "cot_pair_position_token_accuracy",
+        "cot_pair_position_semantic_accuracy",
+        "cot_sum_token_accuracy",
+        "cot_sum_semantic_accuracy",
+        "cot_match_index_accuracy",
+        "cot_result_semantic_accuracy",
+        "cot_result_nll",
+    ]
+    aggregated: Dict[str, float | None] = {}
+    for name in metric_names:
+        aggregated[name] = _mean_present(
+            [
+                result.get("best_cot_diagnostics", {}).get(name)
+                for result in per_seed_results
+            ]
+        )
+    return aggregated
+
+
 def compile_experiment_report(
     model_cfg: ModelConfig,
     train_cfg: TrainConfig,
@@ -119,8 +150,9 @@ def compile_experiment_report(
         res.get("best_filler_accuracy", res.get("best_val_accuracy", 0.0))
         for res in per_seed_results
     ]
-    cot_accuracies = [
-        res.get("best_cot_accuracy", 0.0) for res in per_seed_results
+    train_answer_accuracies = [
+        res.get("best_train_answer_accuracy", 0.0)
+        for res in per_seed_results
     ]
 
     mean_filler_acc = (
@@ -128,11 +160,14 @@ def compile_experiment_report(
         if filler_accuracies
         else 0.0
     )
-    mean_cot_acc = (
-        sum(cot_accuracies) / len(cot_accuracies) if cot_accuracies else 0.0
+    mean_train_answer_acc = (
+        sum(train_answer_accuracies) / len(train_answer_accuracies)
+        if train_answer_accuracies
+        else 0.0
     )
     min_acc = min(filler_accuracies) if filler_accuracies else 0.0
     max_acc = max(filler_accuracies) if filler_accuracies else 0.0
+    cot_diagnostics = _aggregate_cot_diagnostics(per_seed_results)
 
     model_dict = _resolved_model_dict(model_cfg, task_cfg)
     train_dict = asdict(train_cfg)
@@ -169,6 +204,16 @@ def compile_experiment_report(
         seeds_run,
     )
 
+    metrics: Dict[str, Any] = {
+        "filler_accuracy": mean_filler_acc,
+        "mean_accuracy": mean_filler_acc,
+        "min_accuracy": min_acc,
+        "max_accuracy": max_acc,
+        "per_seed_accuracies": filler_accuracies,
+        "best_training_answer_accuracy": mean_train_answer_acc,
+        **cot_diagnostics,
+    }
+
     return {
         "run_id": run_id,
         "run_config": run_config,
@@ -190,13 +235,39 @@ def compile_experiment_report(
         },
         "majority_class_baseline": majority_class_baseline,
         "realized_mixture_counts": realized_mixture_counts,
-        "metrics": {
-            "filler_accuracy": mean_filler_acc,
-            "cot_accuracy": mean_cot_acc,
-            "mean_accuracy": mean_filler_acc,
-            "min_accuracy": min_acc,
-            "max_accuracy": max_acc,
-            "per_seed_accuracies": filler_accuracies,
+        "metrics": metrics,
+        "metric_semantics": {
+            "cot_answer_given_cot_accuracy": (
+                "Final True/False accuracy when the ground-truth CoT prefix is "
+                "teacher-forced. This is retained as a leakage-aware diagnostic "
+                "and is not evidence that the model independently computed 3SUM."
+            ),
+            "cot_pair_position_token_accuracy": (
+                "Exact next-token accuracy on reduced CoT pair-position tokens; "
+                "randomized vocab reduction imposes an artificial ceiling."
+            ),
+            "cot_pair_position_semantic_accuracy": (
+                "Pair-position accuracy accepting either semantically valid "
+                "summand token under reduced-vocabulary randomization."
+            ),
+            "cot_sum_token_accuracy": (
+                "Exact next-token accuracy on sampled unmatched pair-sum tokens."
+            ),
+            "cot_sum_semantic_accuracy": (
+                "Unmatched pair-sum accuracy accepting any coordinate digit that "
+                "is valid for the pair under vocab reduction."
+            ),
+            "cot_match_index_accuracy": (
+                "Exact accuracy for matched-pair result tokens that identify the "
+                "third matching tuple."
+            ),
+            "cot_result_semantic_accuracy": (
+                "Semantic accuracy across all CoT result slots (sum or match)."
+            ),
+            "cot_result_nll": (
+                "Mean teacher-forced negative log-likelihood over CoT result "
+                "slots only, excluding pair-position tokens and final answer."
+            ),
         },
         "eval_seed": eval_seed,
         "val_samples": val_samples,
