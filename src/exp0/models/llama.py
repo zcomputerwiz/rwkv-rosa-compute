@@ -16,26 +16,25 @@ class RMSNorm(nn.Module):
         return x * torch.rsqrt(var + self.eps) * self.weight
 
 
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """Rotate the two hidden-dimension halves as Hugging Face Llama does."""
+    half = x.shape[-1] // 2
+    x1 = x[..., :half]
+    x2 = x[..., half:]
+    return torch.cat((-x2, x1), dim=-1)
+
+
 def apply_rotary_pos_emb(
     x: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
 ) -> torch.Tensor:
-    """Apply pairwise rotary position encoding to the final dimension."""
-    x_even = x[..., 0::2]
-    x_odd = x[..., 1::2]
-    rotated = torch.stack(
-        (
-            x_even * cos - x_odd * sin,
-            x_even * sin + x_odd * cos,
-        ),
-        dim=-1,
-    )
-    return rotated.flatten(-2)
+    """Apply the split-half Llama rotary transform to Q or K."""
+    return (x * cos) + (rotate_half(x) * sin)
 
 
 class RotaryEmbedding(nn.Module):
-    """Standard Llama-style rotary position encoding for Q/K projections."""
+    """Standard Hugging Face Llama rotary position encoding for Q/K."""
 
     def __init__(self, head_dim: int, base: float = 10000.0):
         super().__init__()
@@ -66,9 +65,11 @@ class RotaryEmbedding(nn.Module):
             dtype=self.inv_freq.dtype,
         )
         frequencies = torch.outer(positions, self.inv_freq.to(device=device))
-        # [1, 1, T, D/2] broadcasts over batch and attention heads.
-        cos = frequencies.cos().to(dtype=dtype)[None, None, :, :]
-        sin = frequencies.sin().to(dtype=dtype)[None, None, :, :]
+        # Llama duplicates the D/2 frequency vector before applying rotate_half.
+        embedding = torch.cat((frequencies, frequencies), dim=-1)
+        # [1, 1, T, D] broadcasts over batch and attention heads.
+        cos = embedding.cos().to(dtype=dtype)[None, None, :, :]
+        sin = embedding.sin().to(dtype=dtype)[None, None, :, :]
         return cos, sin
 
     def forward(
