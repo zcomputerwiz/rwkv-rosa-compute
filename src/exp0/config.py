@@ -33,6 +33,7 @@ class ModelConfig:
     init_mode: str = "random"
     rwkv_checkpoint: Optional[str] = None
     rwkv_checkpoint_sha256: Optional[str] = None
+    rwkv_kernel: str = "reference"
     hidden_size: int = 384
     num_hidden_layers: int = 4
     num_attention_heads: int = 6
@@ -46,6 +47,15 @@ class ModelConfig:
             raise ValueError(f"Unknown architecture: {self.architecture}")
         if self.init_mode not in {"random", "pretrained"}:
             raise ValueError(f"Unknown initialization mode: {self.init_mode}")
+        if self.rwkv_kernel not in {"reference", "cuda"}:
+            raise ValueError(
+                "rwkv_kernel must be one of: reference, cuda; "
+                f"got {self.rwkv_kernel!r}"
+            )
+        if self.architecture != "rwkv" and self.rwkv_kernel != "reference":
+            raise ValueError("rwkv_kernel='cuda' is only valid for RWKV models.")
+        if self.rwkv_kernel == "cuda" and self.head_dim != 64:
+            raise ValueError("The pinned RWKV-7 CUDA kernel currently requires head_dim=64.")
 
 
 @dataclass

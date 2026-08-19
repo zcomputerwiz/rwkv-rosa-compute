@@ -13,6 +13,7 @@ def _sweep_args(**overrides) -> argparse.Namespace:
         "architecture": "llama",
         "init": "random",
         "rwkv_checkpoint": None,
+        "rwkv_kernel": "reference",
         "hidden_size": 384,
         "num_hidden_layers": 4,
         "num_attention_heads": 6,
@@ -55,6 +56,7 @@ def test_build_runner_command():
     assert cmd[0] == sys.executable
     assert cmd[1] == "scripts/run_experiment.py"
     assert cmd[cmd.index("--init") + 1] == "random"
+    assert cmd[cmd.index("--rwkv_kernel") + 1] == "reference"
     assert cmd[cmd.index("--num_filler") + 1] == str(n)
     assert cmd[cmd.index("--num_samples") + 1] == "1000"
     assert cmd[cmd.index("--val_samples") + 1] == "200"
@@ -77,11 +79,12 @@ def test_build_runner_command():
     assert "--lr" not in cmd
 
 
-def test_build_runner_command_forwards_checkpoint():
+def test_build_runner_command_forwards_checkpoint_and_kernel():
     args = _sweep_args(
         architecture="rwkv",
         init="pretrained",
         rwkv_checkpoint="models/rwkv.pth",
+        rwkv_kernel="cuda",
         hidden_size=768,
         num_hidden_layers=12,
         intermediate_size=3072,
@@ -93,6 +96,7 @@ def test_build_runner_command_forwards_checkpoint():
 
     assert cmd[cmd.index("--init") + 1] == "pretrained"
     assert cmd[cmd.index("--rwkv_checkpoint") + 1] == "models/rwkv.pth"
+    assert cmd[cmd.index("--rwkv_kernel") + 1] == "cuda"
     assert cmd[cmd.index("--precision") + 1] == "bf16"
     assert "--fused_adamw" in cmd
 
@@ -106,9 +110,25 @@ def test_llama_defaults_to_random_initialization():
     assert model_cfg.init_mode == "random"
     assert model_cfg.rwkv_checkpoint is None
     assert model_cfg.rwkv_checkpoint_sha256 is None
+    assert model_cfg.rwkv_kernel == "reference"
     assert train_cfg.precision == "fp32"
     assert train_cfg.fused_adamw is False
     assert train_cfg.val_num_workers == 0
+
+
+def test_llama_rejects_rwkv_cuda_kernel():
+    args = run_experiment.get_parser().parse_args(
+        [
+            "--architecture",
+            "llama",
+            "--rwkv_kernel",
+            "cuda",
+            "--device",
+            "cpu",
+        ]
+    )
+    with pytest.raises(ValueError, match="only valid for RWKV"):
+        run_experiment.build_configs(args)
 
 
 def test_rwkv_requires_pretrained_checkpoint_or_explicit_random():
@@ -130,6 +150,26 @@ def test_rwkv_requires_pretrained_checkpoint_or_explicit_random():
     )
     _, model_cfg, _ = run_experiment.build_configs(random_args)
     assert model_cfg.init_mode == "random"
+
+
+def test_rwkv_cuda_kernel_requires_head_dim_64():
+    parser = run_experiment.get_parser()
+    args = parser.parse_args(
+        [
+            "--architecture",
+            "rwkv",
+            "--init",
+            "random",
+            "--rwkv_kernel",
+            "cuda",
+            "--head_dim",
+            "32",
+            "--hidden_size",
+            "384",
+        ]
+    )
+    with pytest.raises(ValueError, match="requires head_dim=64"):
+        run_experiment.build_configs(args)
 
 
 def test_pretrained_rwkv_checkpoint_is_explicit_and_hashed(tmp_path):
@@ -185,7 +225,22 @@ def test_sweep_id_changes_with_scientific_configuration():
     changed_ffn = _sweep_args(intermediate_size=3072)
     changed_seeds = _sweep_args(seeds=[42, 99])
     changed_precision = _sweep_args(precision="bf16")
+    changed_kernel = _sweep_args(
+        architecture="rwkv",
+        init="random",
+        rwkv_kernel="cuda",
+        precision="bf16",
+        device="cuda",
+    )
+    rwkv_reference = _sweep_args(
+        architecture="rwkv",
+        init="random",
+        rwkv_kernel="reference",
+        precision="bf16",
+        device="cuda",
+    )
 
     assert compute_sweep_id(base) != compute_sweep_id(changed_ffn)
     assert compute_sweep_id(base) != compute_sweep_id(changed_seeds)
     assert compute_sweep_id(base) != compute_sweep_id(changed_precision)
+    assert compute_sweep_id(changed_kernel) != compute_sweep_id(rwkv_reference)

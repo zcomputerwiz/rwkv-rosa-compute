@@ -116,10 +116,11 @@ def test_runner_training_wiring_uses_real_train_signature(tmp_path, monkeypatch)
     assert report["initialization"]["mode"] == "random"
 
 
-def test_create_model_honors_rwkv_head_dim():
+def test_create_model_honors_rwkv_head_dim_and_kernel():
     model_cfg = ModelConfig(
         architecture="rwkv",
         init_mode="random",
+        rwkv_kernel="reference",
         hidden_size=128,
         num_hidden_layers=1,
         num_attention_heads=4,
@@ -133,6 +134,23 @@ def test_create_model_honors_rwkv_head_dim():
     time_mix = model.backbone.layers[0].time_mix
     assert time_mix.head_dim == 32
     assert time_mix.num_heads == 4
+    assert time_mix.rwkv_kernel == "reference"
+
+    cuda_model = create_model(
+        ModelConfig(
+            architecture="rwkv",
+            init_mode="random",
+            rwkv_kernel="cuda",
+            hidden_size=128,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=256,
+            head_dim=64,
+            device="cuda",
+        ),
+        d_input=32,
+    )
+    assert cuda_model.backbone.layers[0].time_mix.rwkv_kernel == "cuda"
 
 
 def _per_seed_results():
@@ -294,6 +312,32 @@ def test_compute_run_id_covers_full_model_configuration():
         [1],
     ) == compute_run_id(
         same_checkpoint_elsewhere,
+        train_cfg,
+        task_cfg,
+        123,
+        1000,
+        [1],
+    )
+
+    reference_rwkv = ModelConfig(
+        architecture="rwkv",
+        init_mode="random",
+        rwkv_kernel="reference",
+    )
+    cuda_rwkv = ModelConfig(
+        architecture="rwkv",
+        init_mode="random",
+        rwkv_kernel="cuda",
+    )
+    assert compute_run_id(
+        reference_rwkv,
+        train_cfg,
+        task_cfg,
+        123,
+        1000,
+        [1],
+    ) != compute_run_id(
+        cuda_rwkv,
         train_cfg,
         task_cfg,
         123,

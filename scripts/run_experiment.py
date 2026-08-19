@@ -50,6 +50,17 @@ def get_parser() -> argparse.ArgumentParser:
         default=None,
         help="Explicit path to a stock pretrained RWKV-7 x070 checkpoint",
     )
+    parser.add_argument(
+        "--rwkv_kernel",
+        type=str,
+        default="reference",
+        choices=["reference", "cuda"],
+        help=(
+            "RWKV recurrence implementation. 'reference' is the FP32 PyTorch "
+            "oracle. 'cuda' uses the pinned upstream BF16 x070 CUDA kernel and "
+            "requires --architecture rwkv --precision bf16 --head_dim 64."
+        ),
+    )
     parser.add_argument("--hidden_size", type=int, default=384)
     parser.add_argument("--num_hidden_layers", type=int, default=4)
     parser.add_argument("--num_attention_heads", type=int, default=6)
@@ -215,6 +226,7 @@ def build_configs(
         init_mode=init_mode,
         rwkv_checkpoint=checkpoint_path,
         rwkv_checkpoint_sha256=checkpoint_sha256,
+        rwkv_kernel=args.rwkv_kernel,
         hidden_size=args.hidden_size,
         num_hidden_layers=args.num_hidden_layers,
         num_attention_heads=num_heads,
