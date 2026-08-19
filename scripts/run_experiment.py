@@ -31,7 +31,7 @@ def main():
     parser.add_argument("--filler_ratio", type=float, default=0.5)
     parser.add_argument("--serial_ratio", type=float, default=0.0)
     parser.add_argument("--num_samples", type=int, default=1000)
-    parser.add_argument("--val_samples", type=int, default=200)
+    parser.add_argument("--val_samples", type=int, default=2000)
     parser.add_argument("--eval_seed", type=int, default=9999, help="Fixed eval seed for validation set")
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44])
     parser.add_argument("--epochs", type=int, default=3)
@@ -39,6 +39,8 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--out_dir", type=str, default="results/exp0")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--vocab_reduction", action=argparse.BooleanOptionalAction, default=True, help="Enable/disable vocab reduction")
+    parser.add_argument("--num_workers", type=int, default=0, help="Number of DataLoader workers. Note: On Windows, >0 uses spawn and pickles dataset copies. For 32 GB target RAM, start conservatively at 2 and monitor.")
     args = parser.parse_args()
 
     task_cfg = Task3SumConfig(
@@ -46,6 +48,7 @@ def main():
         dimension=args.dimension,
         num_filler=args.num_filler if args.num_filler is not None else args.length**2,
         num_samples=args.num_samples,
+        vocab_reduction=args.vocab_reduction,
     )
 
     num_heads = args.num_attention_heads
@@ -67,7 +70,9 @@ def main():
     # Fixed validation set generated ONCE from eval_seed (T5)
     val_rng = random.Random(args.eval_seed)
     val_instances = [generate_instance(length=args.length, dimension=args.dimension, rng=val_rng) for _ in range(args.val_samples)]
-    val_ds = Task3SumDataset(val_instances, format_type="filler", num_filler=task_cfg.num_filler, vocab=vocab, seed=args.eval_seed)
+
+    filler_val_ds = Task3SumDataset(val_instances, format_type="filler", num_filler=task_cfg.num_filler, vocab=vocab, seed=args.eval_seed, vocab_reduction=args.vocab_reduction)
+    cot_val_ds = Task3SumDataset(val_instances, format_type="parallel_cot", num_filler=task_cfg.num_filler, vocab=vocab, seed=args.eval_seed, vocab_reduction=args.vocab_reduction)
 
     num_pos = sum(1 for inst in val_instances if inst.has_3sum)
     majority_baseline = max(num_pos, len(val_instances) - num_pos) / len(val_instances)
@@ -85,6 +90,7 @@ def main():
             num_filler=task_cfg.num_filler,
             vocab=vocab,
             seed=seed,
+            vocab_reduction=args.vocab_reduction,
             parallel_ratio=args.parallel_ratio,
             filler_ratio=args.filler_ratio,
             serial_ratio=args.serial_ratio,
@@ -103,9 +109,12 @@ def main():
             filler_ratio=args.filler_ratio,
             serial_ratio=args.serial_ratio,
         )
+        train_cfg.num_workers = args.num_workers
 
-        _, history = train_model(model_cfg, train_cfg, task_cfg, train_ds, val_ds)
+        _, history = train_model(model_cfg, train_cfg, task_cfg, train_ds, filler_val_dataset=filler_val_ds, cot_val_dataset=cot_val_ds)
         history["seed"] = seed
+        history["training_seed"] = seed
+        history["task_seed"] = seed
         per_seed_results.append(history)
 
     report = compile_experiment_report(
@@ -115,6 +124,8 @@ def main():
         per_seed_results,
         majority_class_baseline=majority_baseline,
         realized_mixture_counts=realized_counts_aggregate,
+        eval_seed=args.eval_seed,
+        val_samples=args.val_samples,
     )
 
     out_dir = Path(args.out_dir)
