@@ -70,16 +70,18 @@ def test_train_model_dual_validation():
         cot_val_dataset=cot_ds,
     )
 
-    assert "epoch_train_losses" in history
     assert len(history["epoch_train_losses"]) == train_cfg.epochs
-    assert "epoch_filler_accuracies" in history
+    assert len(history["epoch_train_answer_accuracies"]) == train_cfg.epochs
     assert len(history["epoch_filler_accuracies"]) == train_cfg.epochs
-    assert "epoch_cot_accuracies" in history
-    assert len(history["epoch_cot_accuracies"]) == train_cfg.epochs
+    assert len(history["epoch_cot_diagnostics"]) == train_cfg.epochs
 
+    assert "best_train_answer_accuracy" in history
     assert "best_filler_accuracy" in history
-    assert "best_cot_accuracy" in history
-    assert "best_val_accuracy" in history
+    assert "best_cot_diagnostics" in history
+    assert "cot_answer_given_cot_accuracy" in history["best_cot_diagnostics"]
+    assert "cot_result_semantic_accuracy" in history["best_cot_diagnostics"]
+    assert "cot_result_nll" in history["best_cot_diagnostics"]
+    assert "best_cot_accuracy" not in history
     assert history["best_val_accuracy"] == history["best_filler_accuracy"]
 
 
@@ -102,9 +104,10 @@ def test_train_model_single_validation():
     _, history = train_model(model_cfg, train_cfg, task_cfg, train_ds, val_ds)
 
     assert "epoch_train_losses" in history
+    assert "epoch_train_answer_accuracies" in history
     assert "epoch_filler_accuracies" in history
-    assert "epoch_cot_accuracies" not in history
-    assert "best_cot_accuracy" not in history
+    assert "epoch_cot_diagnostics" not in history
+    assert "best_cot_diagnostics" not in history
 
 
 def test_missing_ids_fails():
