@@ -150,10 +150,9 @@ class RWKV7TimeMix(nn.Module):
             self.k_a = nn.Parameter(torch.zeros(1, 1, C) + 1.02)
             self.r_k = nn.Parameter(torch.zeros(H, N) - 0.04)
 
-            # Receptance/key/value linear layers initialized with uniform/orthogonal
-            nn.init.uniform_(self.receptance.weight, -0.5 / (C**0.5), 0.5 / (C**0.5))
-            nn.init.uniform_(self.key.weight, -0.05 / (C**0.5), 0.05 / (C**0.5))
-            nn.init.uniform_(self.value.weight, -0.5 / (C**0.5), 0.5 / (C**0.5))
+            # Receptance/key/value linear layers use PyTorch default initialization (Kaiming uniform).
+            # Output linear layer zero initialization matches upstream generate_init_weight scale 0
+            # in external/RWKV-LM/RWKV-v7/train_temp/src/model.py (.att.output.).
             nn.init.zeros_(self.output.weight)
 
     def forward(self, x: torch.Tensor, v_first: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
@@ -212,7 +211,6 @@ class RWKV7ChannelMix(nn.Module):
         self.key = nn.Linear(hidden_size, intermediate_size, bias=False)
         self.value = nn.Linear(intermediate_size, hidden_size, bias=False)
 
-        nn.init.uniform_(self.key.weight, -0.5 / (hidden_size**0.5), 0.5 / (hidden_size**0.5))
         nn.init.zeros_(self.value.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

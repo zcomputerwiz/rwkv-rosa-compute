@@ -33,6 +33,11 @@ jobs:
         run: |
           ruff check .
 
-      - name: Run Pytest (CPU only)
+      - name: Run ROSA compatibility tests
         run: |
-          pytest -m "not cuda and not checkpoint and not slow" -v
+          pytest -m "not cuda and not checkpoint and not slow and not exp0" -v
+
+      - name: Run Experiment 0 tests
+        if: always()
+        run: |
+          pytest -m "exp0 and not slow" -v
