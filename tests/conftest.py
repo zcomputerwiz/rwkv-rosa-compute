@@ -1,9 +1,19 @@
+from pathlib import Path
+
 import pytest
+
+
+def pytest_collection_modifyitems(items):
+    """Keep all test_exp0_* modules in the Experiment 0 CI partition."""
+    for item in items:
+        if Path(str(item.fspath)).name.startswith("test_exp0_"):
+            item.add_marker(pytest.mark.exp0)
 
 
 @pytest.fixture
 def sample_config():
     from rosa_compute import ROSAConfig
+
     return ROSAConfig()
 
 
