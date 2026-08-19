@@ -62,10 +62,10 @@ def format_a_parallel_cot(
 
             if vocab_reduction:
                 pair_label = labels[i] if rng.random() < 0.5 else labels[j]
-                sum_digit = str(rng.choice(sum_ij))
                 if matching_k is not None:
                     cot_tokens.append(f"{pair_label} {labels[matching_k]}")
                 else:
+                    sum_digit = str(rng.choice(sum_ij))
                     cot_tokens.append(f"{pair_label} {sum_digit}")
             else:
                 pair_label = f"{labels[i]}{labels[j]}"
