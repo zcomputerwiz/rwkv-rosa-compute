@@ -398,7 +398,7 @@ def main():
             fused_adamw=args.fused_adamw,
         )
 
-        _, history = train_model(
+        trained_model, history = train_model(
             model_cfg,
             train_cfg,
             task_cfg,
@@ -410,6 +410,10 @@ def main():
         history["training_seed"] = seed
         history["task_seed"] = seed
         per_seed_results.append(history)
+
+        del trained_model, train_ds, train_instances
+        if model_cfg.device.startswith("cuda") and torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     report = compile_experiment_report(
         model_cfg,
