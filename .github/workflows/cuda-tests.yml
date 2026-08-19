@@ -1,3 +1,7 @@
+# NOTE: This workflow targets self-hosted GPU runners with labels [self-hosted, linux, gpu].
+# If no active self-hosted runner matching these labels is registered, workflow_dispatch
+# runs will queue indefinitely rather than failing.
+
 name: CUDA Tests (Self-Hosted)
 
 on:

@@ -1,6 +1,6 @@
 """Training loop for Experiment 0 models."""
-import time
 import random
+import time
 from typing import Any, Dict, Tuple
 
 import torch
