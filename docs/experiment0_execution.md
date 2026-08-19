@@ -14,19 +14,25 @@ The repaired positive-control implementation uses:
 
 ```text
 4-layer Llama-style causal transformer by default
-standard split-half Llama RoPE (theta = 10000)
-hard-coded tuple-position input features
+standard Hugging Face Llama split-half RoPE (theta = 10000)
+Llama backbone/head initializer range = 0.02
+hard-coded tuple digit + position features
+shared tuple/CoT Match-3 input projection
 supervised ':' continuation-boundary token
 n^2 filler positions unless N is explicitly overridden
+AdamW beta = (0.9, 0.95)
+5% linear warmup followed by linear LR decay
 ```
 
-The separator is a required protocol invariant. Pre-repair runs that dropped the
-separator and used a positionless transformer are diagnostic artifacts, not valid
+The separator and shared Match-3 input-feature seam are required protocol
+invariants. Pre-repair runs used a positionless transformer, dropped the
+supervised continuation boundary, and projected continuation tokens through an
+unrelated embedding table; those runs are diagnostic artifacts rather than valid
 negative Experiment 0A results.
 
 See [`experiment0_positive_control_repair.md`](experiment0_positive_control_repair.md)
-for the diagnosis, implementation plan, CoT metric semantics, and progressive
-rerun procedure.
+for the diagnosis, source-code cross-check, implementation plan, CoT metric
+semantics, and progressive rerun procedure.
 
 Example smoke configuration:
 
@@ -46,14 +52,33 @@ python scripts/run_experiment.py \
 ```
 
 Before scaling length-6 or length-12 substantially, run the easy immediate
-control described in the repair plan. The CPU test suite already enforces a
-smaller fixed-set overfit gate, but held-out generalization remains an
-experimental measurement rather than a unit-test assertion.
+control described in the repair plan. The CPU test suite enforces a smaller
+fixed-set overfit gate, but held-out generalization remains an experimental
+measurement rather than a unit-test assertion.
+
+### Training protocol provenance
+
+The default positive-control optimizer now mirrors the authors' Match-3 runner:
+
+```text
+learning_rate    1e-4
+AdamW betas      (0.9, 0.95)
+warmup_fraction  0.05
+lr_schedule      linear_warmup_decay
+```
+
+Immediate-answer runs retain this repository's existing immediate-control
+weight-decay/gradient-clipping/epoch-multiplier behavior. Precision remains an
+explicit independent setting (`fp32`, `bf16`, or `fp16`) and is always recorded.
+
+Every optimizer/schedule field is part of `TrainConfig` and therefore the
+canonical run identity. N-sweep identity also records the fixed positive-control
+protocol so a future protocol change cannot silently overwrite an older sweep.
 
 ### CoT diagnostics
 
-Do not interpret a high final answer accuracy with a supplied ground-truth CoT
-as evidence that the model independently learned 3SUM. Parallel CoT explicitly
+Do not interpret high final answer accuracy with a supplied ground-truth CoT as
+evidence that the model independently learned 3SUM. Parallel CoT explicitly
 contains match information.
 
 The old ambiguous `cot_accuracy` field has been removed. Reports now distinguish:
@@ -78,10 +103,17 @@ randomness. The semantic variants accept any computationally equivalent reduced
 output, while the exact metrics retain visibility into the sampled training
 objective.
 
-Reports also include `epoch_train_answer_accuracies` and
-`best_train_answer_accuracy` per seed. These values are collected from the
-existing training forward pass and help distinguish inability to fit the task
-from failure to generalize.
+Reports also include:
+
+```text
+epoch_online_train_answer_accuracies
+best_online_train_answer_accuracy
+```
+
+per seed, plus aggregate `best_online_training_answer_accuracy`. These values
+come from each training batch's existing forward pass before that batch's
+optimizer update. They are therefore an online fit diagnostic, not a frozen
+end-of-epoch training-set evaluation.
 
 The documented full-scale 0A protocol may use a larger training set, but the
 scientific identity of every run is recorded in the generated report. Do not
@@ -141,13 +173,16 @@ Experiment 0 replaces the stock language model's vocabulary interface with the
 synthetic-task `InputEmbedWrapper`. Consequently:
 
 ```text
-stock RWKV-7 recurrent backbone     pretrained
-original LM embedding table         not used
-original LM vocabulary head         not used
-Experiment 0 tuple projection       randomly initialized
-Experiment 0 target embeddings      randomly initialized
-Experiment 0 classifier head        randomly initialized
+stock RWKV-7 recurrent backbone       pretrained
+original LM embedding table           not used
+original LM vocabulary head           not used
+Experiment 0 shared input projection  randomly initialized
+Experiment 0 classifier head          randomly initialized
 ```
+
+The same repaired shared Match-3 feature mapping is used for Llama and RWKV so
+0A/0B compare the backbone mechanisms rather than different synthetic-task
+interfaces.
 
 Reports therefore label a valid 0B initialization as:
 
@@ -247,7 +282,11 @@ layer count
 FFN/intermediate size
 RWKV head dimension
 Llama RoPE configuration
+Llama initializer range
+shared Match-3 input-feature protocol
 continuation-boundary protocol
+Adam betas
+LR schedule / warmup
 initialization mode
 checkpoint SHA-256
 training sample count
@@ -265,7 +304,10 @@ evaluation seed
 
 `scripts/sweep_n.py` forwards the initialization/checkpoint and scientific CLI
 configuration into each N run. Its default learning rate matches the 0A runner
-(`1e-4`). A sweep receives its own deterministic sweep ID and is stored under:
+(`1e-4`), and its deterministic sweep identity also records fixed protocol
+settings such as RoPE, shared feature input, Adam betas, and LR scheduling.
+
+A sweep is stored under:
 
 ```text
 <out_dir>/<architecture>_<sweep_id>/
@@ -279,7 +321,7 @@ configuration into each N run. Its default learning rate matches the 0A runner
     sweep.json
 ```
 
-The sweep summary records filler accuracy, training-answer accuracy, the
+The sweep summary records filler accuracy, online training-answer accuracy, the
 leakage-aware answer-given-CoT metric, intermediate CoT semantic metrics, and
 CoT result NLL. It does not emit the removed ambiguous `cot_accuracy` field.
 
@@ -315,6 +357,7 @@ pytest -m "exp0 and not cuda and not slow" -v
 
 The Experiment 0 suite includes a real runner-to-training API-seam test with
 zero training epochs, exact answer-scoring regressions, deterministic data
-contracts, Llama RoPE/position tests, separator supervision, CoT diagnostic
-leakage separation, a tiny fixed-set overfit gate, RWKV recurrence equivalence
-tests, and synthetic stock-checkpoint mapping tests.
+contracts, Llama RoPE/position tests, shared-feature input equivalence,
+initializer/scheduler checks, separator supervision, CoT diagnostic leakage
+separation, a tiny fixed-set overfit gate, RWKV recurrence equivalence tests,
+and synthetic stock-checkpoint mapping tests.
