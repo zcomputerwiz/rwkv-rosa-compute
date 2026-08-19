@@ -103,28 +103,30 @@ def test_parallel_cot_length_invariant():
     from math import comb
     for vocab_red in [True, False]:
         for length, dimension in [(8, 2), (12, 3), (16, 4)]:
-            lengths = set()
-            for _ in range(200):
-                # deliberately mixed pos/neg examples
-                inst = generate_instance(length=length, dimension=dimension, target_has_3sum=None)
-                fmt_a = format_a_parallel_cot(inst, vocab_reduction=vocab_red)
-                tokens = fmt_a.split()
+            pos_lengths = set()
+            neg_lengths = set()
+            rng = random.Random(42)
+            for _ in range(100):
+                # Explicitly generate positive and negative examples
+                pos_inst = generate_instance(length=length, dimension=dimension, target_has_3sum=True, rng=rng)
+                neg_inst = generate_instance(length=length, dimension=dimension, target_has_3sum=False, rng=rng)
 
-                # Check formatting: Matching pairs emit exactly two tokens
-                # This is a bit complex to assert universally without knowing which pair is matching,
-                # but the test checks lengths, which implicitly verifies matching pairs don't add extra length.
+                pos_fmt = format_a_parallel_cot(pos_inst, vocab_reduction=vocab_red, rng=rng)
+                neg_fmt = format_a_parallel_cot(neg_inst, vocab_reduction=vocab_red, rng=rng)
 
-                # Full string split by whitespace token count:
-                lengths.add(len(tokens))
+                pos_lengths.add(len(pos_fmt.split()))
+                neg_lengths.add(len(neg_fmt.split()))
 
-            assert len(lengths) == 1
-            common_len = list(lengths)[0]
+            # Assert both positive and negative groups are non-empty
+            assert len(pos_lengths) > 0
+            assert len(neg_lengths) > 0
 
-            # Assert exact counts where practical: length + 1 + 2 * C(length, 2) + 2
-            # Wait, format_a_parallel_cot output starts with:
-            # prefix (length tokens + 1 colon token)
-            # + for each pair (i, j) i < j: pair emits 2 tokens
-            # + ans_str ("ANS" "True"/"False" -> 2 tokens)
+            # Combine sets and assert there is exactly one unique length across both classes
+            combined_lengths = pos_lengths.union(neg_lengths)
+            assert len(combined_lengths) == 1
+            common_len = list(combined_lengths)[0]
+
+            # Assert exact counts: length + 1 + 2 * C(length, 2) + 2
             expected_len = length + 1 + 2 * comb(length, 2) + 2
             assert common_len == expected_len
 
@@ -134,23 +136,28 @@ def test_parallel_cot_length_invariant():
 @pytest.mark.exp0
 def test_serial_cot_length_distributions():
     """Test serial CoT length distributions overlap for pos/neg."""
+    rng = random.Random(42)
     for length, dimension in [(8, 2), (12, 3)]:
         pos_lengths = []
         neg_lengths = []
         for _ in range(200):
-            target = random.choice([True, False])
-            inst = generate_instance(length=length, dimension=dimension, target_has_3sum=target)
-            fmt_d = format_d_serial_cot(inst)
-            tokens = fmt_d.split()
-            if target:
-                pos_lengths.append(len(tokens))
-            else:
-                neg_lengths.append(len(tokens))
+            # Explicitly generate pos and neg examples
+            pos_inst = generate_instance(length=length, dimension=dimension, target_has_3sum=True, rng=rng)
+            neg_inst = generate_instance(length=length, dimension=dimension, target_has_3sum=False, rng=rng)
 
-        # Distributions must overlap
-        pos_range = (min(pos_lengths), max(pos_lengths))
-        neg_range = (min(neg_lengths), max(neg_lengths))
-        assert not (pos_range[1] < neg_range[0] or neg_range[1] < pos_range[0])
+            pos_fmt = format_d_serial_cot(pos_inst)
+            neg_fmt = format_d_serial_cot(neg_inst)
+
+            pos_lengths.append(len(pos_fmt.split()))
+            neg_lengths.append(len(neg_fmt.split()))
+
+        # Assert both positive and negative groups are non-empty
+        assert len(pos_lengths) > 0
+        assert len(neg_lengths) > 0
+
+        # Assert actual observed shared sequence length
+        shared_lengths = set(pos_lengths) & set(neg_lengths)
+        assert len(shared_lengths) > 0
 
 @pytest.mark.exp0
 def test_dataset_determinism():

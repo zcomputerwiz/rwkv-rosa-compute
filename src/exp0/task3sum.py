@@ -46,6 +46,8 @@ def generate_instance(
     If target_has_3sum is False, guarantees no solution exists via corruption/resampling.
     If None, picks randomly with 50% target.
     """
+    if mod != 10:
+        raise ValueError(f"Modulus other than 10 is not supported in Experiment 0, got mod={mod}")
     if rng is None:
         rng = random.Random()
 
