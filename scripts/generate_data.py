@@ -50,7 +50,7 @@ def main():
     parser.add_argument("--num_filler", type=int, default=None, help="Number of filler tokens N (default n^2)")
     parser.add_argument("--num_samples", type=int, default=10000, help="Number of dataset samples")
     parser.add_argument("--seed", type=int, default=42, help="Master random seed")
-    parser.add_argument("--vocab_reduction", action="store_true", default=True, help="Enable vocab reduction in CoT")
+    parser.add_argument("--vocab_reduction", action=argparse.BooleanOptionalAction, default=True, help="Enable vocab reduction in CoT")
     parser.add_argument("--out_dir", type=str, default="data/exp0", help="Output directory")
     args = parser.parse_args()
 
