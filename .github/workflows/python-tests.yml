@@ -51,4 +51,4 @@ jobs:
       - name: Run Experiment 0 tests
         if: always()
         run: |
-          pytest -m "exp0 and not slow" -v
+          pytest -m "exp0 and not cuda and not slow" -v

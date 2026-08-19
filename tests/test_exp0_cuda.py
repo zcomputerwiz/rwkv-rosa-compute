@@ -156,6 +156,20 @@ def test_llama_bf16_flash_sdpa_smoke():
     except ImportError:
         pytest.skip("This PyTorch build does not expose sdpa_kernel")
 
+    # sdpa_kernel is exclusive: restricting to FLASH_ATTENTION also disables
+    # EFFICIENT_ATTENTION and MATH. PyTorch's Windows wheels ship without the
+    # flash backend compiled in, so that leaves zero backends and raises
+    # "No available kernel". Probe before asserting anything about flash.
+    probe = torch.randn(1, 4, 8, 64, device="cuda", dtype=torch.bfloat16)
+    try:
+        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+            F.scaled_dot_product_attention(probe, probe, probe, is_causal=True)
+    except RuntimeError as exc:
+        pytest.skip(
+            "Flash Attention backend unavailable in this PyTorch build "
+            f"(Windows wheels ship without it): {exc}"
+        )
+
     model = create_model(
         ModelConfig(
             architecture="llama",

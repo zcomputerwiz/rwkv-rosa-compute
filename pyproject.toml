@@ -13,7 +13,7 @@ authors = [
     { name = "zcomputerwiz" }
 ]
 dependencies = [
-    "torch",
+    "torch>=2.4,<3",
     "numpy>=1.24",
 ]
 
