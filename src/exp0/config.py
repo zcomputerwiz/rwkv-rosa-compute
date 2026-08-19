@@ -14,6 +14,7 @@ class Task3SumConfig:
     num_filler: Optional[int] = None
     true_rate: float = 0.5
     vocab_reduction: bool = True
+    include_separator_token: bool = True
     seed: int = 42
     num_samples: int = 10000
 
@@ -39,6 +40,7 @@ class ModelConfig:
     num_attention_heads: int = 6
     intermediate_size: int = 1536
     head_dim: int = 64
+    llama_rope_theta: float = 10000.0
     vocab_size: int = 256
     device: str = "cpu"
 
@@ -55,7 +57,11 @@ class ModelConfig:
         if self.architecture != "rwkv" and self.rwkv_kernel != "reference":
             raise ValueError("rwkv_kernel='cuda' is only valid for RWKV models.")
         if self.rwkv_kernel == "cuda" and self.head_dim != 64:
-            raise ValueError("The pinned RWKV-7 CUDA kernel currently requires head_dim=64.")
+            raise ValueError(
+                "The pinned RWKV-7 CUDA kernel currently requires head_dim=64."
+            )
+        if self.llama_rope_theta <= 0:
+            raise ValueError("llama_rope_theta must be greater than zero.")
 
 
 @dataclass
