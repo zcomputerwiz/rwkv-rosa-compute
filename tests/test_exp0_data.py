@@ -1,6 +1,7 @@
-"""Unit tests for Milestone 1 & T2/T4: 3SUM task generation, sequence formatting, dataset tensorization, vocabulary, and mixture sampling."""
+"""Tests for Experiment 0 task generation, formatting, and datasets."""
 
 import random
+from math import comb
 
 import pytest
 import torch
@@ -20,13 +21,23 @@ from exp0.task3sum import Instance3Sum, check_3sum, generate_instance
 @pytest.mark.exp0
 def test_3sum_check_and_generation():
     rng = random.Random(123)
-    pos_inst = generate_instance(length=8, dimension=3, target_has_3sum=True, rng=rng)
+    pos_inst = generate_instance(
+        length=8,
+        dimension=3,
+        target_has_3sum=True,
+        rng=rng,
+    )
     assert pos_inst.has_3sum is True
     has_sol, indices = check_3sum(pos_inst.tuples)
     assert has_sol is True
     assert indices == pos_inst.matching_indices
 
-    neg_inst = generate_instance(length=8, dimension=3, target_has_3sum=False, rng=rng)
+    neg_inst = generate_instance(
+        length=8,
+        dimension=3,
+        target_has_3sum=False,
+        rng=rng,
+    )
     assert neg_inst.has_3sum is False
     has_sol_neg, indices_neg = check_3sum(neg_inst.tuples)
     assert has_sol_neg is False
@@ -74,7 +85,9 @@ def test_seeding_reproducibility():
 @pytest.mark.exp0
 def test_dataset_mixture_ratios_and_vocab_freeze():
     rng = random.Random(42)
-    instances = [generate_instance(length=6, dimension=3, rng=rng) for _ in range(100)]
+    instances = [
+        generate_instance(length=6, dimension=3, rng=rng) for _ in range(100)
+    ]
     vocab = build_default_vocab(length=6, dimension=3)
 
     dataset = Task3SumDataset(
@@ -86,107 +99,134 @@ def test_dataset_mixture_ratios_and_vocab_freeze():
         filler_ratio=0.5,
     )
 
-    # Assert 50/50 mixture counts roughly equal across 100 instances
     counts = dataset.realized_counts
     assert counts["parallel_cot"] + counts["filler"] == 100
     assert 40 <= counts["parallel_cot"] <= 60
 
-    # Test that vocabulary is frozen and does not mutate during dataset access
     initial_vocab_len = len(vocab)
     _ = dataset[0]
     _ = dataset[1]
     assert len(vocab) == initial_vocab_len
 
+
 @pytest.mark.exp0
 def test_parallel_cot_length_invariant():
-    """Test length invariance and exact token counts for parallel CoT."""
-    from math import comb
+    """Parallel CoT must have one class-independent whitespace-token length."""
     for vocab_red in [True, False]:
         for length, dimension in [(8, 2), (12, 3), (16, 4)]:
             pos_lengths = set()
             neg_lengths = set()
-            rng = random.Random(42)
-            for _ in range(100):
-                # Explicitly generate positive and negative examples
-                pos_inst = generate_instance(length=length, dimension=dimension, target_has_3sum=True, rng=rng)
-                neg_inst = generate_instance(length=length, dimension=dimension, target_has_3sum=False, rng=rng)
+            generation_rng = random.Random(42)
 
-                pos_fmt = format_a_parallel_cot(pos_inst, vocab_reduction=vocab_red, rng=rng)
-                neg_fmt = format_a_parallel_cot(neg_inst, vocab_reduction=vocab_red, rng=rng)
+            for item_idx in range(100):
+                pos_inst = generate_instance(
+                    length=length,
+                    dimension=dimension,
+                    target_has_3sum=True,
+                    rng=generation_rng,
+                )
+                neg_inst = generate_instance(
+                    length=length,
+                    dimension=dimension,
+                    target_has_3sum=False,
+                    rng=generation_rng,
+                )
+
+                pos_fmt = format_a_parallel_cot(
+                    pos_inst,
+                    vocab_reduction=vocab_red,
+                    rng=random.Random(f"pos_{vocab_red}_{length}_{item_idx}"),
+                )
+                neg_fmt = format_a_parallel_cot(
+                    neg_inst,
+                    vocab_reduction=vocab_red,
+                    rng=random.Random(f"neg_{vocab_red}_{length}_{item_idx}"),
+                )
 
                 pos_lengths.add(len(pos_fmt.split()))
                 neg_lengths.add(len(neg_fmt.split()))
 
-            # Assert both positive and negative groups are non-empty
-            assert len(pos_lengths) > 0
-            assert len(neg_lengths) > 0
+            assert pos_lengths
+            assert neg_lengths
 
-            # Combine sets and assert there is exactly one unique length across both classes
-            combined_lengths = pos_lengths.union(neg_lengths)
+            combined_lengths = pos_lengths | neg_lengths
             assert len(combined_lengths) == 1
-            common_len = list(combined_lengths)[0]
+            common_len = next(iter(combined_lengths))
 
-            # Assert exact counts: length + 1 + 2 * C(length, 2) + 2
             expected_len = length + 1 + 2 * comb(length, 2) + 2
             assert common_len == expected_len
 
             if length == 12 and dimension == 3:
                 assert common_len == 147
 
+
 @pytest.mark.exp0
 def test_serial_cot_length_distributions():
-    """Test serial CoT length distributions overlap for pos/neg."""
+    """Positive and negative serial CoT examples must share observed lengths."""
     rng = random.Random(42)
     for length, dimension in [(8, 2), (12, 3)]:
         pos_lengths = []
         neg_lengths = []
         for _ in range(200):
-            # Explicitly generate pos and neg examples
-            pos_inst = generate_instance(length=length, dimension=dimension, target_has_3sum=True, rng=rng)
-            neg_inst = generate_instance(length=length, dimension=dimension, target_has_3sum=False, rng=rng)
+            pos_inst = generate_instance(
+                length=length,
+                dimension=dimension,
+                target_has_3sum=True,
+                rng=rng,
+            )
+            neg_inst = generate_instance(
+                length=length,
+                dimension=dimension,
+                target_has_3sum=False,
+                rng=rng,
+            )
 
-            pos_fmt = format_d_serial_cot(pos_inst)
-            neg_fmt = format_d_serial_cot(neg_inst)
+            pos_lengths.append(len(format_d_serial_cot(pos_inst).split()))
+            neg_lengths.append(len(format_d_serial_cot(neg_inst).split()))
 
-            pos_lengths.append(len(pos_fmt.split()))
-            neg_lengths.append(len(neg_fmt.split()))
+        assert pos_lengths
+        assert neg_lengths
+        assert set(pos_lengths) & set(neg_lengths)
 
-        # Assert both positive and negative groups are non-empty
-        assert len(pos_lengths) > 0
-        assert len(neg_lengths) > 0
-
-        # Assert actual observed shared sequence length
-        shared_lengths = set(pos_lengths) & set(neg_lengths)
-        assert len(shared_lengths) > 0
 
 @pytest.mark.exp0
 def test_dataset_determinism():
-    """Test deterministic per-item randomness."""
-    instances = [generate_instance(length=8, dimension=2) for _ in range(20)]
+    """Per-item formatting must be deterministic and access-order independent."""
+    source_rng = random.Random(1234)
+    instances = [
+        generate_instance(length=8, dimension=2, rng=source_rng) for _ in range(20)
+    ]
     vocab = build_default_vocab(length=8, dimension=2)
 
-    # Create two identical datasets
-    ds1 = Task3SumDataset(instances=instances, format_type="parallel_cot", vocab=vocab, seed=42)
-    ds2 = Task3SumDataset(instances=instances, format_type="parallel_cot", vocab=vocab, seed=42)
+    ds1 = Task3SumDataset(
+        instances=instances,
+        format_type="parallel_cot",
+        vocab=vocab,
+        seed=42,
+    )
+    ds2 = Task3SumDataset(
+        instances=instances,
+        format_type="parallel_cot",
+        vocab=vocab,
+        seed=42,
+    )
+    ds3 = Task3SumDataset(
+        instances=instances,
+        format_type="parallel_cot",
+        vocab=vocab,
+        seed=99,
+    )
 
-    # Different seed dataset
-    ds3 = Task3SumDataset(instances=instances, format_type="parallel_cot", vocab=vocab, seed=99)
-
-    # 1. Repeated reads of the same item are identical
     out_0_read1 = ds1[0]["targets"].clone()
     out_0_read2 = ds1[0]["targets"].clone()
     assert torch.equal(out_0_read1, out_0_read2)
 
-    # 2. Access order does not change targets
     _ = ds2[5]
     _ = ds2[1]
     out_0_ds2 = ds2[0]["targets"].clone()
     assert torch.equal(out_0_read1, out_0_ds2)
 
-    # 3. Different seeds alter randomized formatting for at least some examples
-    diff_found = False
-    for i in range(20):
-        if not torch.equal(ds1[i]["targets"], ds3[i]["targets"]):
-            diff_found = True
-            break
-    assert diff_found
+    assert any(
+        not torch.equal(ds1[i]["targets"], ds3[i]["targets"])
+        for i in range(len(instances))
+    )
