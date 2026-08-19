@@ -4,6 +4,7 @@
 import argparse
 import json
 import random
+import torch
 from pathlib import Path
 
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
@@ -36,6 +37,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--out_dir", type=str, default="results/exp0")
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
     task_cfg = Task3SumConfig(
@@ -56,7 +58,7 @@ def main():
         num_attention_heads=num_heads,
         intermediate_size=args.intermediate_size,
         head_dim=args.head_dim,
-        device="cpu",
+        device=args.device,     # was: device="cpu",
     )
 
     vocab = build_default_vocab(length=args.length, dimension=args.dimension)

@@ -27,6 +27,7 @@ def main():
     parser.add_argument("--val_samples", type=int, default=200)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--out_dir", type=str, default="results/sweeps")
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -58,6 +59,8 @@ def main():
         ]
         if args.format_type:
             cmd.extend(["--format_type", args.format_type])
+        if args.device:
+            cmd.extend(["--device", args.device])
 
         subprocess.run(cmd, check=True)
 
