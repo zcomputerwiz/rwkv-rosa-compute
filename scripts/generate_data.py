@@ -46,7 +46,7 @@ def main():
     parser = argparse.ArgumentParser(description="Generate 3SUM dataset and metadata")
     parser.add_argument("--length", type=int, default=12, help="Number of input tuples n")
     parser.add_argument("--dimension", type=int, default=3, help="Digits per tuple d")
-    parser.add_argument("--mod", type=int, default=10, help="Modulus (default 10)")
+    parser.add_argument("--mod", type=int, default=10, help="Modulus (must be 10 for Experiment 0)")
     parser.add_argument("--num_filler", type=int, default=None, help="Number of filler tokens N (default n^2)")
     parser.add_argument("--num_samples", type=int, default=10000, help="Number of dataset samples")
     parser.add_argument("--seed", type=int, default=42, help="Master random seed")

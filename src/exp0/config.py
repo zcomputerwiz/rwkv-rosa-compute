@@ -16,6 +16,10 @@ class Task3SumConfig:
     seed: int = 42
     num_samples: int = 10000
 
+    def __post_init__(self):
+        if self.mod != 10:
+            raise ValueError(f"Modulus other than 10 is not supported in Experiment 0, got mod={self.mod}")
+
 
 @dataclass
 class ModelConfig:
