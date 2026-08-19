@@ -152,7 +152,18 @@ def test_loss_and_answer_projection_match_full_logits():
         torch.arange(full_logits.shape[0]),
         answer_positions,
     ]
-    assert torch.equal(answer_logits, expected_answers)
+    # The answer-only projection uses a smaller GEMM than the full-vocabulary
+    # projection, so different BLAS kernels may differ by a few FP32 ulps.
+    torch.testing.assert_close(
+        answer_logits,
+        expected_answers,
+        rtol=1e-6,
+        atol=1e-7,
+    )
+    assert torch.equal(
+        answer_logits.argmax(dim=-1),
+        expected_answers.argmax(dim=-1),
+    )
 
 
 class _AnswerOnlyModel(nn.Module):
