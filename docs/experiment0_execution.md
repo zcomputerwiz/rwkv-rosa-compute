@@ -10,6 +10,24 @@ Experiment 0A uses the small Llama-style transformer with random initialization.
 Random initialization is the default for `--architecture llama`; `--init random`
 may also be supplied explicitly.
 
+The repaired positive-control implementation uses:
+
+```text
+4-layer Llama-style causal transformer by default
+standard split-half Llama RoPE (theta = 10000)
+hard-coded tuple-position input features
+supervised ':' continuation-boundary token
+n^2 filler positions unless N is explicitly overridden
+```
+
+The separator is a required protocol invariant. Pre-repair runs that dropped the
+separator and used a positionless transformer are diagnostic artifacts, not valid
+negative Experiment 0A results.
+
+See [`experiment0_positive_control_repair.md`](experiment0_positive_control_repair.md)
+for the diagnosis, implementation plan, CoT metric semantics, and progressive
+rerun procedure.
+
 Example smoke configuration:
 
 ```bash
@@ -26,6 +44,44 @@ python scripts/run_experiment.py \
   --device cuda \
   --out_dir results/exp0
 ```
+
+Before scaling length-6 or length-12 substantially, run the easy immediate
+control described in the repair plan. The CPU test suite already enforces a
+smaller fixed-set overfit gate, but held-out generalization remains an
+experimental measurement rather than a unit-test assertion.
+
+### CoT diagnostics
+
+Do not interpret a high final answer accuracy with a supplied ground-truth CoT
+as evidence that the model independently learned 3SUM. Parallel CoT explicitly
+contains match information.
+
+The old ambiguous `cot_accuracy` field has been removed. Reports now distinguish:
+
+```text
+cot_answer_given_cot_accuracy
+    final answer accuracy with the ground-truth CoT teacher-forced
+    (leakage-aware diagnostic; not independent-computation evidence)
+
+cot_pair_position_token_accuracy
+cot_pair_position_semantic_accuracy
+cot_sum_token_accuracy
+cot_sum_semantic_accuracy
+cot_match_index_accuracy
+cot_result_semantic_accuracy
+cot_result_nll
+    intermediate next-token generation diagnostics
+```
+
+With vocabulary reduction enabled, exact pair/sum targets contain deliberate
+randomness. The semantic variants accept any computationally equivalent reduced
+output, while the exact metrics retain visibility into the sampled training
+objective.
+
+Reports also include `epoch_train_answer_accuracies` and
+`best_train_answer_accuracy` per seed. These values are collected from the
+existing training forward pass and help distinguish inability to fit the task
+from failure to generalize.
 
 The documented full-scale 0A protocol may use a larger training set, but the
 scientific identity of every run is recorded in the generated report. Do not
@@ -190,6 +246,8 @@ hidden size
 layer count
 FFN/intermediate size
 RWKV head dimension
+Llama RoPE configuration
+continuation-boundary protocol
 initialization mode
 checkpoint SHA-256
 training sample count
@@ -206,8 +264,8 @@ evaluation seed
 ## Sweeps
 
 `scripts/sweep_n.py` forwards the initialization/checkpoint and scientific CLI
-configuration into each N run. A sweep receives its own deterministic sweep ID
-and is stored under:
+configuration into each N run. Its default learning rate matches the 0A runner
+(`1e-4`). A sweep receives its own deterministic sweep ID and is stored under:
 
 ```text
 <out_dir>/<architecture>_<sweep_id>/
@@ -220,6 +278,10 @@ and is stored under:
     n32/
     sweep.json
 ```
+
+The sweep summary records filler accuracy, training-answer accuracy, the
+leakage-aware answer-given-CoT metric, intermediate CoT semantic metrics, and
+CoT result NLL. It does not emit the removed ambiguous `cot_accuracy` field.
 
 The sweep fails if a child run completes without producing the exact report path
 predicted by `run_experiment.py`; it does not select an arbitrary JSON file.
@@ -248,10 +310,11 @@ Before starting a long GPU run, `main` should pass:
 ```bash
 ruff check .
 pytest -m "not cuda and not checkpoint and not slow and not exp0" -v
-pytest -m "exp0 and not slow" -v
+pytest -m "exp0 and not cuda and not slow" -v
 ```
 
 The Experiment 0 suite includes a real runner-to-training API-seam test with
 zero training epochs, exact answer-scoring regressions, deterministic data
-contracts, RWKV recurrence equivalence tests, and synthetic stock-checkpoint
-mapping tests.
+contracts, Llama RoPE/position tests, separator supervision, CoT diagnostic
+leakage separation, a tiny fixed-set overfit gate, RWKV recurrence equivalence
+tests, and synthetic stock-checkpoint mapping tests.
