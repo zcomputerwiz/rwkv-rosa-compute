@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
+from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
@@ -17,6 +18,7 @@ from exp0.models.base import InputEmbedWrapper
 from exp0.models.llama import LlamaBackbone
 from exp0.models.rwkv import RWKV7Backbone
 from exp0.rwkv_checkpoint import load_pretrained_backbone
+from exp0.sequences import get_token_labels
 
 
 def _create_loader(
@@ -49,7 +51,68 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
-def create_model(model_cfg: ModelConfig, d_input: int) -> InputEmbedWrapper:
+def _build_match3_target_feature_map(
+    vocab,
+    task_cfg: Task3SumConfig,
+) -> tuple[torch.Tensor, int]:
+    """Map continuation vocab ids onto the shared Match-3 input feature space.
+
+    The authors' reduced Match-3 representation reuses tuple-position feature
+    columns for later CoT index tokens and reuses digit feature columns for
+    later reduced sum digits. All other tokens receive dedicated feature
+    columns after the original tuple feature block.
+    """
+    d_input = task_cfg.mod * task_cfg.dimension + task_cfg.length
+    labels = get_token_labels(task_cfg.length)
+    label_to_position = {label: idx for idx, label in enumerate(labels)}
+
+    mapping = torch.empty(len(vocab), dtype=torch.long)
+    next_feature = d_input
+    for token_id in range(len(vocab)):
+        token = vocab.id2token[token_id]
+        if token in label_to_position:
+            mapping[token_id] = (
+                task_cfg.mod * task_cfg.dimension + label_to_position[token]
+            )
+        elif len(token) == 1 and token.isdigit() and int(token) < task_cfg.mod:
+            # A reduced CoT sum digit is encoded in the same first-coordinate
+            # digit block used by the authors' vector dataset.
+            mapping[token_id] = int(token)
+        else:
+            mapping[token_id] = next_feature
+            next_feature += 1
+
+    return mapping, next_feature
+
+
+def _initialize_llama_positive_control(
+    model: InputEmbedWrapper,
+    initializer_range: float,
+) -> None:
+    """Match Hugging Face Llama initialization without touching input_proj.
+
+    The positive-control authors instantiate LlamaForCausalLM with
+    initializer_range=0.02, then wrap it in a separately constructed default
+    nn.Linear input adapter. We mirror that split: backbone/head use the Llama
+    normal initialization and the shared Match-3 input projection keeps
+    PyTorch's default nn.Linear initialization.
+    """
+    with torch.no_grad():
+        for module in model.backbone.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.normal_(module.weight, mean=0.0, std=initializer_range)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+        nn.init.normal_(model.head.weight, mean=0.0, std=initializer_range)
+
+
+def create_model(
+    model_cfg: ModelConfig,
+    d_input: int,
+    *,
+    vocab=None,
+    task_cfg: Task3SumConfig | None = None,
+) -> InputEmbedWrapper:
     """Construct the configured backbone and Experiment 0 task interface."""
     if model_cfg.architecture == "llama":
         backbone = LlamaBackbone(
@@ -70,12 +133,30 @@ def create_model(model_cfg: ModelConfig, d_input: int) -> InputEmbedWrapper:
     else:
         raise ValueError(f"Unknown architecture: {model_cfg.architecture}")
 
-    return InputEmbedWrapper(
+    target_feature_indices = None
+    input_feature_dim = None
+    if vocab is not None:
+        if task_cfg is None:
+            raise ValueError("task_cfg is required when vocab is supplied.")
+        target_feature_indices, input_feature_dim = _build_match3_target_feature_map(
+            vocab,
+            task_cfg,
+        )
+
+    model = InputEmbedWrapper(
         backbone=backbone,
         d_input=d_input,
         hidden_size=model_cfg.hidden_size,
         vocab_size=model_cfg.vocab_size,
+        target_feature_indices=target_feature_indices,
+        input_feature_dim=input_feature_dim,
     )
+    if model_cfg.architecture == "llama":
+        _initialize_llama_positive_control(
+            model,
+            initializer_range=model_cfg.llama_initializer_range,
+        )
+    return model
 
 
 def initialize_model(
@@ -95,6 +176,9 @@ def initialize_model(
             "pretrained_scope": None,
             "checkpoint_path": None,
             "checkpoint_sha256": None,
+            "llama_initializer_range": model_cfg.llama_initializer_range,
+            "input_adapter_init": "torch_default_linear",
+            "shared_match3_input_features": True,
         }
 
     if model_cfg.init_mode == "random":
@@ -110,10 +194,12 @@ def initialize_model(
             "pretrained_scope": None,
             "checkpoint_path": None,
             "checkpoint_sha256": None,
+            "shared_match3_input_features": True,
         }
 
     provenance = load_pretrained_backbone(model.backbone, model_cfg)
     provenance["task_interface_init"] = "random"
+    provenance["shared_match3_input_features"] = True
     return provenance
 
 
@@ -283,6 +369,26 @@ def _best_cot_diagnostics(
     return best
 
 
+def _make_lr_scheduler(
+    optimizer: torch.optim.Optimizer,
+    train_cfg: TrainConfig,
+    total_steps: int,
+) -> LambdaLR | None:
+    if train_cfg.lr_schedule == "constant" or total_steps <= 0:
+        return None
+
+    warmup_steps = max(1, int(total_steps * train_cfg.warmup_fraction))
+
+    def lr_lambda(step: int) -> float:
+        # Match the positive-control implementation's 1/20 warmup followed by
+        # linear decay toward zero, while remaining defined for tiny CI runs.
+        if step <= warmup_steps:
+            return step / warmup_steps
+        return max(0.0, 1.0 - (step / total_steps))
+
+    return LambdaLR(optimizer, lr_lambda=lr_lambda)
+
+
 def train_model(
     model_cfg: ModelConfig,
     train_cfg: TrainConfig,
@@ -311,7 +417,12 @@ def train_model(
 
     resolved_model_cfg = replace(model_cfg, vocab_size=len(vocab))
     d_input = task_cfg.mod * task_cfg.dimension + task_cfg.length
-    model = create_model(resolved_model_cfg, d_input=d_input)
+    model = create_model(
+        resolved_model_cfg,
+        d_input=d_input,
+        vocab=vocab,
+        task_cfg=task_cfg,
+    )
     initialization = initialize_model(model, resolved_model_cfg)
     model = model.to(device)
     if device.type == "cuda":
@@ -323,24 +434,6 @@ def train_model(
     weight_decay = 0.1 if is_immediate else train_cfg.weight_decay
     grad_clip = 0.5 if is_immediate else train_cfg.grad_clip
     epochs = train_cfg.epochs * 5 if is_immediate else train_cfg.epochs
-
-    if train_cfg.fused_adamw and device.type != "cuda":
-        raise ValueError("fused_adamw requires CUDA.")
-    optimizer_kwargs: Dict[str, Any] = {}
-    if train_cfg.fused_adamw:
-        optimizer_kwargs["fused"] = True
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=train_cfg.learning_rate,
-        weight_decay=weight_decay,
-        **optimizer_kwargs,
-    )
-    criterion = nn.CrossEntropyLoss(ignore_index=-100)
-    scaler = (
-        torch.amp.GradScaler("cuda")
-        if train_cfg.precision == "fp16"
-        else None
-    )
 
     train_loader = _create_loader(
         train_dataset,
@@ -367,16 +460,43 @@ def train_model(
         else None
     )
 
+    if train_cfg.fused_adamw and device.type != "cuda":
+        raise ValueError("fused_adamw requires CUDA.")
+    optimizer_kwargs: Dict[str, Any] = {}
+    if train_cfg.fused_adamw:
+        optimizer_kwargs["fused"] = True
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=train_cfg.learning_rate,
+        betas=(train_cfg.adam_beta1, train_cfg.adam_beta2),
+        weight_decay=weight_decay,
+        **optimizer_kwargs,
+    )
+    total_optimizer_steps = epochs * len(train_loader)
+    lr_scheduler = _make_lr_scheduler(
+        optimizer,
+        train_cfg,
+        total_steps=total_optimizer_steps,
+    )
+    criterion = nn.CrossEntropyLoss(ignore_index=-100)
+    scaler = (
+        torch.amp.GradScaler("cuda")
+        if train_cfg.precision == "fp16"
+        else None
+    )
+
     non_blocking = _transfer_non_blocking(train_cfg, device)
     epoch_train_losses: list[float] = []
-    epoch_train_answer_accuracies: list[float] = []
+    epoch_online_train_answer_accuracies: list[float] = []
     epoch_filler_accuracies: list[float] = []
     epoch_cot_diagnostics: list[Dict[str, Any]] = []
+    epoch_end_learning_rates: list[float] = []
     best_filler_acc = 0.0
-    best_train_answer_acc = 0.0
+    best_online_train_answer_acc = 0.0
 
     epoch_times: list[float] = []
     data_wait = 0.0
+    optimizer_steps = 0
 
     _sync_cuda(device)
     for _epoch in range(epochs):
@@ -447,6 +567,9 @@ def train_model(
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
                 optimizer.step()
 
+            if lr_scheduler is not None:
+                lr_scheduler.step()
+            optimizer_steps += 1
             loss_sum.add_(loss.detach())
             loss_count += 1
             t_last = time.perf_counter()
@@ -461,8 +584,12 @@ def train_model(
             if train_answer_count
             else 0.0
         )
-        epoch_train_answer_accuracies.append(train_answer_acc)
-        best_train_answer_acc = max(best_train_answer_acc, train_answer_acc)
+        epoch_online_train_answer_accuracies.append(train_answer_acc)
+        best_online_train_answer_acc = max(
+            best_online_train_answer_acc,
+            train_answer_acc,
+        )
+        epoch_end_learning_rates.append(float(optimizer.param_groups[0]["lr"]))
 
         filler_acc = evaluate_accuracy(
             model,
@@ -498,8 +625,8 @@ def train_model(
 
     history: Dict[str, Any] = {
         "epoch_train_losses": epoch_train_losses,
-        "epoch_train_answer_accuracies": epoch_train_answer_accuracies,
-        "best_train_answer_accuracy": best_train_answer_acc,
+        "epoch_online_train_answer_accuracies": epoch_online_train_answer_accuracies,
+        "best_online_train_answer_accuracy": best_online_train_answer_acc,
         "epoch_filler_accuracies": epoch_filler_accuracies,
         "epoch_val_accuracies": epoch_filler_accuracies,
         "best_filler_accuracy": best_filler_acc,
@@ -507,12 +634,18 @@ def train_model(
         "epochs_trained": epochs,
         "weight_decay": weight_decay,
         "grad_clip": grad_clip,
+        "adam_betas": [train_cfg.adam_beta1, train_cfg.adam_beta2],
+        "lr_schedule": train_cfg.lr_schedule,
+        "warmup_fraction": train_cfg.warmup_fraction,
+        "optimizer_steps": optimizer_steps,
+        "epoch_end_learning_rates": epoch_end_learning_rates,
         "epoch_seconds": epoch_times,
         "total_train_seconds": sum(epoch_times),
         "data_wait_seconds": data_wait,
         "samples_per_second": (len(train_dataset) * epochs)
         / max(sum(epoch_times), 1e-9),
         "resolved_vocab_size": len(vocab),
+        "input_feature_dim": model.input_feature_dim,
         "precision": train_cfg.precision,
         "fused_adamw": train_cfg.fused_adamw,
         "rwkv_kernel": model_cfg.rwkv_kernel,
