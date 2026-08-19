@@ -15,6 +15,11 @@ sys.path.append(str(Path(__file__).parent.parent))
 import scripts.run_experiment as run_experiment
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
 from exp0.rwkv_checkpoint import sha256_file
+from exp0.task3sum import (
+    DEFAULT_CORRUPTION_RATE,
+    GENERATOR_MODES,
+    SOURCE_GENERATOR,
+)
 
 N_VALUES = [0, 1, 2, 4, 8, 16, 32]
 
@@ -55,6 +60,10 @@ def build_runner_command(
             str(args.length),
             "--dimension",
             str(args.dimension),
+            "--generator_mode",
+            args.generator_mode,
+            "--corruption_rate",
+            str(args.corruption_rate),
             "--num_samples",
             str(args.num_samples),
             "--val_samples",
@@ -169,6 +178,17 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--head_dim", type=int, default=64)
     parser.add_argument("--length", type=int, default=12)
     parser.add_argument("--dimension", type=int, default=3)
+    parser.add_argument(
+        "--generator_mode",
+        type=str,
+        default=SOURCE_GENERATOR,
+        choices=list(GENERATOR_MODES),
+    )
+    parser.add_argument(
+        "--corruption_rate",
+        type=float,
+        default=DEFAULT_CORRUPTION_RATE,
+    )
     parser.add_argument("--num_samples", type=int, default=50000)
     parser.add_argument("--val_samples", type=int, default=5000)
     parser.add_argument("--eval_seed", type=int, default=9999)
@@ -271,19 +291,22 @@ def main():
                 "online_training_answer_accuracy": metrics.get(
                     "best_online_training_answer_accuracy"
                 ),
+                "online_training_answer_accuracy_by_format": metrics.get(
+                    "best_online_training_answer_accuracy_by_format"
+                ),
                 "cot_answer_given_cot_accuracy": metrics.get(
                     "cot_answer_given_cot_accuracy"
                 ),
                 "cot_result_semantic_accuracy": metrics.get(
                     "cot_result_semantic_accuracy"
                 ),
-                "cot_match_index_accuracy": metrics.get(
-                    "cot_match_index_accuracy"
-                ),
+                "cot_match_index_accuracy": metrics.get("cot_match_index_accuracy"),
                 "cot_sum_semantic_accuracy": metrics.get(
                     "cot_sum_semantic_accuracy"
                 ),
                 "cot_result_nll": metrics.get("cot_result_nll"),
+                "cot_result_nll_floor": metrics.get("cot_result_nll_floor"),
+                "cot_chance_baselines": metrics.get("cot_chance_baselines"),
             }
         )
 
