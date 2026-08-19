@@ -180,7 +180,7 @@ def train_model(
         "epoch_seconds": epoch_times,
         "total_train_seconds": sum(epoch_times),
         "data_wait_seconds": data_wait,
-        "samples_per_second": (len(train_dataset) * epochs) / sum(epoch_times),
+        "samples_per_second": (len(train_dataset) * epochs) / max(sum(epoch_times), 1e-9),
     }
 
     return model, history
