@@ -46,6 +46,8 @@ class ModelConfig:
     intermediate_size: int = 1536
     head_dim: int = 64
     llama_rope_theta: float = 10000.0
+    llama_initializer_range: float = 0.02
+    match3_shared_input_features: bool = True
     vocab_size: int = 256
     device: str = "cpu"
 
@@ -67,6 +69,14 @@ class ModelConfig:
             )
         if self.llama_rope_theta <= 0:
             raise ValueError("llama_rope_theta must be greater than zero.")
+        if self.llama_initializer_range <= 0:
+            raise ValueError("llama_initializer_range must be greater than zero.")
+        if not self.match3_shared_input_features:
+            raise ValueError(
+                "Experiment 0 requires shared Match-3 tuple/CoT input features. "
+                "The pre-repair separate tuple/token embedding protocol is not "
+                "supported."
+            )
 
 
 @dataclass
@@ -83,6 +93,10 @@ class TrainConfig:
     epochs: int = 5
     weight_decay: float = 0.01
     grad_clip: float = 1.0
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.95
+    lr_schedule: str = "linear_warmup_decay"
+    warmup_fraction: float = 0.05
     precision: str = "fp32"
     fused_adamw: bool = False
     mixture: str = "parallel_cot_filler"
@@ -96,6 +110,15 @@ class TrainConfig:
             raise ValueError("DataLoader worker counts must be non-negative.")
         if self.prefetch_factor <= 0:
             raise ValueError("prefetch_factor must be greater than zero.")
+        if not 0.0 < self.adam_beta1 < 1.0 or not 0.0 < self.adam_beta2 < 1.0:
+            raise ValueError("Adam beta values must be strictly between zero and one.")
+        if self.lr_schedule not in {"constant", "linear_warmup_decay"}:
+            raise ValueError(
+                "lr_schedule must be one of: constant, linear_warmup_decay; "
+                f"got {self.lr_schedule!r}"
+            )
+        if not 0.0 <= self.warmup_fraction < 1.0:
+            raise ValueError("warmup_fraction must be in [0, 1).")
         if self.precision not in {"fp32", "bf16", "fp16"}:
             raise ValueError(
                 "precision must be one of: fp32, bf16, fp16; "
