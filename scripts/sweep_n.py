@@ -175,7 +175,7 @@ def get_parser() -> argparse.ArgumentParser:
         default=True,
     )
     parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--learning_rate", type=float, default=3e-4)
+    parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--val_num_workers", type=int, default=0)
@@ -249,7 +249,22 @@ def main():
                 "report_path": str(summary_path),
                 "run_id": report.get("run_id"),
                 "filler_accuracy": metrics.get("filler_accuracy"),
-                "cot_accuracy": metrics.get("cot_accuracy"),
+                "training_answer_accuracy": metrics.get(
+                    "best_training_answer_accuracy"
+                ),
+                "cot_answer_given_cot_accuracy": metrics.get(
+                    "cot_answer_given_cot_accuracy"
+                ),
+                "cot_result_semantic_accuracy": metrics.get(
+                    "cot_result_semantic_accuracy"
+                ),
+                "cot_match_index_accuracy": metrics.get(
+                    "cot_match_index_accuracy"
+                ),
+                "cot_sum_semantic_accuracy": metrics.get(
+                    "cot_sum_semantic_accuracy"
+                ),
+                "cot_result_nll": metrics.get("cot_result_nll"),
             }
         )
 
