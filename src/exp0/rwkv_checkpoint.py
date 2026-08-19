@@ -252,7 +252,8 @@ def load_pretrained_backbone(
             continue
         if target_key not in target_state:
             raise ValueError(
-                f"Checkpoint key {source_key} maps to unknown target key {target_key}."
+                f"Unexpected RWKV-7 checkpoint key {source_key}: "
+                f"maps to unknown target key {target_key}."
             )
         if tuple(value.shape) != tuple(target_state[target_key].shape):
             raise ValueError(
