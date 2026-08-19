@@ -13,13 +13,21 @@ def compile_experiment_report(
     per_seed_results: List[Dict[str, Any]],
     majority_class_baseline: float,
     realized_mixture_counts: Dict[str, int],
+    eval_seed: int = 9999,
+    val_samples: int = 2000,
 ) -> Dict[str, Any]:
     """Compile comprehensive experiment report conforming to docs/experiments.md metadata requirements."""
-    accuracies = [res["best_val_accuracy"] for res in per_seed_results]
+    filler_accuracies = [res.get("best_filler_accuracy", res.get("best_val_accuracy", 0.0)) for res in per_seed_results]
+    cot_accuracies = [res.get("best_cot_accuracy", 0.0) for res in per_seed_results]
 
-    mean_acc = sum(accuracies) / len(accuracies) if accuracies else 0.0
-    min_acc = min(accuracies) if accuracies else 0.0
-    max_acc = max(accuracies) if accuracies else 0.0
+    mean_filler_acc = sum(filler_accuracies) / len(filler_accuracies) if filler_accuracies else 0.0
+    mean_cot_acc = sum(cot_accuracies) / len(cot_accuracies) if cot_accuracies else 0.0
+
+    # Retaining mean_acc logic for backward compatibility in max/min as well? The user asked to keep `metrics.mean_accuracy` as alias to `filler_accuracy`.
+    # Let's keep min/max filler accuracies as min/max_accuracy for legacy tests maybe? Wait, user said "mean_accuracy may remain only as filler alias." Nothing about min/max. Let's just alias min/max to filler min/max too to be safe, or just remove if tests pass. The issue just says:
+    # Use mean per-seed best values. Legacy mean_accuracy may remain only as filler alias.
+    min_acc = min(filler_accuracies) if filler_accuracies else 0.0
+    max_acc = max(filler_accuracies) if filler_accuracies else 0.0
 
     report = {
         "model": asdict(model_cfg),
@@ -33,11 +41,15 @@ def compile_experiment_report(
         "majority_class_baseline": majority_class_baseline,
         "realized_mixture_counts": realized_mixture_counts,
         "metrics": {
-            "mean_accuracy": mean_acc,
+            "filler_accuracy": mean_filler_acc,
+            "cot_accuracy": mean_cot_acc,
+            "mean_accuracy": mean_filler_acc,
             "min_accuracy": min_acc,
             "max_accuracy": max_acc,
-            "per_seed_accuracies": accuracies,
+            "per_seed_accuracies": filler_accuracies,
         },
+        "eval_seed": eval_seed,
+        "val_samples": val_samples,
         "seeds_run": [res["seed"] for res in per_seed_results],
         "per_seed_details": per_seed_results,
     }
