@@ -1,13 +1,13 @@
 """Unit tests for Milestone 3: Training and evaluation harness."""
 
 import random
-from unittest.mock import patch
+from unittest.mock import mock_open, patch
 
 import pytest
 
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
 from exp0.dataset import Task3SumDataset, build_default_vocab, pad_collate_fn
-from exp0.evaluate import compile_experiment_report
+from exp0.evaluate import compile_experiment_report, compute_run_id
 from exp0.task3sum import generate_instance
 
 
@@ -143,3 +143,123 @@ def test_compile_experiment_report():
     assert report["eval_seed"] == 123
     assert report["val_samples"] == 500
     assert report["seeds_run"] == [42, 43, 44]
+
+
+@pytest.mark.exp0
+def test_compile_experiment_report_provenance():
+    model_cfg = ModelConfig()
+    train_cfg = TrainConfig(seed=111)
+    task_cfg = Task3SumConfig(seed=222)
+
+    per_seed_results = [
+        {"seed": 42, "task_seed": 42, "training_seed": 42, "best_filler_accuracy": 0.8},
+        {"seed": 43, "task_seed": 43, "training_seed": 43, "best_filler_accuracy": 0.9},
+    ]
+
+    report = compile_experiment_report(
+        model_cfg,
+        train_cfg,
+        task_cfg,
+        per_seed_results,
+        majority_class_baseline=0.5,
+        realized_mixture_counts={},
+        eval_seed=123,
+        val_samples=500,
+    )
+
+    # Top-level seeds should be removed
+    assert "seed" not in report["task_config"]
+    assert "seed" not in report["training_protocol"]
+
+    # Per-seed details should preserve them
+    assert report["per_seed_details"][0]["seed"] == 42
+    assert report["per_seed_details"][0]["task_seed"] == 42
+    assert report["per_seed_details"][0]["training_seed"] == 42
+
+    # run_id must be present
+    assert "run_id" in report
+
+
+@pytest.mark.exp0
+def test_compute_run_id_deterministic():
+    model_cfg = ModelConfig(architecture="llama")
+    train_cfg = TrainConfig(batch_size=32)
+    task_cfg = Task3SumConfig(length=10)
+
+    id1 = compute_run_id(model_cfg, train_cfg, task_cfg, eval_seed=123, val_samples=1000, seeds_run=[1, 2, 3])
+    id2 = compute_run_id(model_cfg, train_cfg, task_cfg, eval_seed=123, val_samples=1000, seeds_run=[3, 2, 1])
+
+    # Same config and same seeds (different order) should yield same run_id
+    assert id1 == id2
+
+    # Change a scientifically relevant variable
+    task_cfg.length = 12
+    id3 = compute_run_id(model_cfg, train_cfg, task_cfg, eval_seed=123, val_samples=1000, seeds_run=[1, 2, 3])
+
+    assert id1 != id3
+
+
+@patch("scripts.run_experiment.compute_run_id")
+@patch("scripts.run_experiment.build_configs")
+@patch("scripts.run_experiment.get_parser")
+@patch("pathlib.Path.exists")
+@patch("builtins.open", new_callable=mock_open, read_data='{"run_id": "match_123"}')
+def test_run_experiment_skip_existing(mock_file, mock_exists, mock_parser, mock_build, mock_compute, capsys):
+    import argparse
+
+    from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
+    from scripts.run_experiment import main
+
+    mock_exists.return_value = True
+    mock_compute.return_value = "match_123"
+
+    mock_parser_obj = argparse.ArgumentParser()
+    mock_parser_obj.add_argument("--architecture", default="llama")
+    mock_parser_obj.add_argument("--out_dir", default="results")
+    mock_parser_obj.add_argument("--length", default=10)
+    mock_parser_obj.add_argument("--format_type", default="filler")
+    mock_parser_obj.add_argument("--eval_seed", default=99)
+    mock_parser_obj.add_argument("--val_samples", default=100)
+    mock_parser_obj.add_argument("--seeds", default=[1])
+    mock_parser.return_value = mock_parser_obj
+
+    mock_build.return_value = (Task3SumConfig(num_filler=5), ModelConfig(), TrainConfig())
+
+    with patch("sys.argv", ["run_experiment.py", "--architecture", "llama"]):
+        main()
+
+    captured = capsys.readouterr()
+    assert "already exists and matches run_id match_123. Skipping run." in captured.out
+
+
+@patch("scripts.run_experiment.compute_run_id")
+@patch("scripts.run_experiment.build_configs")
+@patch("scripts.run_experiment.get_parser")
+@patch("pathlib.Path.exists")
+@patch("builtins.open", new_callable=mock_open, read_data='{"run_id": "old_123"}')
+def test_run_experiment_fail_mismatch(mock_file, mock_exists, mock_parser, mock_build, mock_compute):
+    import argparse
+
+    import pytest
+
+    from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
+    from scripts.run_experiment import main
+
+    mock_exists.return_value = True
+    mock_compute.return_value = "new_123"
+
+    mock_parser_obj = argparse.ArgumentParser()
+    mock_parser_obj.add_argument("--architecture", default="llama")
+    mock_parser_obj.add_argument("--out_dir", default="results")
+    mock_parser_obj.add_argument("--length", default=10)
+    mock_parser_obj.add_argument("--format_type", default="filler")
+    mock_parser_obj.add_argument("--eval_seed", default=99)
+    mock_parser_obj.add_argument("--val_samples", default=100)
+    mock_parser_obj.add_argument("--seeds", default=[1])
+    mock_parser.return_value = mock_parser_obj
+
+    mock_build.return_value = (Task3SumConfig(num_filler=5), ModelConfig(), TrainConfig())
+
+    with patch("sys.argv", ["run_experiment.py", "--architecture", "llama"]):
+        with pytest.raises(ValueError, match="exists but run_id does not match"):
+            main()

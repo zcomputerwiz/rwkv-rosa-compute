@@ -8,6 +8,7 @@ from exp0.task3sum import generate_instance
 from exp0.train import evaluate_accuracy, train_model
 
 
+
 def get_tiny_configs():
     task_cfg = Task3SumConfig(num_samples=16)
     model_cfg = ModelConfig(
