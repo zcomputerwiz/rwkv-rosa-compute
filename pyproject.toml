@@ -30,6 +30,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+pythonpath = ["."]
 addopts = "-ra --strict-markers"
 markers = [
     "cuda: tests requiring CUDA execution",
