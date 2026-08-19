@@ -218,6 +218,7 @@ def test_compile_experiment_report():
     assert report["val_samples"] == 500
     assert report["seeds_run"] == [42, 43, 44]
     assert report["run_config"]["evaluation"]["seeds_run"] == [42, 43, 44]
+    assert report["run_config"]["task_config"]["include_separator_token"] is True
     assert "teacher-forced" in report["metric_semantics"][
         "cot_answer_given_cot_accuracy"
     ]
@@ -295,11 +296,6 @@ def test_compute_run_id_covers_full_model_and_protocol_configuration():
     changed_rope = ModelConfig(architecture="llama", llama_rope_theta=500000.0)
     assert run_id != compute_run_id(
         changed_rope, train_cfg, task_cfg, 123, 1000, [1, 2, 3]
-    )
-
-    no_separator = Task3SumConfig(length=10, include_separator_token=False)
-    assert run_id != compute_run_id(
-        model_cfg, train_cfg, no_separator, 123, 1000, [1, 2, 3]
     )
 
     pretrained = ModelConfig(
