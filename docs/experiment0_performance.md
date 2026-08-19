@@ -18,7 +18,7 @@ For the default `length=12`, `dimension=3` task, packed instance storage uses:
 
 `Task3SumDataset` adds one `uint8` format code per sample, for 44 bytes/sample of packed instance/format backing storage. Therefore a 1,000,000-example default training set uses about 42 MiB for these tensors, excluding vocabulary, temporary batches, and Python/PyTorch object overhead.
 
-The compact representation consumes the same RNG stream and reconstructs the same `Instance3Sum` values as the previous list-based generator. CPU tests compare the two representations directly.
+The compact representation consumes the same RNG stream and reconstructs the same `Instance3Sum` values as the previous list-based generator. CPU tests compare the two representations directly. Generation fills NumPy buffers in place and wraps them once as Torch tensors, avoiding a tiny Torch allocation for every generated example.
 
 Other default changes are intended to preserve the mathematical training/evaluation objective:
 
@@ -28,7 +28,10 @@ Other default changes are intended to preserve the mathematical training/evaluat
 - evaluation scoring is vectorized rather than synchronizing once per example;
 - pinned CUDA DataLoader batches use non-blocking host-to-device copies;
 - validation uses its own worker count, defaulting to zero, so training workers do not imply persistent validation workers;
-- AdamW uses `zero_grad(set_to_none=True)`.
+- AdamW uses `zero_grad(set_to_none=True)`;
+- the runner explicitly releases each trained model and per-seed training dataset before constructing the next seed, preventing accidental overlap between successive models in multi-seed runs.
+
+The answer-only evaluation head performs a smaller matrix multiplication than the compatibility full-logit path. On some CPU/BLAS implementations this can change the last few floating-point bits, so regression tests require tight numerical agreement and identical argmax predictions rather than bitwise-equal logits.
 
 ## Mixed precision
 
@@ -127,9 +130,17 @@ fused_adamw
 non_blocking_transfers
 train_dataset_storage_bytes
 validation_dataset_storage_bytes
+cuda_peak_memory_allocated_bytes
+cuda_peak_memory_reserved_bytes
 data_wait_seconds
 epoch_seconds
 samples_per_second
 ```
 
+The CUDA peak-memory fields are `null` on CPU and are measured with PyTorch's CUDA allocator statistics on GPU. They make before/after VRAM comparisons reproducible from the report rather than relying only on an external `nvidia-smi` snapshot.
+
 CPU CI verifies correctness/equivalence but does not claim CUDA speedups or VRAM savings. GPU throughput and peak allocated/reserved memory should be measured on the actual experiment machine before choosing a new production batch size.
+
+## Deferred optimization: `torch.compile`
+
+`torch.compile` is intentionally not enabled by this change. It can improve throughput on some model/GPU/software combinations, but compilation mode and CUDA graph behavior can also add startup cost or memory. It should be benchmarked separately on the actual experiment environment after the deterministic data/logit/AMP improvements above are established.
