@@ -1,7 +1,7 @@
 """Training loop for Experiment 0 models."""
 import random
 import time
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -12,6 +12,24 @@ from exp0.dataset import Task3SumDataset, pad_collate_fn
 from exp0.models.base import InputEmbedWrapper
 from exp0.models.llama import LlamaBackbone
 from exp0.models.rwkv import RWKV7Backbone
+
+
+def _create_loader(
+    dataset: Task3SumDataset,
+    train_cfg: TrainConfig,
+    device: torch.device,
+    shuffle: bool = False,
+) -> DataLoader:
+    """Helper to create a testable DataLoader with consistent settings."""
+    return DataLoader(
+        dataset,
+        batch_size=train_cfg.batch_size,
+        shuffle=shuffle,
+        collate_fn=pad_collate_fn,
+        num_workers=train_cfg.num_workers,
+        persistent_workers=train_cfg.num_workers > 0,
+        pin_memory=train_cfg.pin_memory and device.type == "cuda",
+    )
 
 
 def set_seed(seed: int):
@@ -77,16 +95,15 @@ def evaluate_accuracy(
             batch_size = targets.size(0)
             for b in range(batch_size):
                 ans_positions = (targets[b] == ans_token_id).nonzero(as_tuple=True)[0]
-                if len(ans_positions) == 0:
-                    ans_pos = logits.size(1) - 2
-                else:
-                    ans_pos = ans_positions[0].item()
+                if len(ans_positions) != 1:
+                    raise ValueError(f"Sequence must have exactly one ANS token. Found {len(ans_positions)}.")
+                ans_pos = ans_positions[0].item()
 
                 pred_logits = logits[b, ans_pos, :]
                 pred_id = torch.argmax(pred_logits).item()
 
-                pred_bool = (pred_id == ans_true_id)
-                if pred_bool == has_3sum[b].item():
+                expected_id = ans_true_id if has_3sum[b].item() else ans_false_id
+                if pred_id == expected_id:
                     correct += 1
                 total += 1
 
@@ -99,6 +116,7 @@ def train_model(
     task_cfg: Task3SumConfig,
     train_dataset: Task3SumDataset,
     val_dataset: Task3SumDataset,
+    cot_val_dataset: Optional[Task3SumDataset] = None,
 ) -> Tuple[nn.Module, Dict[str, Any]]:
     set_seed(train_cfg.seed)
     device = torch.device(model_cfg.device)
@@ -107,6 +125,9 @@ def train_model(
     ans_token_id = vocab.token2id.get("ANS", -1)
     ans_true_id = vocab.token2id.get("True", -1)
     ans_false_id = vocab.token2id.get("False", -1)
+
+    if -1 in (ans_token_id, ans_true_id, ans_false_id):
+        raise ValueError(f"Vocabulary must contain 'ANS', 'True', and 'False'. Found: ANS={ans_token_id}, True={ans_true_id}, False={ans_false_id}")
 
     d_input = task_cfg.mod * task_cfg.dimension + task_cfg.length
     model_cfg.vocab_size = max(len(vocab), model_cfg.vocab_size)
@@ -125,27 +146,23 @@ def train_model(
     )
     criterion = nn.CrossEntropyLoss(ignore_index=-100)
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=train_cfg.batch_size,
-        shuffle=True,
-        collate_fn=pad_collate_fn,
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=train_cfg.batch_size,
-        shuffle=False,
-        collate_fn=pad_collate_fn,
-    )
+    train_loader = _create_loader(train_dataset, train_cfg, device, shuffle=True)
+    val_loader = _create_loader(val_dataset, train_cfg, device, shuffle=False)
+    cot_val_loader = _create_loader(cot_val_dataset, train_cfg, device, shuffle=False) if cot_val_dataset is not None else None
 
-    epoch_val_accuracies = []
-    best_val_acc = 0.0
+    epoch_train_losses = []
+    epoch_filler_accuracies = []
+    epoch_cot_accuracies = []
+    best_filler_acc = 0.0
+    best_cot_acc = 0.0
 
     epoch_times, data_wait = [], 0.0
     for epoch in range(epochs):
         t_epoch = time.perf_counter()
         model.train()
         t_last = time.perf_counter()
+
+        batch_losses = []
         for batch in train_loader:
             data_wait += time.perf_counter() - t_last
             input_tuples = batch["input_tuples"].to(device)
@@ -163,17 +180,29 @@ def train_model(
 
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
             optimizer.step()
+
+            batch_losses.append(loss.item())
             t_last = time.perf_counter()
+
+        epoch_train_losses.append(sum(batch_losses) / len(batch_losses) if batch_losses else 0.0)
 
         epoch_times.append(time.perf_counter() - t_epoch)
 
-        val_acc = evaluate_accuracy(model, val_loader, device, ans_token_id, ans_true_id, ans_false_id)
-        epoch_val_accuracies.append(val_acc)
-        best_val_acc = max(best_val_acc, val_acc)
+        filler_acc = evaluate_accuracy(model, val_loader, device, ans_token_id, ans_true_id, ans_false_id)
+        epoch_filler_accuracies.append(filler_acc)
+        best_filler_acc = max(best_filler_acc, filler_acc)
+
+        if cot_val_loader is not None:
+            cot_acc = evaluate_accuracy(model, cot_val_loader, device, ans_token_id, ans_true_id, ans_false_id)
+            epoch_cot_accuracies.append(cot_acc)
+            best_cot_acc = max(best_cot_acc, cot_acc)
 
     history = {
-        "best_val_accuracy": best_val_acc,
-        "epoch_val_accuracies": epoch_val_accuracies,
+        "epoch_train_losses": epoch_train_losses,
+        "epoch_filler_accuracies": epoch_filler_accuracies,
+        "epoch_val_accuracies": epoch_filler_accuracies,  # Alias
+        "best_filler_accuracy": best_filler_acc,
+        "best_val_accuracy": best_filler_acc,  # Alias
         "epochs_trained": epochs,
         "weight_decay": weight_decay,
         "grad_clip": grad_clip,
@@ -182,5 +211,9 @@ def train_model(
         "data_wait_seconds": data_wait,
         "samples_per_second": (len(train_dataset) * epochs) / max(sum(epoch_times), 1e-9),
     }
+
+    if cot_val_loader is not None:
+        history["epoch_cot_accuracies"] = epoch_cot_accuracies
+        history["best_cot_accuracy"] = best_cot_acc
 
     return model, history
