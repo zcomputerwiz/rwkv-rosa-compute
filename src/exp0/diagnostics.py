@@ -21,10 +21,14 @@ def _autocast_context(device: torch.device, precision: str):
     return torch.autocast(device_type=device.type, dtype=dtype)
 
 
-def _safe_ratio(numerator: int, denominator: int) -> float | None:
+def _safe_ratio(numerator: float, denominator: float) -> float | None:
     if denominator == 0:
         return None
     return numerator / denominator
+
+
+def _pair_list(length: int) -> list[tuple[int, int]]:
+    return [(i, j) for i in range(length) for j in range(i + 1, length)]
 
 
 def evaluate_cot_diagnostics(
@@ -35,24 +39,27 @@ def evaluate_cot_diagnostics(
     ans_true_id: int,
     ans_false_id: int,
     *,
+    task_length: int,
+    task_mod: int = 10,
     precision: str = "fp32",
     non_blocking: bool = False,
 ) -> Dict[str, Any]:
     """Measure teacher-forced intermediate-token generation on parallel CoT.
 
-    Final answer accuracy with a ground-truth CoT prefix is retained under the
-    explicit name ``cot_answer_given_cot_accuracy`` because it is not evidence
-    that the model independently computed 3SUM. The informative diagnostics
-    score next-token predictions at the intermediate pair/result slots.
-
-    Reduced-vocabulary CoT intentionally randomizes which member of a pair and
-    which coordinate digit are emitted. Exact-token metrics mirror the paper's
-    evaluator, while semantic metrics accept any token that represents the same
-    valid pair/result and therefore remove that artificial stochastic ceiling.
+    In addition to aggregate metrics, report per-pair specialization, explicit
+    structured-chance baselines, and the irreducible NLL floor introduced by
+    randomized coordinate selection in reduced-vocabulary sum targets.
     """
     model.eval()
+    pairs = _pair_list(task_length)
+    pair_count = len(pairs)
+    pair_j = torch.tensor(
+        [j for _, j in pairs],
+        dtype=torch.float64,
+        device=device,
+    )
 
-    counter_names = (
+    scalar_names = (
         "pair_exact",
         "pair_semantic",
         "pair_count",
@@ -65,12 +72,33 @@ def evaluate_cot_diagnostics(
         "result_count",
         "answer_correct",
         "answer_count",
+        "result_nll_sum",
+        "result_nll_floor_sum",
+        "pair_exact_chance_sum",
+        "pair_semantic_chance_sum",
+        "sum_exact_chance_sum",
+        "sum_semantic_chance_sum",
+        "match_exact_chance_sum",
+        "result_semantic_chance_sum",
     )
     counters = {
-        name: torch.zeros((), dtype=torch.int64, device=device)
-        for name in counter_names
+        name: torch.zeros((), dtype=torch.float64, device=device)
+        for name in scalar_names
     }
-    result_nll_sum = torch.zeros((), dtype=torch.float64, device=device)
+    per_pair_names = (
+        "pair_semantic_correct",
+        "pair_semantic_count",
+        "sum_semantic_correct",
+        "sum_semantic_count",
+        "match_exact_correct",
+        "match_exact_count",
+        "result_semantic_correct",
+        "result_semantic_count",
+    )
+    per_pair = {
+        name: torch.zeros(pair_count, dtype=torch.float64, device=device)
+        for name in per_pair_names
+    }
 
     with torch.no_grad():
         for batch in val_loader:
@@ -87,21 +115,17 @@ def evaluate_cot_diagnostics(
             ans_positions_cpu = ans_mask_cpu.to(dtype=torch.int64).argmax(dim=1)
 
             input_tuples = batch["input_tuples"].to(
-                device,
-                non_blocking=non_blocking,
+                device, non_blocking=non_blocking
             )
             targets = targets_cpu.to(device, non_blocking=non_blocking)
-            has_3sum = batch["has_3sum"].to(
-                device,
-                non_blocking=non_blocking,
+            has_3sum = batch["has_3sum"].to(device, non_blocking=non_blocking)
+            diag_type = batch["cot_diag_type"].to(device, non_blocking=non_blocking)
+            valid_ids = batch["cot_valid_ids"].to(device, non_blocking=non_blocking)
+            pair_indices = batch["cot_pair_index"].to(
+                device, non_blocking=non_blocking
             )
-            diag_type = batch["cot_diag_type"].to(
-                device,
-                non_blocking=non_blocking,
-            )
-            valid_ids = batch["cot_valid_ids"].to(
-                device,
-                non_blocking=non_blocking,
+            stochastic_floor = batch["cot_stochastic_nll_floor"].to(
+                device, non_blocking=non_blocking
             )
 
             with _autocast_context(device, precision):
@@ -113,6 +137,8 @@ def evaluate_cot_diagnostics(
             next_targets = targets[:, 1:]
             next_types = diag_type[:, 1:]
             next_valid_ids = valid_ids[:, 1:, :]
+            next_pair_indices = pair_indices[:, 1:].to(dtype=torch.long)
+            next_floor = stochastic_floor[:, 1:]
             predictions = logits.argmax(dim=-1)
             exact = predictions.eq(next_targets)
             semantic = predictions.unsqueeze(-1).eq(next_valid_ids).any(dim=-1)
@@ -125,28 +151,63 @@ def evaluate_cot_diagnostics(
             counters["pair_exact"].add_(exact[pair_mask].sum())
             counters["pair_semantic"].add_(semantic[pair_mask].sum())
             counters["pair_count"].add_(pair_mask.sum())
-
             counters["sum_exact"].add_(exact[sum_mask].sum())
             counters["sum_semantic"].add_(semantic[sum_mask].sum())
             counters["sum_count"].add_(sum_mask.sum())
-
             counters["match_exact"].add_(exact[match_mask].sum())
             counters["match_count"].add_(match_mask.sum())
-
             counters["result_semantic"].add_(semantic[result_mask].sum())
             counters["result_count"].add_(result_mask.sum())
+
+            valid_counts = next_valid_ids.ge(0).sum(dim=-1).to(torch.float64)
+            counters["pair_exact_chance_sum"].add_(
+                pair_mask.sum().to(torch.float64) / task_length
+            )
+            counters["pair_semantic_chance_sum"].add_(
+                (valid_counts * pair_mask).sum() / task_length
+            )
+            counters["sum_exact_chance_sum"].add_(
+                sum_mask.sum().to(torch.float64) / task_mod
+            )
+            sum_sem_chance = (valid_counts / task_mod) * sum_mask
+            counters["sum_semantic_chance_sum"].add_(sum_sem_chance.sum())
+
+            if torch.any(match_mask):
+                matched_pair_indices = next_pair_indices[match_mask]
+                eligible = task_length - pair_j[matched_pair_indices] - 1.0
+                match_chance = eligible.reciprocal()
+                counters["match_exact_chance_sum"].add_(match_chance.sum())
+                counters["result_semantic_chance_sum"].add_(match_chance.sum())
+            counters["result_semantic_chance_sum"].add_(sum_sem_chance.sum())
 
             per_token_nll = F.cross_entropy(
                 logits.float().reshape(-1, logits.shape[-1]),
                 next_targets.reshape(-1),
                 reduction="none",
             ).view_as(next_targets)
-            result_nll_sum.add_(per_token_nll[result_mask].sum().to(torch.float64))
+            counters["result_nll_sum"].add_(per_token_nll[result_mask].sum())
+            counters["result_nll_floor_sum"].add_(next_floor[result_mask].sum())
 
-            ans_positions = ans_positions_cpu.to(
-                device,
-                non_blocking=non_blocking,
-            )
+            for mask, correct, count_name, correct_name in (
+                (pair_mask, semantic, "pair_semantic_count", "pair_semantic_correct"),
+                (sum_mask, semantic, "sum_semantic_count", "sum_semantic_correct"),
+                (match_mask, exact, "match_exact_count", "match_exact_correct"),
+                (
+                    result_mask,
+                    semantic,
+                    "result_semantic_count",
+                    "result_semantic_correct",
+                ),
+            ):
+                if torch.any(mask):
+                    indices = next_pair_indices[mask]
+                    ones = torch.ones_like(indices, dtype=torch.float64)
+                    per_pair[count_name].scatter_add_(0, indices, ones)
+                    per_pair[correct_name].scatter_add_(
+                        0, indices, correct[mask].to(torch.float64)
+                    )
+
+            ans_positions = ans_positions_cpu.to(device, non_blocking=non_blocking)
             batch_indices = torch.arange(targets.shape[0], device=device)
             answer_predictions = predictions[batch_indices, ans_positions]
             expected_answers = torch.where(
@@ -159,53 +220,101 @@ def evaluate_cot_diagnostics(
             )
             counters["answer_count"].add_(targets.shape[0])
 
-    # One host transfer at the end keeps CUDA validation asynchronous across
-    # batches while still returning ordinary JSON-serializable Python values.
-    counter_values = {
-        name: int(value.item())
-        for name, value in counters.items()
-    }
-    result_nll_value = float(result_nll_sum.item())
+    # Preserve the CUDA harness's single result synchronization by flattening
+    # every scalar and per-pair accumulator into one host transfer.
+    scalar_tensor = torch.stack([counters[name] for name in scalar_names])
+    pair_tensor = torch.cat([per_pair[name] for name in per_pair_names])
+    host_values = torch.cat((scalar_tensor, pair_tensor)).cpu().tolist()
 
+    scalar_values = dict(zip(scalar_names, host_values[: len(scalar_names)]))
+    offset = len(scalar_names)
+    pair_values: dict[str, list[float]] = {}
+    for name in per_pair_names:
+        pair_values[name] = host_values[offset : offset + pair_count]
+        offset += pair_count
+
+    per_pair_report = []
+    for index, (i, j) in enumerate(pairs):
+        result_count = pair_values["result_semantic_count"][index]
+        per_pair_report.append(
+            {
+                "pair_index": index,
+                "i": i,
+                "j": j,
+                "pair_semantic_accuracy": _safe_ratio(
+                    pair_values["pair_semantic_correct"][index],
+                    pair_values["pair_semantic_count"][index],
+                ),
+                "sum_semantic_accuracy": _safe_ratio(
+                    pair_values["sum_semantic_correct"][index],
+                    pair_values["sum_semantic_count"][index],
+                ),
+                "match_index_accuracy": _safe_ratio(
+                    pair_values["match_exact_correct"][index],
+                    pair_values["match_exact_count"][index],
+                ),
+                "result_semantic_accuracy": _safe_ratio(
+                    pair_values["result_semantic_correct"][index], result_count
+                ),
+                "result_count": int(result_count),
+            }
+        )
+
+    result_count = scalar_values["result_count"]
     return {
         "cot_answer_given_cot_accuracy": _safe_ratio(
-            counter_values["answer_correct"],
-            counter_values["answer_count"],
+            scalar_values["answer_correct"], scalar_values["answer_count"]
         ),
         "cot_pair_position_token_accuracy": _safe_ratio(
-            counter_values["pair_exact"],
-            counter_values["pair_count"],
+            scalar_values["pair_exact"], scalar_values["pair_count"]
         ),
         "cot_pair_position_semantic_accuracy": _safe_ratio(
-            counter_values["pair_semantic"],
-            counter_values["pair_count"],
+            scalar_values["pair_semantic"], scalar_values["pair_count"]
         ),
         "cot_sum_token_accuracy": _safe_ratio(
-            counter_values["sum_exact"],
-            counter_values["sum_count"],
+            scalar_values["sum_exact"], scalar_values["sum_count"]
         ),
         "cot_sum_semantic_accuracy": _safe_ratio(
-            counter_values["sum_semantic"],
-            counter_values["sum_count"],
+            scalar_values["sum_semantic"], scalar_values["sum_count"]
         ),
         "cot_match_index_accuracy": _safe_ratio(
-            counter_values["match_exact"],
-            counter_values["match_count"],
+            scalar_values["match_exact"], scalar_values["match_count"]
         ),
         "cot_result_semantic_accuracy": _safe_ratio(
-            counter_values["result_semantic"],
-            counter_values["result_count"],
+            scalar_values["result_semantic"], result_count
         ),
-        "cot_result_nll": (
-            result_nll_value / counter_values["result_count"]
-            if counter_values["result_count"]
-            else None
+        "cot_result_nll": _safe_ratio(
+            scalar_values["result_nll_sum"], result_count
         ),
+        "cot_result_nll_floor": _safe_ratio(
+            scalar_values["result_nll_floor_sum"], result_count
+        ),
+        "cot_chance_baselines": {
+            "pair_position_token_accuracy": _safe_ratio(
+                scalar_values["pair_exact_chance_sum"], scalar_values["pair_count"]
+            ),
+            "pair_position_semantic_accuracy": _safe_ratio(
+                scalar_values["pair_semantic_chance_sum"], scalar_values["pair_count"]
+            ),
+            "sum_token_accuracy": _safe_ratio(
+                scalar_values["sum_exact_chance_sum"], scalar_values["sum_count"]
+            ),
+            "sum_semantic_accuracy": _safe_ratio(
+                scalar_values["sum_semantic_chance_sum"], scalar_values["sum_count"]
+            ),
+            "match_index_accuracy": _safe_ratio(
+                scalar_values["match_exact_chance_sum"], scalar_values["match_count"]
+            ),
+            "result_semantic_accuracy": _safe_ratio(
+                scalar_values["result_semantic_chance_sum"], result_count
+            ),
+        },
+        "cot_per_pair": per_pair_report,
         "cot_diagnostic_counts": {
-            "pair_position_tokens": counter_values["pair_count"],
-            "sum_results": counter_values["sum_count"],
-            "match_results": counter_values["match_count"],
-            "all_results": counter_values["result_count"],
-            "answers": counter_values["answer_count"],
+            "pair_position_tokens": int(scalar_values["pair_count"]),
+            "sum_results": int(scalar_values["sum_count"]),
+            "match_results": int(scalar_values["match_count"]),
+            "all_results": int(result_count),
+            "answers": int(scalar_values["answer_count"]),
         },
     }
