@@ -45,8 +45,6 @@ def test_evaluation_readout_is_supervised():
 
 
 @pytest.mark.exp0
-
-@pytest.mark.exp0
 @patch("exp0.train.train_model")
 def test_train_loop_end_to_end_cpu(mock_train_model):
     mock_history = {
