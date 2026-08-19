@@ -34,7 +34,6 @@ def canonical_run_config(
 ) -> Dict[str, Any]:
     """Return the complete deterministic configuration used for run identity."""
     model_dict = _resolved_model_dict(model_cfg, task_cfg)
-    # Checkpoint content, not its machine-specific path, defines model identity.
     model_dict.pop("rwkv_checkpoint", None)
 
     train_dict = asdict(train_cfg)
@@ -150,8 +149,8 @@ def compile_experiment_report(
         res.get("best_filler_accuracy", res.get("best_val_accuracy", 0.0))
         for res in per_seed_results
     ]
-    train_answer_accuracies = [
-        res.get("best_train_answer_accuracy", 0.0)
+    online_train_answer_accuracies = [
+        res.get("best_online_train_answer_accuracy", 0.0)
         for res in per_seed_results
     ]
 
@@ -160,9 +159,9 @@ def compile_experiment_report(
         if filler_accuracies
         else 0.0
     )
-    mean_train_answer_acc = (
-        sum(train_answer_accuracies) / len(train_answer_accuracies)
-        if train_answer_accuracies
+    mean_online_train_answer_acc = (
+        sum(online_train_answer_accuracies) / len(online_train_answer_accuracies)
+        if online_train_answer_accuracies
         else 0.0
     )
     min_acc = min(filler_accuracies) if filler_accuracies else 0.0
@@ -210,7 +209,7 @@ def compile_experiment_report(
         "min_accuracy": min_acc,
         "max_accuracy": max_acc,
         "per_seed_accuracies": filler_accuracies,
-        "best_training_answer_accuracy": mean_train_answer_acc,
+        "best_online_training_answer_accuracy": mean_online_train_answer_acc,
         **cot_diagnostics,
     }
 
@@ -237,6 +236,12 @@ def compile_experiment_report(
         "realized_mixture_counts": realized_mixture_counts,
         "metrics": metrics,
         "metric_semantics": {
+            "best_online_training_answer_accuracy": (
+                "Best per-epoch answer accuracy accumulated from each training "
+                "batch's existing forward pass before that batch's optimizer "
+                "update. This is an online fit diagnostic, not a frozen "
+                "end-of-epoch evaluation of the full training set."
+            ),
             "cot_answer_given_cot_accuracy": (
                 "Final True/False accuracy when the ground-truth CoT prefix is "
                 "teacher-forced. This is retained as a leakage-aware diagnostic "
