@@ -2,6 +2,7 @@
 
 import random
 import time
+from dataclasses import replace
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -170,15 +171,15 @@ def train_model(
             f"Found: ANS={ans_token_id}, True={ans_true_id}, "
             f"False={ans_false_id}"
         )
-    if len(vocab) > model_cfg.vocab_size:
-        raise ValueError(
-            f"Configured vocab_size={model_cfg.vocab_size} is smaller than the "
-            f"Experiment 0 vocabulary ({len(vocab)})."
-        )
+
+    # Experiment 0's output vocabulary is derived from the task schema rather
+    # than selected independently. Resolve it on a local config so the caller's
+    # ModelConfig remains immutable across seeds/runs.
+    resolved_model_cfg = replace(model_cfg, vocab_size=len(vocab))
 
     d_input = task_cfg.mod * task_cfg.dimension + task_cfg.length
-    model = create_model(model_cfg, d_input=d_input)
-    initialization = initialize_model(model, model_cfg)
+    model = create_model(resolved_model_cfg, d_input=d_input)
+    initialization = initialize_model(model, resolved_model_cfg)
     model = model.to(device)
 
     # Condition-dependent hyperparameters are part of the documented 0A protocol.
@@ -289,6 +290,7 @@ def train_model(
         "data_wait_seconds": data_wait,
         "samples_per_second": (len(train_dataset) * epochs)
         / max(sum(epoch_times), 1e-9),
+        "resolved_vocab_size": len(vocab),
         "initialization": initialization,
     }
 
