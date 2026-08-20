@@ -46,6 +46,42 @@ validation_result_syncs_per_pass
 
 so this execution behavior remains inspectable.
 
+## Running the CUDA suite on Windows
+
+On Windows a bare `pytest -m cuda` fails before it tests anything. The fused
+RWKV-7 kernel is compiled on first use, and that needs ninja (which lives in
+`.venv\Scripts`, invisible unless the venv is activated) plus the MSVC
+toolchain. Without them every fused test fails with `Ninja is required to load
+C++ extensions`, which reads as a code failure and is not one.
+
+`scripts/run_cuda_tests.ps1` assembles that environment and runs the same
+selection as the `CUDA Tests` workflow, with the same `EXP0_REQUIRE_RWKV_CUDA=1`:
+
+```powershell
+.\scripts\run_cuda_tests.ps1
+.\scripts\run_cuda_tests.ps1 -Cold          # clear the kernel cache first
+.\scripts\run_cuda_tests.ps1 -k rwkv7_fused # extra args go to pytest
+```
+
+It prints the resolved `cl.exe`, `nvcc`, `ninja`, and interpreter before
+running, and exits with pytest's exit code.
+
+This reproduces the workflow's *test* step, not its install step. Two
+differences are expected and are not failures:
+
+- `rosa_soft` reports `variant='reference'` locally while CI builds it with
+  CUDA. Do not `pip install` the submodule on Windows to close that gap: MSVC
+  links its `_C` extension without exporting `PyInit__C`, and because
+  `rosa_compute.rosa_compat` puts that directory on `sys.path`, the artifact
+  then breaks every `import rosa_compute`. Run
+  `scripts/clean_rwkv_cuda_cache.ps1` to remove one if it appears.
+- `test_llama_bf16_flash_sdpa_smoke` skips, because PyTorch's Windows wheels
+  ship without the flash-attention backend. Linux wheels provide it.
+
+Use `-Cold` when the point is to prove the build rather than the tests. A warm
+run reuses the cached kernel and finishes in a few seconds; a cold one takes
+roughly twenty and is what a fresh CI runner actually does.
+
 ## Quick CUDA gate
 
 Run the non-slow CUDA tests before a long 0A run:
