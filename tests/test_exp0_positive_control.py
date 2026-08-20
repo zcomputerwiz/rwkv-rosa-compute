@@ -72,6 +72,7 @@ def test_runner_retains_positive_control_protocol_defaults():
     assert model_cfg.llama_rope_theta == 10000.0
     assert model_cfg.llama_initializer_range == 0.02
     assert model_cfg.match3_shared_input_features is True
+    assert model_cfg.output_vocab_size == 32000
     assert train_cfg.adam_beta1 == 0.9
     assert train_cfg.adam_beta2 == 0.95
     assert train_cfg.lr_schedule == "linear_warmup_decay"
@@ -119,6 +120,39 @@ def test_shared_input_projection_reuses_tuple_position_and_digit_columns():
         torch.tensor([[vocab.token2id["C"]]], dtype=torch.long)
     )
     torch.testing.assert_close(tuple_hidden, target_hidden)
+
+
+def test_task_vocab_and_output_head_width_are_independent():
+    task_cfg = Task3SumConfig(length=3, dimension=1)
+    vocab = build_default_vocab(length=3, dimension=1)
+    model = create_model(
+        ModelConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            intermediate_size=64,
+            vocab_size=len(vocab),
+            output_vocab_size=32000,
+        ),
+        d_input=13,
+        vocab=vocab,
+        task_cfg=task_cfg,
+    )
+
+    assert model.vocab_size == len(vocab)
+    assert model.target_feature_indices.numel() == len(vocab)
+    assert model.output_vocab_size == 32000
+    assert model.head.out_features == 32000
+
+    input_tuples = torch.zeros(2, 3, 13)
+    targets = torch.tensor(
+        [
+            [vocab.token2id[":"], vocab.token2id["ANS"], vocab.token2id["True"]],
+            [vocab.token2id[":"], vocab.token2id["ANS"], vocab.token2id["False"]],
+        ]
+    )
+    logits = model.loss_logits(input_tuples, targets)
+    assert logits.shape == (2, 2, 32000)
 
 
 def test_llama_backbone_and_head_use_initializer_range_but_input_proj_is_default():
