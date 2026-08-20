@@ -8,14 +8,12 @@ import torch.nn.functional as F
 class InputEmbedWrapper(nn.Module):
     """Project tuple and continuation features through one shared input layer.
 
-    Pfau et al.'s Match-3 implementation feeds both the initial multi-hot tuple
-    vectors and later continuation-token feature vectors through one
-    ``nn.Linear`` input adapter. In particular, reduced CoT tuple-index and digit
-    tokens reuse columns that also encode the original tuple positions/digits.
-
-    ``target_feature_indices`` maps each target vocabulary id onto the shared
-    input feature column that should represent that token. Tokens without a
-    tuple-feature analogue occupy dedicated columns after ``d_input``.
+    ``vocab_size`` is the number of task token IDs that can be fed back as
+    continuation inputs. ``output_vocab_size`` may be larger: the authors'
+    positive-control Llama keeps its 32k LM head even though Match-3 labels use
+    only a small subset of those output classes. Decoupling the two dimensions
+    reproduces that loss geometry without inventing thousands of fake input
+    features.
     """
 
     def __init__(
@@ -25,6 +23,7 @@ class InputEmbedWrapper(nn.Module):
         hidden_size: int,
         vocab_size: int,
         *,
+        output_vocab_size: int | None = None,
         target_feature_indices: torch.Tensor | None = None,
         input_feature_dim: int | None = None,
     ):
@@ -33,6 +32,14 @@ class InputEmbedWrapper(nn.Module):
         self.d_input = d_input
         self.hidden_size = hidden_size
         self.vocab_size = vocab_size
+        self.output_vocab_size = (
+            vocab_size if output_vocab_size is None else output_vocab_size
+        )
+        if self.output_vocab_size < vocab_size:
+            raise ValueError(
+                "output_vocab_size must cover every task vocabulary ID: "
+                f"got output={self.output_vocab_size}, task={vocab_size}."
+            )
 
         if target_feature_indices is None:
             target_feature_indices = torch.arange(
@@ -49,7 +56,7 @@ class InputEmbedWrapper(nn.Module):
                 raise ValueError("target_feature_indices must be rank-1.")
             if target_feature_indices.numel() != vocab_size:
                 raise ValueError(
-                    "target_feature_indices must contain one entry per vocab id."
+                    "target_feature_indices must contain one entry per task vocab id."
                 )
             if input_feature_dim is None:
                 input_feature_dim = int(target_feature_indices.max().item()) + 1
@@ -74,20 +81,14 @@ class InputEmbedWrapper(nn.Module):
         # authors' InputEmbedCausalTransformer likewise adds a default-initialized
         # input linear around the normally initialized Llama backbone.
         self.input_proj = nn.Linear(input_feature_dim, hidden_size)
-        self.head = nn.Linear(hidden_size, vocab_size, bias=False)
+        self.head = nn.Linear(hidden_size, self.output_vocab_size, bias=False)
 
     def _tuple_hidden(self, input_tuples: torch.Tensor) -> torch.Tensor:
-        # Tuple vectors occupy the first d_input feature columns. Applying the
-        # corresponding weight slice is algebraically identical to zero-padding
-        # the tuple vectors to input_feature_dim and calling input_proj.
         weight = self.input_proj.weight[:, : self.d_input]
         return F.linear(input_tuples, weight, self.input_proj.bias)
 
     def _target_hidden(self, target_ids: torch.Tensor) -> torch.Tensor:
         mapped = self.target_feature_indices[target_ids]
-        # One-hot feature vector @ input_proj.weight.T is exactly an embedding
-        # lookup into the transposed shared linear weight. The same bias is then
-        # added at every continuation position, matching nn.Linear semantics.
         hidden = F.embedding(mapped, self.input_proj.weight.transpose(0, 1))
         return hidden + self.input_proj.bias
 
