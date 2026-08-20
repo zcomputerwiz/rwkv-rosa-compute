@@ -1,4 +1,5 @@
 # NOTE: This workflow targets self-hosted GPU runners with labels [self-hosted, linux, gpu].
+# To reproduce the test step locally on Windows, use scripts/run_cuda_tests.ps1.
 # If no active self-hosted runner matching these labels is registered, workflow_dispatch
 # runs will queue indefinitely rather than failing.
 
@@ -30,13 +31,28 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
-          pip install -e .
-          cd external/rosa_soft && USE_CUDA=1 pip install -e .
+          # The [cuda] extra installs ninja. Without it torch.utils.cpp_extension
+          # cannot JIT-build the pinned RWKV-7 recurrence kernel, and every
+          # rwkv7_fused_cuda test fails with "Ninja is required to load C++
+          # extensions".
+          pip install -e ".[cuda]"
+          # --no-build-isolation because the native build compiles against the
+          # PyTorch ABI of this environment, so it must see the torch installed
+          # above; rosa_soft's own pyproject.toml says as much. --no-deps
+          # because rosa_soft pins torch>=2.11,<2.12, and resolving that
+          # downgrades the torch this job just installed.
+          cd external/rosa_soft && USE_CUDA=1 pip install -e . --no-deps --no-build-isolation
 
       - name: Verify CUDA Extension Capabilities
         run: |
           python -c "import rosa_soft; caps = rosa_soft.BUILD_CAPABILITIES; print(caps); assert caps.rosa_soft_cuda, 'CUDA extension not built!'"
 
       - name: Run CUDA Pytest
+        env:
+          # Without this the fused-kernel tests skip when nvcc is missing, so a
+          # runner with a broken CUDA toolchain reports a green GPU job that
+          # exercised no GPU kernel. On this runner a missing toolkit is a
+          # failure, not a skip.
+          EXP0_REQUIRE_RWKV_CUDA: "1"
         run: |
           pytest -m "cuda" -v

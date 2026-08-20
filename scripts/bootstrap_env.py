@@ -10,7 +10,8 @@ What it does, in order:
   3. Create .venv (skipped if already inside a virtual environment).
   4. Install torch from a platform-appropriate index, then requirements-dev.txt,
      then the project in editable mode.
-  5. Verify the result: torch version, CUDA availability, device name, imports.
+  5. Verify the result: torch version, CUDA availability, device name, the
+     extension-build toolchain, and imports.
   6. Optionally persist environment variables into the venv activation scripts.
 
 Typical use:
@@ -174,11 +175,17 @@ def install(py: Path, args: argparse.Namespace) -> None:
         ) from None
 
     run([str(py), "-m", "pip", "install", "-r", str(REPO_ROOT / "requirements-dev.txt")])
-    run([str(py), "-m", "pip", "install", "-e", str(REPO_ROOT)])
+
+    # The [cuda] extra is just ninja, but without it torch.utils.cpp_extension
+    # cannot JIT-build the fused RWKV-7 recurrence kernel and every
+    # rwkv7_fused_cuda test fails with "Ninja is required to load C++
+    # extensions". A CPU-only environment never builds an extension.
+    editable_target = str(REPO_ROOT) if args.cpu else f"{REPO_ROOT}[cuda]"
+    run([str(py), "-m", "pip", "install", "-e", editable_target])
 
 
 VERIFY_SNIPPET = """
-import importlib, platform, sys
+import importlib, platform, shutil, sys
 print("python        :", platform.python_version())
 import torch
 print("torch         :", torch.__version__)
@@ -191,12 +198,34 @@ elif "+cpu" in torch.__version__:
     print("NOTE          : CPU-only torch wheel installed; GPU will not be used.")
 import numpy
 print("numpy         :", numpy.__version__)
+
+# Extension-build toolchain. The fused RWKV-7 kernel is compiled on first use,
+# not at install time, so a missing piece here surfaces as a confusing test
+# failure hours later rather than as an install error.
+from torch.utils.cpp_extension import CUDA_HOME, is_ninja_available
+print("cuda toolkit  :", CUDA_HOME or "NOT FOUND - fused RWKV-7 kernel cannot build")
+print(
+    "ninja         :",
+    "OK" if is_ninja_available()
+    else "NOT FOUND - activate the venv, or pip install -e '.[cuda]'",
+)
+if platform.system() == "Windows":
+    print(
+        "msvc cl.exe   :",
+        shutil.which("cl")
+        or "not on PATH - use a Developer Command Prompt to build extensions",
+    )
+
 for mod in ("rosa_compute", "exp0"):
     importlib.import_module(mod)
     print(f"import {mod:<7}: OK")
+# rosa_compute.rosa_compat puts external/rosa_soft on sys.path itself, so the
+# submodule is imported from its source tree and never needs a pip install.
+# Do not add one: on Windows the compiled _C extension links without exporting
+# PyInit__C, and the resulting ImportError breaks every rosa_compute import.
 try:
     import rosa_soft
-    print("rosa_soft     : OK")
+    print("rosa_soft     :", rosa_soft.BUILD_CAPABILITIES)
 except Exception as exc:
     print("rosa_soft     : FAILED -", exc)
     sys.exit(1)
@@ -280,6 +309,13 @@ def print_next_steps(py: Path, pairs: list[tuple[str, str]]) -> None:
     print("    ROSA_MODEL_PATH      path to a ROSA checkpoint; enables the")
     print("                         'checkpoint'-marked tests (skipped otherwise)")
     print("    EXP0_RWKV7_CUDA_DIR  override the fused RWKV-7 CUDA source dir")
+    print("    EXP0_REQUIRE_RWKV_CUDA=1")
+    print("                         turn the fused-kernel tests' 'no CUDA")
+    print("                         toolkit' skip into a hard failure")
+    if platform.system() == "Windows":
+        print()
+        print("  Building CUDA extensions on Windows needs MSVC on PATH. If cl.exe")
+        print("  is missing above, rerun from a Developer Command Prompt.")
     if not pairs:
         print()
         print("  To persist one across sessions:")
