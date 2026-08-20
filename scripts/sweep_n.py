@@ -54,6 +54,8 @@ def build_runner_command(
             str(args.intermediate_size),
             "--head_dim",
             str(args.head_dim),
+            "--output_vocab_size",
+            str(args.output_vocab_size),
             "--num_filler",
             str(n),
             "--length",
@@ -178,6 +180,7 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num_attention_heads", type=int, default=6)
     parser.add_argument("--intermediate_size", type=int, default=1536)
     parser.add_argument("--head_dim", type=int, default=64)
+    parser.add_argument("--output_vocab_size", type=int, default=32000)
     parser.add_argument("--length", type=int, default=12)
     parser.add_argument("--dimension", type=int, default=3)
     parser.add_argument("--true_rate", type=float, default=0.5)
