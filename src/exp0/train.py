@@ -725,7 +725,7 @@ def train_model(
 ) -> Tuple[nn.Module, Dict[str, Any]]:
     """Train one seed, optionally writing exact-resume checkpoints.
 
-    Periodic checkpoints are written after completed optimizer steps.  They
+    Periodic checkpoints are written after completed optimizer steps. They
     include partial-epoch metric accumulators and the explicit shuffled sample
     offset, so a restart neither repeats nor skips an optimizer update.
     Epoch checkpoints are written after validation/diagnostics and therefore
@@ -916,7 +916,7 @@ def train_model(
     prior_cuda_peak_reserved = completed.get("cuda_peak_memory_reserved_bytes")
 
     epochs_completed = start_epoch
-    early_stop_triggered = False
+    early_stop_criterion_reached = False
     early_stop_epoch: Optional[int] = None
     early_stop_resolved_target: Optional[float] = None
     # Rebuilt from history so a resumed run applies the same patience rule as an
@@ -925,8 +925,28 @@ def train_model(
         train_cfg, epoch_filler_accuracies, epoch_cot_diagnostics
     )
 
+    resume_stops_before_loop = (
+        resume_path is not None
+        and resume_samples == 0
+        and train_cfg.early_stop_metric != "none"
+        and early_stop_hits >= train_cfg.early_stop_patience
+    )
+    if resume_stops_before_loop:
+        latest_diagnostics = (
+            epoch_cot_diagnostics[-1] if epoch_cot_diagnostics else None
+        )
+        early_stop_resolved_target = resolve_early_stop_target(
+            train_cfg, latest_diagnostics
+        )
+        early_stop_criterion_reached = True
+        # start_epoch is the number of fully completed epochs, so it is already
+        # the human-readable 1-based epoch number that reached the criterion.
+        early_stop_epoch = start_epoch
+
+    loop_start_epoch = epochs if resume_stops_before_loop else start_epoch
+
     _sync_cuda(device)
-    for _epoch in range(start_epoch, epochs):
+    for _epoch in range(loop_start_epoch, epochs):
         resuming_this_epoch = _epoch == start_epoch and resume_samples > 0
         if checkpointing_enabled:
             assert train_sampler is not None
@@ -1154,6 +1174,32 @@ def train_model(
             )
             epoch_cot_diagnostics.append(diagnostics)
 
+        criterion_reached_this_epoch = False
+        if train_cfg.early_stop_metric != "none":
+            latest_diagnostics = (
+                epoch_cot_diagnostics[-1] if epoch_cot_diagnostics else None
+            )
+            target = resolve_early_stop_target(train_cfg, latest_diagnostics)
+            # Recorded every epoch so a run that never reaches the criterion
+            # still reports the target it was measured against.
+            early_stop_resolved_target = target
+            if train_cfg.early_stop_metric == "filler_accuracy":
+                observed = filler_acc
+            else:
+                observed = (
+                    latest_diagnostics.get(train_cfg.early_stop_metric)
+                    if latest_diagnostics
+                    else None
+                )
+            if early_stop_reached(train_cfg, observed, target):
+                early_stop_hits += 1
+            else:
+                early_stop_hits = 0
+            if early_stop_hits >= train_cfg.early_stop_patience:
+                early_stop_criterion_reached = True
+                early_stop_epoch = _epoch + 1
+                criterion_reached_this_epoch = True
+
         completed.update(
             {
                 "best_filler_acc": best_filler_acc,
@@ -1200,30 +1246,8 @@ def train_model(
         resume_partial = None
         epochs_completed = _epoch + 1
 
-        if train_cfg.early_stop_metric != "none":
-            latest_diagnostics = (
-                epoch_cot_diagnostics[-1] if epoch_cot_diagnostics else None
-            )
-            target = resolve_early_stop_target(train_cfg, latest_diagnostics)
-            # Recorded every epoch so a run that never triggers still reports
-            # the target it was measured against.
-            early_stop_resolved_target = target
-            if train_cfg.early_stop_metric == "filler_accuracy":
-                observed = filler_acc
-            else:
-                observed = (
-                    latest_diagnostics.get(train_cfg.early_stop_metric)
-                    if latest_diagnostics
-                    else None
-                )
-            if early_stop_reached(train_cfg, observed, target):
-                early_stop_hits += 1
-            else:
-                early_stop_hits = 0
-            if early_stop_hits >= train_cfg.early_stop_patience:
-                early_stop_triggered = True
-                early_stop_epoch = _epoch
-                break
+        if criterion_reached_this_epoch:
+            break
 
     current_cuda_peak_allocated = None
     current_cuda_peak_reserved = None
@@ -1242,6 +1266,7 @@ def train_model(
         else None
     )
 
+    early_stopped = early_stop_criterion_reached and epochs_completed < epochs
     total_train_seconds = sum(epoch_times)
     history: Dict[str, Any] = {
         "epoch_train_losses": epoch_train_losses,
@@ -1265,8 +1290,10 @@ def train_model(
             "target": early_stop_resolved_target,
             "tolerance": train_cfg.early_stop_tolerance,
             "patience": train_cfg.early_stop_patience,
-            "triggered": early_stop_triggered,
-            "stopped_after_epoch": early_stop_epoch,
+            "criterion_reached": early_stop_criterion_reached,
+            "criterion_reached_after_epoch": early_stop_epoch,
+            "triggered": early_stopped,
+            "stopped_after_epoch": early_stop_epoch if early_stopped else None,
             "epochs_requested": epochs,
             "epochs_trained": epochs_completed,
         },
