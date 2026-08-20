@@ -66,6 +66,7 @@ class ModelConfig:
     llama_initializer_range: float = 0.02
     match3_shared_input_features: bool = True
     vocab_size: int = 256
+    output_vocab_size: Optional[int] = None
     device: str = "cpu"
 
     def __post_init__(self):
@@ -84,6 +85,8 @@ class ModelConfig:
             raise ValueError(
                 "The pinned RWKV-7 CUDA kernel currently requires head_dim=64."
             )
+        if self.output_vocab_size is not None and self.output_vocab_size <= 0:
+            raise ValueError("output_vocab_size must be greater than zero when set.")
         if self.llama_rope_theta <= 0:
             raise ValueError("llama_rope_theta must be greater than zero.")
         if self.llama_initializer_range <= 0:
