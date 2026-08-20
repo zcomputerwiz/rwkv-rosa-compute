@@ -68,6 +68,15 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num_attention_heads", type=int, default=6)
     parser.add_argument("--intermediate_size", type=int, default=1536)
     parser.add_argument("--head_dim", type=int, default=64)
+    parser.add_argument(
+        "--output_vocab_size",
+        type=int,
+        default=32000,
+        help=(
+            "Classifier width. 32000 matches the Llama config used by the "
+            "published Match-3 positive control; task input token IDs remain compact."
+        ),
+    )
     parser.add_argument("--length", type=int, default=12)
     parser.add_argument("--dimension", type=int, default=3)
     parser.add_argument("--num_filler", type=int, default=None)
@@ -260,6 +269,7 @@ def build_configs(
         num_attention_heads=num_heads,
         intermediate_size=args.intermediate_size,
         head_dim=args.head_dim,
+        output_vocab_size=args.output_vocab_size,
         device=args.device,
     )
 
@@ -358,6 +368,11 @@ def main():
         dimension=args.dimension,
         mod=task_cfg.mod,
     )
+    if model_cfg.output_vocab_size is not None and model_cfg.output_vocab_size < len(vocab):
+        raise ValueError(
+            "output_vocab_size must cover the resolved task vocabulary: "
+            f"output={model_cfg.output_vocab_size}, task={len(vocab)}."
+        )
 
     val_instances = generate_protocol_packed_instances(
         num_samples=args.val_samples,
