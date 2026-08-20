@@ -21,6 +21,7 @@ class Task3SumConfig:
     true_rate: float = 0.5
     vocab_reduction: bool = True
     include_separator_token: bool = True
+    include_eos_target: bool = True
     generator_mode: str = SOURCE_GENERATOR
     corruption_rate: float = DEFAULT_CORRUPTION_RATE
     seed: int = 42
@@ -38,6 +39,11 @@ class Task3SumConfig:
             raise ValueError(
                 "Experiment 0 requires the supervised continuation separator. "
                 "The pre-repair separator-dropping protocol is not supported."
+            )
+        if not self.include_eos_target:
+            raise ValueError(
+                "Experiment 0 source-fidelity protocol requires a supervised "
+                "EOS target after the final True/False token."
             )
         if self.generator_mode not in GENERATOR_MODES:
             raise ValueError(
