@@ -17,7 +17,7 @@ from exp0.dataset import (
 )
 from exp0.diagnostics import evaluate_cot_diagnostics
 from exp0.models.llama import RotaryEmbedding
-from exp0.task3sum import SOURCE_GENERATOR, generate_instance
+from exp0.task3sum import LEGACY_GENERATOR, SOURCE_GENERATOR, generate_instance
 from exp0.train import _make_lr_scheduler, create_model, train_model
 from scripts.run_experiment import build_configs, get_parser
 
@@ -210,6 +210,7 @@ def test_dataset_keeps_separator_and_marks_cot_semantics():
         dimension=3,
         target_has_3sum=False,
         rng=rng,
+        generator_mode=LEGACY_GENERATOR,
     )
     vocab = build_default_vocab(length=5, dimension=3)
     dataset = Task3SumDataset(
