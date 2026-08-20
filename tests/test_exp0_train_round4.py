@@ -443,3 +443,74 @@ def test_fixed_budget_run_reports_no_early_stop():
     assert history["early_stopping"]["enabled"] is False
     assert history["early_stopping"]["criterion_reached"] is False
     assert history["early_stopping"]["triggered"] is False
+
+
+def _filler_datasets(task_cfg, num_filler, seed=600):
+    """Train/validation datasets sharing a vocabulary, at a given filler budget."""
+    train_instances = _generate_instances(task_cfg, seed=seed)
+    val_instances = _generate_instances(task_cfg, seed=seed + 1)
+    train_ds = Task3SumDataset(
+        train_instances,
+        num_filler=num_filler,
+        vocab_reduction=task_cfg.vocab_reduction,
+    )
+    val_ds = Task3SumDataset(
+        val_instances,
+        format_type="filler",
+        num_filler=num_filler,
+        vocab=train_ds.vocab,
+        vocab_reduction=task_cfg.vocab_reduction,
+    )
+    return train_ds, val_ds
+
+
+def test_immediate_protocol_reports_requested_and_effective():
+    """N=0 silently trains 5x the epochs; the report must show both numbers."""
+    from dataclasses import replace as dc_replace
+
+    from exp0.train import (
+        IMMEDIATE_PROTOCOL_EPOCH_MULTIPLIER,
+        IMMEDIATE_PROTOCOL_GRAD_CLIP,
+        IMMEDIATE_PROTOCOL_WEIGHT_DECAY,
+    )
+
+    task_cfg, model_cfg, train_cfg = get_tiny_configs()
+    task_cfg = dc_replace(task_cfg, num_filler=0)
+    train_cfg = dc_replace(train_cfg, epochs=1)
+    train_ds, val_ds = _filler_datasets(task_cfg, num_filler=0)
+
+    _, history = train_model(model_cfg, train_cfg, task_cfg, train_ds, val_ds)
+
+    expected = train_cfg.epochs * IMMEDIATE_PROTOCOL_EPOCH_MULTIPLIER
+    assert history["epochs_requested"] == train_cfg.epochs
+    assert history["epochs_effective"] == expected
+    assert history["epochs_trained"] == expected
+    assert len(history["epoch_filler_accuracies"]) == expected
+
+    override = history["immediate_protocol"]
+    assert override["applied"] is True
+    assert override["trigger"] == "num_filler == 0"
+    assert override["epochs_requested"] == train_cfg.epochs
+    assert override["epochs_effective"] == expected
+    assert override["weight_decay_requested"] == train_cfg.weight_decay
+    assert override["weight_decay_effective"] == IMMEDIATE_PROTOCOL_WEIGHT_DECAY
+    assert override["grad_clip_requested"] == train_cfg.grad_clip
+    assert override["grad_clip_effective"] == IMMEDIATE_PROTOCOL_GRAD_CLIP
+    # The effective values are what the optimizer actually used.
+    assert history["weight_decay"] == IMMEDIATE_PROTOCOL_WEIGHT_DECAY
+    assert history["grad_clip"] == IMMEDIATE_PROTOCOL_GRAD_CLIP
+
+
+def test_filler_run_reports_no_immediate_protocol_override():
+    task_cfg, model_cfg, train_cfg = get_tiny_configs()
+    train_ds, val_ds = _filler_datasets(task_cfg, num_filler=task_cfg.num_filler)
+
+    _, history = train_model(model_cfg, train_cfg, task_cfg, train_ds, val_ds)
+
+    override = history["immediate_protocol"]
+    assert override["applied"] is False
+    assert override["trigger"] is None
+    assert history["epochs_requested"] == train_cfg.epochs
+    assert history["epochs_effective"] == train_cfg.epochs
+    assert override["weight_decay_effective"] == train_cfg.weight_decay
+    assert override["grad_clip_effective"] == train_cfg.grad_clip

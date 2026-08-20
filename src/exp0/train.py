@@ -285,6 +285,15 @@ def _sync_cuda(device: torch.device) -> None:
         torch.cuda.synchronize(device)
 
 
+# Immediate-answer protocol constants. The published protocol trains N=0 runs for
+# five times the requested epochs (5 requested epochs become 25) under a
+# different weight decay and gradient clip. Named here so the substitution is
+# greppable rather than three bare literals inside train_model.
+IMMEDIATE_PROTOCOL_EPOCH_MULTIPLIER = 5
+IMMEDIATE_PROTOCOL_WEIGHT_DECAY = 0.1
+IMMEDIATE_PROTOCOL_GRAD_CLIP = 0.5
+
+
 def _answer_predictions_from_loss_logits(
     loss_logits: torch.Tensor,
     targets: torch.Tensor,
@@ -768,10 +777,23 @@ def train_model(
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
 
+    # The published protocol trains immediate-answer runs harder than filler/CoT
+    # runs: five times the epochs, and its own weight decay and gradient clip.
+    # Those substitutions happen here rather than in TrainConfig, so the config a
+    # run was launched with does not describe the run that executed. Every
+    # overridden value is therefore reported both ways below; see
+    # IMMEDIATE_PROTOCOL_EPOCH_MULTIPLIER and the "immediate_protocol" history
+    # block.
     is_immediate = (task_cfg.num_filler == 0) or (train_cfg.mixture == "immediate")
-    weight_decay = 0.1 if is_immediate else train_cfg.weight_decay
-    grad_clip = 0.5 if is_immediate else train_cfg.grad_clip
-    epochs = train_cfg.epochs * 5 if is_immediate else train_cfg.epochs
+    weight_decay = (
+        IMMEDIATE_PROTOCOL_WEIGHT_DECAY if is_immediate else train_cfg.weight_decay
+    )
+    grad_clip = IMMEDIATE_PROTOCOL_GRAD_CLIP if is_immediate else train_cfg.grad_clip
+    epochs = (
+        train_cfg.epochs * IMMEDIATE_PROTOCOL_EPOCH_MULTIPLIER
+        if is_immediate
+        else train_cfg.epochs
+    )
 
     checkpoint_path = Path(checkpoint_dir).expanduser().resolve() if checkpoint_dir else None
     resume_path = (
@@ -1283,7 +1305,24 @@ def train_model(
         "best_filler_accuracy": best_filler_acc,
         "best_filler_answer_prediction_counts": best_filler_prediction_counts,
         "epochs_trained": epochs_completed,
-        "epochs_requested": epochs,
+        "epochs_requested": train_cfg.epochs,
+        "epochs_effective": epochs,
+        "immediate_protocol": {
+            "applied": is_immediate,
+            "trigger": (
+                "num_filler == 0"
+                if task_cfg.num_filler == 0
+                else "mixture == 'immediate'"
+                if is_immediate
+                else None
+            ),
+            "epochs_requested": train_cfg.epochs,
+            "epochs_effective": epochs,
+            "weight_decay_requested": train_cfg.weight_decay,
+            "weight_decay_effective": weight_decay,
+            "grad_clip_requested": train_cfg.grad_clip,
+            "grad_clip_effective": grad_clip,
+        },
         "early_stopping": {
             "enabled": train_cfg.early_stop_metric != "none",
             "metric": train_cfg.early_stop_metric,
@@ -1294,7 +1333,8 @@ def train_model(
             "criterion_reached_after_epoch": early_stop_epoch,
             "triggered": early_stopped,
             "stopped_after_epoch": early_stop_epoch if early_stopped else None,
-            "epochs_requested": epochs,
+            "epochs_requested": train_cfg.epochs,
+            "epochs_effective": epochs,
             "epochs_trained": epochs_completed,
         },
         "weight_decay": weight_decay,

@@ -446,6 +446,43 @@ before this option existed still resume. Resuming a run *with* early stopping
 enabled rebuilds the patience counter from the restored epoch metrics, so a
 resumed run stops on the same epoch an uninterrupted one would have.
 
+## Immediate-answer protocol
+
+Setting `--num_filler 0`, or a mixture of `immediate`, switches the run onto the
+published immediate-answer protocol. Three settings are substituted inside
+`train_model`, not in `TrainConfig`:
+
+```text
+epochs        requested x 5   (--epochs 5 trains 25)
+weight_decay  0.1
+grad_clip     0.5
+```
+
+This is intentional and matches the source protocol. The hazard is that the
+canonical run config records what was requested, so a reader comparing an N=0
+arm against an N>0 arm from the config alone would believe both ran the same
+budget. Every substituted value is therefore reported both ways:
+
+```text
+epochs_requested                     what the command line asked for
+epochs_effective                     what the loop ran against
+epochs_trained                       what actually ran
+immediate_protocol_per_seed          per-seed requested/effective for all three
+immediate_protocol_applied_any_seed  true when any seed took the override
+```
+
+**An N=0 arm is not a compute-matched control for an N>0 arm from the same
+command line.** It trains five times the epochs under a different weight decay
+and gradient clip. To read an accuracy-vs-N curve as an accuracy-vs-compute
+relationship, either divide the requested epochs by five for the N=0 point or
+report the arms as what they are: each at its protocol-appropriate budget.
+`immediate_protocol_applied_any_seed` is the flag that says which situation a
+report describes.
+
+Early stopping composes with this: the stop criterion is measured against
+`epochs_effective`, so an N=0 run that stops at epoch 10 of 25 is correctly
+reported as not fixed-budget.
+
 ## Mixture caveat
 
 The 50/50 single-model CoT/filler mixture is a choice made by this repository.

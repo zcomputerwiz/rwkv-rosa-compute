@@ -326,17 +326,41 @@ def compile_experiment_report(
         res.get("early_stopping") for res in per_seed_results
     ]
     early_stopping_per_seed = [item for item in early_stopping_per_seed if item]
+
+    def _epoch_budget(item: Dict[str, Any]) -> Any:
+        """The budget the loop actually ran against.
+
+        The immediate-answer protocol multiplies the requested epochs, so a run
+        that stopped early must be compared against the effective ceiling.
+        Comparing against the requested value would report an early-stopped N=0
+        run as fixed-budget. Older reports carry only the requested key.
+        """
+        effective = item.get("epochs_effective")
+        return effective if effective is not None else item.get("epochs_requested")
+
     any_early_stopped = any(
         item.get("epochs_trained") is not None
-        and item.get("epochs_requested") is not None
-        and item["epochs_trained"] < item["epochs_requested"]
+        and _epoch_budget(item) is not None
+        and item["epochs_trained"] < _epoch_budget(item)
         for item in early_stopping_per_seed
+    )
+
+    immediate_protocol_per_seed = [
+        res.get("immediate_protocol") for res in per_seed_results
+    ]
+    immediate_protocol_per_seed = [
+        item for item in immediate_protocol_per_seed if item
+    ]
+    any_immediate_protocol = any(
+        item.get("applied", False) for item in immediate_protocol_per_seed
     )
 
     metrics: Dict[str, Any] = {
         "filler_accuracy": mean_filler_acc,
         "early_stopping_per_seed": early_stopping_per_seed,
         "fixed_budget_run": not any_early_stopped,
+        "immediate_protocol_per_seed": immediate_protocol_per_seed,
+        "immediate_protocol_applied_any_seed": any_immediate_protocol,
         "filler_answer_prediction_counts_per_seed": filler_prediction_counts,
         "filler_answer_is_degenerate_any_seed": any(
             item.get("degenerate_predictor", False)
@@ -400,6 +424,21 @@ def compile_experiment_report(
                 "accuracy-vs-compute curve as fixed-budget runs, and do not "
                 "compare them across arms unless every arm stopped on the same "
                 "rule."
+            ),
+            "immediate_protocol_per_seed": (
+                "Per-seed record of the immediate-answer protocol substitution, "
+                "which fires when num_filler is 0 or the mixture is "
+                "'immediate'. It multiplies the requested epochs and replaces "
+                "weight decay and gradient clip, so each value is reported both "
+                "as requested and as it actually ran."
+            ),
+            "immediate_protocol_applied_any_seed": (
+                "True when at least one seed ran under the immediate-answer "
+                "protocol. Such a run trained more epochs than the canonical run "
+                "config records, under a different weight decay and gradient "
+                "clip. An N=0 arm is therefore NOT a compute-matched control for "
+                "an N>0 arm from the same command line; read "
+                "immediate_protocol_per_seed before comparing them."
             ),
             "filler_answer_prediction_counts_per_seed": (
                 "Predicted True/False/other histogram at the validation ANS "

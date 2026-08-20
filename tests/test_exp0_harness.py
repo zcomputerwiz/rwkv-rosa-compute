@@ -398,3 +398,76 @@ def test_existing_report_skip_requires_full_config_match(tmp_path, capsys):
             report_path,
             {"model": {"hidden_size": 768}, "evaluation": {"seed": 1}},
         )
+
+
+def _report_for(per_seed_results):
+    return compile_experiment_report(
+        ModelConfig(),
+        TrainConfig(),
+        Task3SumConfig(),
+        per_seed_results,
+        majority_class_baseline=0.5,
+        realized_mixture_counts={"parallel_cot": 50, "filler": 50},
+        eval_seed=123,
+        val_samples=500,
+    )
+
+
+def test_report_surfaces_the_immediate_protocol_override():
+    results = _per_seed_results()
+    for res in results:
+        res["immediate_protocol"] = {
+            "applied": True,
+            "trigger": "num_filler == 0",
+            "epochs_requested": 5,
+            "epochs_effective": 25,
+            "weight_decay_requested": 0.0,
+            "weight_decay_effective": 0.1,
+            "grad_clip_requested": 1.0,
+            "grad_clip_effective": 0.5,
+        }
+
+    metrics = _report_for(results)["metrics"]
+
+    assert metrics["immediate_protocol_applied_any_seed"] is True
+    assert len(metrics["immediate_protocol_per_seed"]) == len(results)
+    assert metrics["immediate_protocol_per_seed"][0]["epochs_effective"] == 25
+    assert "immediate_protocol_per_seed" in _report_for(results)["metric_semantics"]
+
+
+def test_report_without_the_override_says_so():
+    metrics = _report_for(_per_seed_results())["metrics"]
+
+    assert metrics["immediate_protocol_applied_any_seed"] is False
+    assert metrics["immediate_protocol_per_seed"] == []
+
+
+def test_early_stop_is_measured_against_the_effective_epoch_budget():
+    """An immediate-answer run that stops early is not a fixed-budget run.
+
+    Its requested budget is 5 but the loop runs to 25, so comparing against the
+    requested value would call a run that stopped at epoch 10 fixed-budget.
+    """
+    results = _per_seed_results()
+    for res in results:
+        res["early_stopping"] = {
+            "enabled": True,
+            "epochs_requested": 5,
+            "epochs_effective": 25,
+            "epochs_trained": 10,
+        }
+
+    assert _report_for(results)["metrics"]["fixed_budget_run"] is False
+
+
+def test_early_stop_falls_back_to_requested_epochs_for_older_reports():
+    """Reports written before epochs_effective existed still classify correctly."""
+    results = _per_seed_results()
+    for res in results:
+        res["early_stopping"] = {
+            "enabled": True,
+            "epochs_requested": 5,
+            "epochs_trained": 3,
+        }
+
+    assert _report_for(results)["metrics"]["fixed_budget_run"] is False
