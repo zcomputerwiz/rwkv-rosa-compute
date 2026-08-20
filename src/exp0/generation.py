@@ -25,13 +25,13 @@ def generate_protocol_packed_instances(
     generator_mode: str = SOURCE_GENERATOR,
     corruption_rate: float = DEFAULT_CORRUPTION_RATE,
 ) -> PackedInstances:
-    """Generate an Experiment-0 split with its class vector sampled up front.
+    """Generate an Experiment-0 split using independent protocol RNG streams.
 
-    The published Match-3 generator samples the True/corrupted-construction
-    vector before generating any tuple contents. Pre-sampling here prevents
-    variable-cost rejection/resampling for one example from changing the class
-    assignment of later examples. It also makes ``Task3SumConfig.true_rate`` an
-    active, provenance-worthy protocol parameter rather than unused metadata.
+    The source implementation samples the planted/corrupted construction vector
+    from one RNG and tuple contents from a separate Match3 RNG. Deriving two
+    deterministic child streams here preserves that independence: changing the
+    requested dataset size does not perturb the tuple-generation stream for the
+    examples in the common prefix.
     """
     if num_samples < 0:
         raise ValueError("num_samples must be non-negative.")
@@ -42,18 +42,24 @@ def generate_protocol_packed_instances(
     if rng is None:
         rng = random.Random()
 
-    requested_labels = [rng.random() < true_rate for _ in range(num_samples)]
+    construction_rng = random.Random(rng.getrandbits(128))
+    tuple_rng = random.Random(rng.getrandbits(128))
+    requested_arms = [
+        construction_rng.random() < true_rate
+        for _ in range(num_samples)
+    ]
+
     tuple_array = np.empty((num_samples, length, dimension), dtype=np.uint8)
     label_array = np.empty(num_samples, dtype=np.bool_)
     match_array = np.full((num_samples, 3), -1, dtype=np.int16)
 
-    for idx, target_has_3sum in enumerate(requested_labels):
+    for idx, construction_positive in enumerate(requested_arms):
         instance = generate_instance(
             length=length,
             dimension=dimension,
             mod=mod,
-            target_has_3sum=target_has_3sum,
-            rng=rng,
+            target_has_3sum=construction_positive,
+            rng=tuple_rng,
             generator_mode=generator_mode,
             corruption_rate=corruption_rate,
         )
