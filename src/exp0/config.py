@@ -1,5 +1,6 @@
 """Configuration dataclasses for Experiment 0."""
 
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -191,6 +192,16 @@ class TrainConfig:
                 f"{', '.join(sorted(EARLY_STOP_METRICS))}; "
                 f"got {self.early_stop_metric!r}"
             )
+        if self.early_stop_metric == "none" and self.early_stop_target is not None:
+            raise ValueError(
+                "early_stop_target requires early_stop_metric to be enabled."
+            )
+        if self.early_stop_target is not None and not math.isfinite(
+            self.early_stop_target
+        ):
+            raise ValueError("early_stop_target must be finite when set.")
+        if not math.isfinite(self.early_stop_tolerance):
+            raise ValueError("early_stop_tolerance must be finite.")
         if self.early_stop_tolerance < 0.0:
             raise ValueError("early_stop_tolerance must be non-negative.")
         if self.early_stop_patience < 1:

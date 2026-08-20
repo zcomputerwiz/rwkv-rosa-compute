@@ -327,7 +327,10 @@ def compile_experiment_report(
     ]
     early_stopping_per_seed = [item for item in early_stopping_per_seed if item]
     any_early_stopped = any(
-        item.get("triggered", False) for item in early_stopping_per_seed
+        item.get("epochs_trained") is not None
+        and item.get("epochs_requested") is not None
+        and item["epochs_trained"] < item["epochs_requested"]
+        for item in early_stopping_per_seed
     )
 
     metrics: Dict[str, Any] = {
@@ -382,14 +385,17 @@ def compile_experiment_report(
                 "teacher-forced; not evidence of independent 3SUM computation."
             ),
             "early_stopping_per_seed": (
-                "Per-seed early-stopping settings and outcome. When triggered "
-                "is true, epochs_trained is less than epochs_requested and the "
-                "learning-rate schedule did not complete its decay."
+                "Per-seed early-stopping settings and outcome. criterion_reached "
+                "records whether the patience rule was satisfied; triggered is "
+                "true only when that criterion actually shortened the requested "
+                "budget. Epoch-number fields are 1-based."
             ),
             "fixed_budget_run": (
-                "False when any seed stopped early. Early-stopped runs select "
-                "the epoch at which the metric first reached target, so their "
-                "reported accuracy is an upward-biased peak rather than an "
+                "False only when at least one seed trained fewer epochs than "
+                "requested. Reaching an early-stop criterion on the final "
+                "requested epoch remains a fixed-budget run. Early-stopped runs "
+                "select the epoch at which the metric first reached target, so "
+                "their reported accuracy is an upward-biased peak rather than an "
                 "end-of-budget measurement. Do NOT place them on the same "
                 "accuracy-vs-compute curve as fixed-budget runs, and do not "
                 "compare them across arms unless every arm stopped on the same "

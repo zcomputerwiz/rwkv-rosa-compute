@@ -151,9 +151,9 @@ def get_parser() -> argparse.ArgumentParser:
         default="none",
         choices=["none", "filler_accuracy", "cot_result_nll"],
         help=(
-            "Stop once the metric reaches its theoretical target. With 'none' "
-            "(default) --epochs is the exact budget; otherwise --epochs becomes "
-            "a ceiling and the run is no longer fixed-budget."
+            "Stop once the metric reaches its target. With 'none' (default) "
+            "--epochs is the exact budget; otherwise --epochs becomes a ceiling "
+            "and the run is no longer fixed-budget if training actually stops early."
         ),
     )
     parser.add_argument(
@@ -161,8 +161,8 @@ def get_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help=(
-            "Override the stop target. Defaults to the theoretical value for "
-            "the metric: 1.0 for filler_accuracy, the measured "
+            "Override the stop target; valid only when --early_stop_metric is "
+            "enabled. Defaults to 1.0 for filler_accuracy or the measured "
             "cot_result_nll_floor for cot_result_nll."
         ),
     )
@@ -172,7 +172,9 @@ def get_parser() -> argparse.ArgumentParser:
         default=0.0,
         help=(
             "Absolute slack around the target, e.g. 0.005 stops at >=0.995 "
-            "accuracy or at <=floor+0.005 NLL."
+            "accuracy or at <=floor+0.005 NLL. A small positive tolerance is "
+            "recommended for cot_result_nll because measured NLL need not equal "
+            "the theoretical floor exactly."
         ),
     )
     parser.add_argument(
