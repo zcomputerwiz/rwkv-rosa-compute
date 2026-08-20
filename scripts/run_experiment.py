@@ -9,16 +9,13 @@ from pathlib import Path
 import torch
 
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
-from exp0.dataset import (
-    Task3SumDataset,
-    build_default_vocab,
-    generate_packed_instances,
-)
+from exp0.dataset import Task3SumDataset, build_default_vocab
 from exp0.evaluate import (
     canonical_run_config,
     compile_experiment_report,
     compute_run_id,
 )
+from exp0.generation import generate_protocol_packed_instances
 from exp0.rwkv_checkpoint import sha256_file
 from exp0.task3sum import (
     DEFAULT_CORRUPTION_RATE,
@@ -74,6 +71,12 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--length", type=int, default=12)
     parser.add_argument("--dimension", type=int, default=3)
     parser.add_argument("--num_filler", type=int, default=None)
+    parser.add_argument(
+        "--true_rate",
+        type=float,
+        default=0.5,
+        help="Requested fraction of planted-positive Match-3 examples.",
+    )
     parser.add_argument(
         "--generator_mode",
         type=str,
@@ -235,6 +238,7 @@ def build_configs(
         num_filler=(
             args.num_filler if args.num_filler is not None else args.length**2
         ),
+        true_rate=args.true_rate,
         num_samples=args.num_samples,
         vocab_reduction=args.vocab_reduction,
         generator_mode=args.generator_mode,
@@ -355,11 +359,12 @@ def main():
         mod=task_cfg.mod,
     )
 
-    val_instances = generate_packed_instances(
+    val_instances = generate_protocol_packed_instances(
         num_samples=args.val_samples,
         length=args.length,
         dimension=args.dimension,
         mod=task_cfg.mod,
+        true_rate=task_cfg.true_rate,
         rng=random.Random(args.eval_seed),
         generator_mode=task_cfg.generator_mode,
         corruption_rate=task_cfg.corruption_rate,
@@ -391,11 +396,12 @@ def main():
     realized_counts_aggregate: dict[str, int] = {}
 
     for seed in args.seeds:
-        train_instances = generate_packed_instances(
+        train_instances = generate_protocol_packed_instances(
             num_samples=args.num_samples,
             length=args.length,
             dimension=args.dimension,
             mod=task_cfg.mod,
+            true_rate=task_cfg.true_rate,
             rng=random.Random(seed),
             generator_mode=task_cfg.generator_mode,
             corruption_rate=task_cfg.corruption_rate,
