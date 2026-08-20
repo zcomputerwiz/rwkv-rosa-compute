@@ -126,7 +126,8 @@ def atomic_copy(source: str | Path, destination: str | Path) -> Path:
     )
     try:
         shutil.copyfile(source_path, temporary)
-        with open(temporary, "rb") as handle:
+        with open(temporary, "rb+") as handle:
+            handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, target)
     finally:
