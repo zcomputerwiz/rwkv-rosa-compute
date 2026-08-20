@@ -144,3 +144,100 @@ CPU CI verifies correctness/equivalence but does not claim CUDA speedups or VRAM
 ## Deferred optimization: `torch.compile`
 
 `torch.compile` is intentionally not enabled by this change. It can improve throughput on some model/GPU/software combinations, but compilation mode and CUDA graph behavior can also add startup cost or memory. It should be benchmarked separately on the actual experiment environment after the deterministic data/logit/AMP improvements above are established.
+
+## RWKV-7 CUDA benchmark and profiling harness
+
+`scripts/benchmark_rwkv_cuda.py` measures the fused recurrence independently of
+the Experiment 0 training runner and also provides full randomly initialized
+Experiment 0 RWKV-backbone modes. It never requires a checkpoint. Its JSON
+artifact records schema version, provenance, matrix, timing statistics,
+throughput, peak allocated/reserved memory, and per-configuration status.
+
+### Cloud and CPU validation
+
+CUDA is deliberately not needed to build and inspect a plan:
+
+```bash
+python scripts/benchmark_rwkv_cuda.py --dry-run --smoke
+```
+
+Add `--output results/cuda_benchmarks/smoke-plan.json` to serialize the plan. A
+non-dry run on a CUDA-less host exits clearly rather than substituting CPU
+timings or emitting invented results. Reference modes provide a same-device
+comparison; they do not masquerade as a CUDA benchmark on CPU.
+
+### Windows GPU runs
+
+First validate a small matrix on either target GPU:
+
+```powershell
+python .\scripts\benchmark_rwkv_cuda.py `
+  --smoke `
+  --mode fused_forward `
+  --mode fused_forward_backward `
+  --output .\results\cuda_benchmarks\smoke.json
+```
+
+The standard recurrence matrix defaults to batches `1,2,4,8,16,32`, timesteps
+`1,2,4,8,15,16,17,32,64,128`, hidden size 768, head dimension 64, 10 warmups,
+and 50 iterations. Preserve a separate file from each target machine:
+
+```powershell
+python .\scripts\benchmark_rwkv_cuda.py `
+  --mode fused_forward --mode fused_forward_backward `
+  --mode reference_forward --mode reference_forward_backward `
+  --warmups 10 --iterations 50 `
+  --output .\results\cuda_benchmarks\recurrence.json
+```
+
+Measure full integration separately because it answers a different question:
+
+```powershell
+python .\scripts\benchmark_rwkv_cuda.py `
+  --mode full_rwkv_forward --mode full_rwkv_forward_backward `
+  --batches 1,2,4,8 --timesteps-list 16,17,64 `
+  --output .\results\cuda_benchmarks\full-model.json
+```
+
+OOM configurations are recorded and the matrix continues. Other failures remain
+distinct. Forward and forward+backward modes remain separate so saved-state and
+gradient memory are visible. Before performance validation, use the existing
+cold extension-build check, then benchmark in a fresh process:
+
+```powershell
+.\scripts\run_cuda_tests.ps1 -Cold
+```
+
+### Nsight-friendly single workload
+
+Profiler mode requires one workload, warms it up, synchronizes at profiler
+boundaries, and repeats it under a PyTorch NVTX range:
+
+```powershell
+python .\scripts\benchmark_rwkv_cuda.py `
+  --mode fused_forward `
+  --batch 16 --timesteps 64 `
+  --profile --profile-iterations 100
+```
+
+Place that command after the desired `nsys profile` or `ncu` launcher. Nsight is
+optional on the physical host and is not needed by cloud CI. Run normal mode
+separately when a structured timing/memory JSON artifact is also required.
+
+### Interpretation
+
+- **Logical timesteps** are tokens requested by the caller.
+- **Padded kernel timesteps** are the next multiple of `CHUNK_LEN=16` presented
+  to the fused kernel (`1 -> 16`, `15 -> 16`, `16 -> 16`, `17 -> 32`).
+- A recurrence transition is one head state update, so transition totals include
+  batch and head counts. Physical totals use padded time.
+- **Recurrence-only** isolates the recurrence. **Full-model** includes time-mix
+  projections, channel mixing, normalization, and every configured layer.
+- **Forward-only memory** excludes training gradients. **Forward+backward
+  memory** exposes saved-state, gradient, and backward costs. Allocated and
+  reserved peaks are distinct PyTorch allocator measurements.
+
+These benchmarks characterize implementation performance only. They are not
+Experiment 0 accuracy results and must not be interpreted as evidence for or
+against H1/H2. Padding structure alone is not evidence of a GPU bottleneck;
+conclusions require measurements and profiler traces from the target systems.
