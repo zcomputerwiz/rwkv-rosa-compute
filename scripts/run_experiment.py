@@ -145,6 +145,45 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
+    parser.add_argument(
+        "--early_stop_metric",
+        type=str,
+        default="none",
+        choices=["none", "filler_accuracy", "cot_result_nll"],
+        help=(
+            "Stop once the metric reaches its theoretical target. With 'none' "
+            "(default) --epochs is the exact budget; otherwise --epochs becomes "
+            "a ceiling and the run is no longer fixed-budget."
+        ),
+    )
+    parser.add_argument(
+        "--early_stop_target",
+        type=float,
+        default=None,
+        help=(
+            "Override the stop target. Defaults to the theoretical value for "
+            "the metric: 1.0 for filler_accuracy, the measured "
+            "cot_result_nll_floor for cot_result_nll."
+        ),
+    )
+    parser.add_argument(
+        "--early_stop_tolerance",
+        type=float,
+        default=0.0,
+        help=(
+            "Absolute slack around the target, e.g. 0.005 stops at >=0.995 "
+            "accuracy or at <=floor+0.005 NLL."
+        ),
+    )
+    parser.add_argument(
+        "--early_stop_patience",
+        type=int,
+        default=1,
+        help=(
+            "Consecutive epochs that must meet the target before stopping. "
+            "Use 2 to avoid stopping on a single lucky epoch."
+        ),
+    )
     parser.add_argument("--out_dir", type=str, default="results/exp0")
     parser.add_argument(
         "--checkpoint_every_steps",
@@ -326,6 +365,10 @@ def build_configs(
         serial_ratio=args.serial_ratio,
         immediate_ratio=args.immediate_ratio,
         neutral_ratio=args.neutral_ratio,
+        early_stop_metric=args.early_stop_metric,
+        early_stop_target=args.early_stop_target,
+        early_stop_tolerance=args.early_stop_tolerance,
+        early_stop_patience=args.early_stop_patience,
         num_workers=args.num_workers,
         val_num_workers=args.val_num_workers,
         pin_memory=args.pin_memory,
@@ -519,6 +562,10 @@ def main():
             serial_ratio=args.serial_ratio,
             immediate_ratio=args.immediate_ratio,
             neutral_ratio=args.neutral_ratio,
+            early_stop_metric=args.early_stop_metric,
+            early_stop_target=args.early_stop_target,
+            early_stop_tolerance=args.early_stop_tolerance,
+            early_stop_patience=args.early_stop_patience,
             num_workers=args.num_workers,
             val_num_workers=args.val_num_workers,
             pin_memory=args.pin_memory,

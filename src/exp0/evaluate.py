@@ -5,7 +5,12 @@ import json
 from dataclasses import asdict
 from typing import Any, Dict, List
 
-from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
+from exp0.config import (
+    ModelConfig,
+    Task3SumConfig,
+    TrainConfig,
+    drop_disabled_early_stop_fields,
+)
 from exp0.dataset import FORMAT_NAMES, build_default_vocab
 
 
@@ -36,7 +41,7 @@ def canonical_run_config(
     model_dict = _resolved_model_dict(model_cfg, task_cfg)
     model_dict.pop("rwkv_checkpoint", None)
 
-    train_dict = asdict(train_cfg)
+    train_dict = drop_disabled_early_stop_fields(asdict(train_cfg))
     train_dict.pop("seed", None)
 
     task_dict = asdict(task_cfg)
@@ -317,8 +322,18 @@ def compile_experiment_report(
     ]
     filler_prediction_counts = [item for item in filler_prediction_counts if item]
 
+    early_stopping_per_seed = [
+        res.get("early_stopping") for res in per_seed_results
+    ]
+    early_stopping_per_seed = [item for item in early_stopping_per_seed if item]
+    any_early_stopped = any(
+        item.get("triggered", False) for item in early_stopping_per_seed
+    )
+
     metrics: Dict[str, Any] = {
         "filler_accuracy": mean_filler_acc,
+        "early_stopping_per_seed": early_stopping_per_seed,
+        "fixed_budget_run": not any_early_stopped,
         "filler_answer_prediction_counts_per_seed": filler_prediction_counts,
         "filler_answer_is_degenerate_any_seed": any(
             item.get("degenerate_predictor", False)
@@ -365,6 +380,20 @@ def compile_experiment_report(
             "cot_answer_given_cot_accuracy": (
                 "Final True/False accuracy when the ground-truth CoT prefix is "
                 "teacher-forced; not evidence of independent 3SUM computation."
+            ),
+            "early_stopping_per_seed": (
+                "Per-seed early-stopping settings and outcome. When triggered "
+                "is true, epochs_trained is less than epochs_requested and the "
+                "learning-rate schedule did not complete its decay."
+            ),
+            "fixed_budget_run": (
+                "False when any seed stopped early. Early-stopped runs select "
+                "the epoch at which the metric first reached target, so their "
+                "reported accuracy is an upward-biased peak rather than an "
+                "end-of-budget measurement. Do NOT place them on the same "
+                "accuracy-vs-compute curve as fixed-budget runs, and do not "
+                "compare them across arms unless every arm stopped on the same "
+                "rule."
             ),
             "filler_answer_prediction_counts_per_seed": (
                 "Predicted True/False/other histogram at the validation ANS "

@@ -1,4 +1,5 @@
 import random
+from dataclasses import replace
 
 import pytest
 import torch
@@ -251,3 +252,128 @@ def test_evaluate_accuracy_malformed_ans():
             ans_true_id,
             ans_false_id,
         )
+
+
+def test_early_stop_target_resolution():
+    from exp0.config import TrainConfig
+    from exp0.train import early_stop_reached, resolve_early_stop_target
+
+    acc_cfg = TrainConfig(early_stop_metric="filler_accuracy")
+    assert resolve_early_stop_target(acc_cfg, None) == 1.0
+    assert early_stop_reached(acc_cfg, 1.0, 1.0)
+    assert not early_stop_reached(acc_cfg, 0.999, 1.0)
+
+    tol_cfg = TrainConfig(early_stop_metric="filler_accuracy", early_stop_tolerance=0.01)
+    assert early_stop_reached(tol_cfg, 0.995, 1.0)
+    assert not early_stop_reached(tol_cfg, 0.98, 1.0)
+
+    # cot_result_nll defaults to the measured floor and stops from above.
+    nll_cfg = TrainConfig(early_stop_metric="cot_result_nll", early_stop_tolerance=0.01)
+    assert resolve_early_stop_target(nll_cfg, {"cot_result_nll_floor": 0.9288}) == 0.9288
+    assert early_stop_reached(nll_cfg, 0.9299, 0.9288)
+    assert not early_stop_reached(nll_cfg, 2.285, 0.9288)
+    # No CoT arm means no floor, so the run cannot early-stop on NLL.
+    assert resolve_early_stop_target(nll_cfg, None) is None
+    assert not early_stop_reached(nll_cfg, 0.9299, None)
+
+    off_cfg = TrainConfig()
+    assert resolve_early_stop_target(off_cfg, None) is None
+    assert not early_stop_reached(off_cfg, 1.0, 1.0)
+
+
+def test_early_stopping_does_not_change_fixed_budget_run_id():
+    from exp0.evaluate import canonical_run_config
+
+    task_cfg, model_cfg, train_cfg = get_tiny_configs()
+    baseline = canonical_run_config(model_cfg, train_cfg, task_cfg, 9999, 100, [42])
+    assert "early_stop_metric" not in baseline["training_protocol"]
+
+    enabled = replace(train_cfg, early_stop_metric="filler_accuracy")
+    with_stop = canonical_run_config(model_cfg, enabled, task_cfg, 9999, 100, [42])
+    assert with_stop["training_protocol"]["early_stop_metric"] == "filler_accuracy"
+    assert with_stop != baseline
+
+
+def test_early_stop_streak_rebuilds_from_history():
+    from exp0.config import TrainConfig
+    from exp0.train import _early_stop_streak
+
+    cfg = TrainConfig(early_stop_metric="filler_accuracy")
+    assert _early_stop_streak(cfg, [0.5, 1.0, 1.0], []) == 2
+    assert _early_stop_streak(cfg, [1.0, 1.0, 0.5], []) == 0
+    assert _early_stop_streak(cfg, [], []) == 0
+    assert _early_stop_streak(TrainConfig(), [1.0, 1.0], []) == 0
+
+    nll_cfg = TrainConfig(early_stop_metric="cot_result_nll")
+    diagnostics = [
+        {"cot_result_nll": 2.0, "cot_result_nll_floor": 0.9},
+        {"cot_result_nll": 0.9, "cot_result_nll_floor": 0.9},
+    ]
+    assert _early_stop_streak(nll_cfg, [0.0, 0.0], diagnostics) == 1
+    # No CoT arm means no measured floor, so no epoch can qualify.
+    assert _early_stop_streak(nll_cfg, [0.0, 0.0], []) == 0
+
+
+def test_train_model_stops_early_and_reports_the_shortfall():
+    task_cfg, model_cfg, train_cfg = get_tiny_configs()
+    # target 0.0 is met by any accuracy, so the first epoch qualifies.
+    train_cfg = replace(
+        train_cfg,
+        epochs=3,
+        early_stop_metric="filler_accuracy",
+        early_stop_target=0.0,
+    )
+
+    train_instances = _generate_instances(task_cfg, seed=400)
+    val_instances = _generate_instances(task_cfg, seed=401)
+    train_ds = Task3SumDataset(
+        train_instances,
+        vocab_reduction=task_cfg.vocab_reduction,
+    )
+    val_ds = Task3SumDataset(
+        val_instances,
+        format_type="filler",
+        vocab=train_ds.vocab,
+        vocab_reduction=task_cfg.vocab_reduction,
+    )
+
+    _, history = train_model(model_cfg, train_cfg, task_cfg, train_ds, val_ds)
+
+    assert history["epochs_trained"] == 1
+    assert history["epochs_requested"] == 3
+    assert len(history["epoch_filler_accuracies"]) == 1
+    early_stopping = history["early_stopping"]
+    assert early_stopping["triggered"] is True
+    assert early_stopping["stopped_after_epoch"] == 0
+    assert early_stopping["target"] == 0.0
+
+    # Patience 2 needs a second qualifying epoch before it stops.
+    patient_cfg = replace(train_cfg, early_stop_patience=2)
+    _, patient_history = train_model(
+        model_cfg, patient_cfg, task_cfg, train_ds, val_ds
+    )
+    assert patient_history["epochs_trained"] == 2
+    assert patient_history["early_stopping"]["stopped_after_epoch"] == 1
+
+
+def test_fixed_budget_run_reports_no_early_stop():
+    task_cfg, model_cfg, train_cfg = get_tiny_configs()
+    train_instances = _generate_instances(task_cfg, seed=500)
+    val_instances = _generate_instances(task_cfg, seed=501)
+    train_ds = Task3SumDataset(
+        train_instances,
+        vocab_reduction=task_cfg.vocab_reduction,
+    )
+    val_ds = Task3SumDataset(
+        val_instances,
+        format_type="filler",
+        vocab=train_ds.vocab,
+        vocab_reduction=task_cfg.vocab_reduction,
+    )
+
+    _, history = train_model(model_cfg, train_cfg, task_cfg, train_ds, val_ds)
+
+    assert history["epochs_trained"] == train_cfg.epochs
+    assert history["epochs_requested"] == train_cfg.epochs
+    assert history["early_stopping"]["enabled"] is False
+    assert history["early_stopping"]["triggered"] is False

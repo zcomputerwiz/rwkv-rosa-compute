@@ -25,7 +25,13 @@ from exp0.checkpointing import (
     restore_rng_state,
     validate_checkpoint_signature,
 )
-from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
+from exp0.config import (
+    EARLY_STOP_METRICS,
+    ModelConfig,
+    Task3SumConfig,
+    TrainConfig,
+    drop_disabled_early_stop_fields,
+)
 from exp0.dataset import FORMAT_NAMES, Task3SumDataset, pad_collate_fn
 from exp0.diagnostics import evaluate_cot_diagnostics
 from exp0.models.base import InputEmbedWrapper
@@ -291,6 +297,80 @@ def _answer_predictions_from_loss_logits(
     return loss_logits[batch_indices, ans_positions].argmax(dim=-1)
 
 
+def resolve_early_stop_target(
+    train_cfg: TrainConfig,
+    diagnostics: Optional[Dict[str, Any]],
+) -> Optional[float]:
+    """Resolve the stop target for this epoch, or None if it is unavailable.
+
+    An explicit ``early_stop_target`` always wins. Otherwise the theoretical
+    target for the metric is used: 1.0 for validation accuracy, and the measured
+    ``cot_result_nll_floor`` for result-slot NLL. The NLL floor is only known
+    once CoT diagnostics have run, so a run without a CoT validation arm cannot
+    early-stop on that metric and will train the full budget.
+    """
+    if train_cfg.early_stop_target is not None:
+        return float(train_cfg.early_stop_target)
+    if train_cfg.early_stop_metric == "filler_accuracy":
+        return 1.0
+    if train_cfg.early_stop_metric == "cot_result_nll":
+        if not diagnostics:
+            return None
+        floor = diagnostics.get("cot_result_nll_floor")
+        return float(floor) if floor is not None else None
+    return None
+
+
+def early_stop_reached(
+    train_cfg: TrainConfig,
+    value: Optional[float],
+    target: Optional[float],
+) -> bool:
+    """True when ``value`` is at the target, or within the allowed tolerance."""
+    if value is None or target is None:
+        return False
+    direction = EARLY_STOP_METRICS.get(train_cfg.early_stop_metric)
+    if direction == "max":
+        return value >= target - train_cfg.early_stop_tolerance
+    if direction == "min":
+        return value <= target + train_cfg.early_stop_tolerance
+    return False
+
+
+def _early_stop_streak(
+    train_cfg: TrainConfig,
+    epoch_filler_accuracies: list[float],
+    epoch_cot_diagnostics: list[Dict[str, Any]],
+) -> int:
+    """Consecutive qualifying epochs at the end of an already-recorded history.
+
+    Resuming from a checkpoint restores the epoch metrics but not the patience
+    counter, so it is recomputed here. Without this a resumed run would demand a
+    fresh full patience window and train past the point an uninterrupted run
+    would have stopped.
+    """
+    if train_cfg.early_stop_metric == "none":
+        return 0
+    streak = 0
+    for index in range(len(epoch_filler_accuracies) - 1, -1, -1):
+        diagnostics = (
+            epoch_cot_diagnostics[index]
+            if index < len(epoch_cot_diagnostics)
+            else None
+        )
+        if train_cfg.early_stop_metric == "filler_accuracy":
+            observed: Optional[float] = epoch_filler_accuracies[index]
+        elif diagnostics is not None:
+            observed = diagnostics.get(train_cfg.early_stop_metric)
+        else:
+            observed = None
+        target = resolve_early_stop_target(train_cfg, diagnostics)
+        if not early_stop_reached(train_cfg, observed, target):
+            break
+        streak += 1
+    return streak
+
+
 def first_slot_format_is_ambiguous(train_cfg: TrainConfig) -> bool:
     """True when the first post-separator target is not format-identifiable.
 
@@ -499,7 +579,7 @@ def _checkpoint_signature(
     return {
         "run_id": checkpoint_run_id,
         "model": model_signature,
-        "training": asdict(train_cfg),
+        "training": drop_disabled_early_stop_fields(asdict(train_cfg)),
         "task": asdict(task_cfg),
         "train_dataset_size": len(train_dataset),
         "realized_format_counts": dict(train_dataset.realized_counts),
@@ -835,6 +915,16 @@ def train_model(
     prior_cuda_peak_allocated = completed.get("cuda_peak_memory_allocated_bytes")
     prior_cuda_peak_reserved = completed.get("cuda_peak_memory_reserved_bytes")
 
+    epochs_completed = start_epoch
+    early_stop_triggered = False
+    early_stop_epoch: Optional[int] = None
+    early_stop_resolved_target: Optional[float] = None
+    # Rebuilt from history so a resumed run applies the same patience rule as an
+    # uninterrupted one instead of restarting the streak at zero.
+    early_stop_hits = _early_stop_streak(
+        train_cfg, epoch_filler_accuracies, epoch_cot_diagnostics
+    )
+
     _sync_cuda(device)
     for _epoch in range(start_epoch, epochs):
         resuming_this_epoch = _epoch == start_epoch and resume_samples > 0
@@ -1108,6 +1198,32 @@ def train_model(
         resume_samples = 0
         resume_epoch_seed = None
         resume_partial = None
+        epochs_completed = _epoch + 1
+
+        if train_cfg.early_stop_metric != "none":
+            latest_diagnostics = (
+                epoch_cot_diagnostics[-1] if epoch_cot_diagnostics else None
+            )
+            target = resolve_early_stop_target(train_cfg, latest_diagnostics)
+            # Recorded every epoch so a run that never triggers still reports
+            # the target it was measured against.
+            early_stop_resolved_target = target
+            if train_cfg.early_stop_metric == "filler_accuracy":
+                observed = filler_acc
+            else:
+                observed = (
+                    latest_diagnostics.get(train_cfg.early_stop_metric)
+                    if latest_diagnostics
+                    else None
+                )
+            if early_stop_reached(train_cfg, observed, target):
+                early_stop_hits += 1
+            else:
+                early_stop_hits = 0
+            if early_stop_hits >= train_cfg.early_stop_patience:
+                early_stop_triggered = True
+                early_stop_epoch = _epoch
+                break
 
     current_cuda_peak_allocated = None
     current_cuda_peak_reserved = None
@@ -1141,7 +1257,19 @@ def train_model(
         "epoch_filler_answer_prediction_counts": epoch_filler_prediction_counts,
         "best_filler_accuracy": best_filler_acc,
         "best_filler_answer_prediction_counts": best_filler_prediction_counts,
-        "epochs_trained": epochs,
+        "epochs_trained": epochs_completed,
+        "epochs_requested": epochs,
+        "early_stopping": {
+            "enabled": train_cfg.early_stop_metric != "none",
+            "metric": train_cfg.early_stop_metric,
+            "target": early_stop_resolved_target,
+            "tolerance": train_cfg.early_stop_tolerance,
+            "patience": train_cfg.early_stop_patience,
+            "triggered": early_stop_triggered,
+            "stopped_after_epoch": early_stop_epoch,
+            "epochs_requested": epochs,
+            "epochs_trained": epochs_completed,
+        },
         "weight_decay": weight_decay,
         "grad_clip": grad_clip,
         "adam_betas": [train_cfg.adam_beta1, train_cfg.adam_beta2],
@@ -1153,7 +1281,7 @@ def train_model(
         "total_train_seconds": total_train_seconds,
         "data_wait_seconds": data_wait,
         "data_wait_fraction": data_wait / max(total_train_seconds, 1e-9),
-        "samples_per_second": (len(train_dataset) * epochs)
+        "samples_per_second": (len(train_dataset) * epochs_completed)
         / max(total_train_seconds, 1e-9),
         "resolved_vocab_size": len(vocab),
         "output_vocab_size": model.output_vocab_size,

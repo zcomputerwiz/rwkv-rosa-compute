@@ -385,6 +385,67 @@ Nothing here revises the Phase 1-7 repairs. It records that the repairs are
 necessary but not sufficient, and that the apparatus has not yet been shown to
 produce a positive control at any scale.
 
+## Early stopping
+
+`--epochs` is an exact budget by default. Setting `--early_stop_metric` turns it
+into a ceiling:
+
+```text
+--early_stop_metric      none | filler_accuracy | cot_result_nll
+--early_stop_target      default: theoretical target for the metric
+--early_stop_tolerance   absolute slack around the target (default 0.0)
+--early_stop_patience    consecutive qualifying epochs required (default 1)
+```
+
+The default targets are the theoretical ones. For `filler_accuracy` that is
+`1.0`. For `cot_result_nll` it is the measured `cot_result_nll_floor` rather
+than zero: randomized coordinate selection in reduced-vocabulary sum targets
+imposes irreducible uncertainty, so a model sitting at the floor is computing
+the result and cannot do better. A run without a CoT validation arm has no
+measured floor and will not early-stop on that metric.
+
+Typical use for a positive control, where reaching the target is the whole
+question:
+
+```text
+--epochs 5 --early_stop_metric filler_accuracy --early_stop_tolerance 0.001 --early_stop_patience 2
+```
+
+### What early stopping costs
+
+An early-stopped run is not a fixed-budget run, and the report says so:
+
+```text
+early_stopping_per_seed    settings plus triggered / stopped_after_epoch
+fixed_budget_run           false when any seed stopped early
+epochs_requested           the ceiling
+epochs_trained             what actually ran
+```
+
+Two consequences follow and both matter for later experiments:
+
+1. **The reported accuracy is a selected peak.** Stopping at the first epoch to
+   reach target selects the maximum of a noisy sequence, which biases the number
+   upward relative to an end-of-budget measurement.
+2. **The learning-rate schedule does not complete.** `linear_warmup_decay` is
+   built for `epochs_requested`, so an early stop leaves the final learning rate
+   above zero. `epoch_end_learning_rates` records where it stopped.
+
+Do not put early-stopped and fixed-budget runs on the same accuracy-vs-compute
+curve, and do not compare arms unless every arm stopped under the same rule.
+Experiment 7 compute-budget sweeps should run fixed-budget.
+
+### Run identity
+
+Early-stopping fields are omitted from the canonical run config when
+`early_stop_metric` is `none`, so enabling the option does not change the
+`run_id` of existing fixed-budget runs.
+
+The same omission applies to the checkpoint signature, so checkpoints written
+before this option existed still resume. Resuming a run *with* early stopping
+enabled rebuilds the patience counter from the restored epoch metrics, so a
+resumed run stops on the same epoch an uninterrupted one would have.
+
 ## Mixture caveat
 
 The 50/50 single-model CoT/filler mixture is a choice made by this repository.
