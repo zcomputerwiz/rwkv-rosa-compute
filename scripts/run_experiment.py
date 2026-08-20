@@ -118,6 +118,21 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--parallel_ratio", type=float, default=0.5)
     parser.add_argument("--filler_ratio", type=float, default=0.5)
     parser.add_argument("--serial_ratio", type=float, default=0.0)
+    parser.add_argument(
+        "--immediate_ratio",
+        type=float,
+        default=0.0,
+        help="Share of training examples using the immediate (N=0) format.",
+    )
+    parser.add_argument(
+        "--neutral_ratio",
+        type=float,
+        default=0.0,
+        help=(
+            "Share of training examples using the Experiment 2 neutral-token "
+            "control format."
+        ),
+    )
     parser.add_argument("--num_samples", type=int, default=1000)
     parser.add_argument("--val_samples", type=int, default=2000)
     parser.add_argument(
@@ -281,6 +296,8 @@ def build_configs(
         parallel_ratio=args.parallel_ratio,
         filler_ratio=args.filler_ratio,
         serial_ratio=args.serial_ratio,
+        immediate_ratio=args.immediate_ratio,
+        neutral_ratio=args.neutral_ratio,
         num_workers=args.num_workers,
         val_num_workers=args.val_num_workers,
         pin_memory=args.pin_memory,
@@ -431,6 +448,8 @@ def main():
             parallel_ratio=args.parallel_ratio,
             filler_ratio=args.filler_ratio,
             serial_ratio=args.serial_ratio,
+            immediate_ratio=args.immediate_ratio,
+            neutral_ratio=args.neutral_ratio,
         )
 
         for fmt, count in train_ds.realized_counts.items():
@@ -445,6 +464,8 @@ def main():
             parallel_ratio=args.parallel_ratio,
             filler_ratio=args.filler_ratio,
             serial_ratio=args.serial_ratio,
+            immediate_ratio=args.immediate_ratio,
+            neutral_ratio=args.neutral_ratio,
             num_workers=args.num_workers,
             val_num_workers=args.val_num_workers,
             pin_memory=args.pin_memory,

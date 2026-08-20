@@ -84,7 +84,18 @@ def test_train_model_dual_validation():
     assert history["adam_betas"] == [0.9, 0.95]
     assert history["lr_schedule"] == "linear_warmup_decay"
     assert "best_cot_accuracy" not in history
-    assert history["best_val_accuracy"] == history["best_filler_accuracy"]
+    # Validation is filler-format only; the duplicate "val" aliases were removed
+    # so that agreement between two report keys cannot be read as corroboration.
+    assert "best_val_accuracy" not in history
+    assert "epoch_val_accuracies" not in history
+    assert "best_filler_answer_prediction_counts" in history
+    counts = history["best_filler_answer_prediction_counts"]
+    assert counts["total"] == (
+        counts["predicted_true"]
+        + counts["predicted_false"]
+        + counts["predicted_other"]
+    )
+    assert isinstance(counts["degenerate_predictor"], bool)
 
 
 def test_train_model_single_validation():

@@ -222,3 +222,4 @@ __marimo__/
 *.pth
 *.safetensors
 tests/fixtures/
+/results

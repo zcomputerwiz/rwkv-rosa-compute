@@ -155,6 +155,7 @@ def _aggregate_cot_diagnostics(
         "cot_answer_given_cot_accuracy",
         "cot_pair_position_token_accuracy",
         "cot_pair_position_semantic_accuracy",
+        "cot_pair_position_semantic_ceiling",
         "cot_sum_token_accuracy",
         "cot_sum_semantic_accuracy",
         "cot_match_index_accuracy",
@@ -184,6 +185,23 @@ def _aggregate_cot_diagnostics(
         }
     else:
         aggregated["cot_chance_baselines"] = {}
+    ambiguity_flags = {
+        bool(
+            result.get("best_cot_diagnostics", {}).get(
+                "cot_first_slot_format_ambiguous", False
+            )
+        )
+        for result in per_seed_results
+        if result.get("best_cot_diagnostics")
+    }
+    if len(ambiguity_flags) > 1:
+        raise ValueError(
+            "Seeds disagree on first-slot format ambiguity; the mixture ratios "
+            "must be identical across seeds of one run."
+        )
+    aggregated["cot_first_slot_format_ambiguous"] = (
+        ambiguity_flags.pop() if ambiguity_flags else False
+    )
     aggregated["cot_per_pair"] = _aggregate_per_pair(per_seed_results)
     return aggregated
 
@@ -293,8 +311,19 @@ def compile_experiment_report(
         seeds_run,
     )
 
+    filler_prediction_counts = [
+        res.get("best_filler_answer_prediction_counts")
+        for res in per_seed_results
+    ]
+    filler_prediction_counts = [item for item in filler_prediction_counts if item]
+
     metrics: Dict[str, Any] = {
         "filler_accuracy": mean_filler_acc,
+        "filler_answer_prediction_counts_per_seed": filler_prediction_counts,
+        "filler_answer_is_degenerate_any_seed": any(
+            item.get("degenerate_predictor", False)
+            for item in filler_prediction_counts
+        ),
         "mean_accuracy": mean_filler_acc,
         "min_accuracy": min_acc,
         "max_accuracy": max_acc,
@@ -337,11 +366,39 @@ def compile_experiment_report(
                 "Final True/False accuracy when the ground-truth CoT prefix is "
                 "teacher-forced; not evidence of independent 3SUM computation."
             ),
+            "filler_answer_prediction_counts_per_seed": (
+                "Predicted True/False/other histogram at the validation ANS "
+                "position. Read this before interpreting any accuracy at or "
+                "near majority_class_baseline."
+            ),
+            "filler_answer_is_degenerate_any_seed": (
+                "True when at least one seed emitted the same answer token for "
+                "every validation example. Such a run has no accuracy signal, "
+                "whatever the reported accuracy is."
+            ),
             "cot_pair_position_token_accuracy": (
-                "Exact next-token accuracy on randomized reduced CoT pair tokens."
+                "STRUCTURAL, not computational: exact next-token accuracy on "
+                "randomized reduced CoT pair tokens. Measures layout and "
+                "positional counting, not 3SUM."
             ),
             "cot_pair_position_semantic_accuracy": (
-                "Pair-position accuracy accepting either valid summand token."
+                "STRUCTURAL, not computational: pair-position accuracy accepting "
+                "either valid summand token. Emitting labels[i] at every pair "
+                "slot scores 1.0 without performing any pairwise computation, "
+                "so this belongs with cot_answer_given_cot_accuracy rather than "
+                "with the result metrics."
+            ),
+            "cot_pair_position_semantic_ceiling": (
+                "Hard ceiling on cot_pair_position_semantic_accuracy for this "
+                "mixture. Formats share the tuple prefix and the ':' separator, "
+                "so when a non-CoT format outweighs parallel_ratio/2 the first "
+                "pair slot cannot be predicted and the ceiling is "
+                "(pair_count - 1) / pair_count. A value at the ceiling means "
+                "saturated, not partially learned."
+            ),
+            "cot_first_slot_format_ambiguous": (
+                "Whether the mixture makes the first post-separator target "
+                "unpredictable from context; sets the ceiling above."
             ),
             "cot_sum_token_accuracy": (
                 "Exact next-token accuracy on sampled unmatched pair-sum tokens."
@@ -351,7 +408,11 @@ def compile_experiment_report(
                 "for the pair under vocabulary reduction."
             ),
             "cot_match_index_accuracy": (
-                "Exact accuracy for source-faithful matched-pair third-index tokens."
+                "Exact accuracy for source-faithful matched-pair third-index "
+                "tokens. Match slots are a small minority of result slots, so a "
+                "model that has not learned 3SUM emits a sum digit everywhere "
+                "and scores exactly 0.0; compare against the unconditional "
+                "baseline, not the given-match-known one."
             ),
             "cot_result_semantic_accuracy": (
                 "Semantic accuracy across all CoT result slots (sum or match)."
@@ -365,7 +426,13 @@ def compile_experiment_report(
             ),
             "cot_chance_baselines": (
                 "Structured random baselines computed from the fixed validation "
-                "layout and source-faithful k>j candidate sets."
+                "layout and source-faithful k>j candidate sets. "
+                "match_index_accuracy is the unconditional baseline (uniform "
+                "choice over the result-slot vocabulary) and is the correct "
+                "comparison for cot_match_index_accuracy. "
+                "match_index_accuracy_given_match_known conditions on already "
+                "knowing the pair matches and is reported for reference only; "
+                "it is not a baseline any measured model competes against."
             ),
             "cot_per_pair": (
                 "Per-(i,j) specialization metrics in lexicographic pair order."

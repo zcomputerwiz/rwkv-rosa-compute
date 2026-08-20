@@ -144,17 +144,75 @@ cot_answer_given_cot_accuracy
 
 and explicitly document that it is a leakage-aware diagnostic, not independent-computation evidence.
 
-The informative intermediate diagnostics are:
+The diagnostics fall into two groups, and only the second is evidence of
+computation.
+
+Structural/leakage-aware (measure layout, counting and certificate reading):
 
 ```text
+cot_answer_given_cot_accuracy
 cot_pair_position_token_accuracy
 cot_pair_position_semantic_accuracy
+```
+
+`cot_pair_position_semantic_accuracy` accepts either summand label, so emitting
+`labels[i]` at every pair slot scores 1.0 without performing a single pairwise
+computation. It measures whether the model tracks which pair index it is on,
+which is a layout property.
+
+Computational (measure the pairwise work itself):
+
+```text
 cot_sum_token_accuracy
 cot_sum_semantic_accuracy
 cot_match_index_accuracy
 cot_result_semantic_accuracy
 cot_result_nll
 ```
+
+### Baselines for `cot_match_index_accuracy`
+
+Two baselines are reported and they are not interchangeable:
+
+```text
+match_index_accuracy                      unconditional; the comparison to use
+match_index_accuracy_given_match_known    reference only; not a real baseline
+```
+
+The conditional form assumes the guesser already knows the pair matches and
+only has to choose `k` among the eligible `k > j` suffix. No measured model is
+in that position: it must first decide whether a match exists at all. Match
+slots are also a small minority of result slots, so a model that has not
+learned 3SUM emits a sum digit at every result slot and scores exactly `0.0`
+on match index. Exactly zero is the expected null value here, not a defect.
+
+### Ceiling on `cot_pair_position_semantic_accuracy` in mixed-format runs
+
+Every format shares the tuple prefix and the `:` separator, then diverges at
+the first continuation token:
+
+```text
+parallel CoT   one of the pair's two labels   parallel_ratio / 2 per token
+filler         .                              filler_ratio
+neutral        #                              neutral_ratio
+immediate      ANS                            immediate_ratio
+serial CoT     DIM                            serial_ratio
+```
+
+If any single non-CoT format outweighs `parallel_ratio / 2`, the argmax at that
+slot is never a CoT label and the first pair scores exactly `0.0` no matter what
+the model has learned. Every later pair slot is format-disambiguated by the
+token before it. The metric is therefore capped at:
+
+```text
+(pair_count - 1) / pair_count
+```
+
+Under the default 50/50 CoT/filler mixture at length 6 this is 14/15 = 0.93333,
+which both the Llama and RWKV 100k runs reproduce to five digits. A value at
+this ceiling means saturated, not "13 of 15 pairs learned". Reports now emit
+`cot_pair_position_semantic_ceiling` and `cot_first_slot_format_ambiguous`
+alongside the metric.
 
 ### Exact versus semantic metrics
 
@@ -193,6 +251,29 @@ online training answer remains near chance
 online training answer becomes high while validation remains chance
     → generalization / sample-complexity concern
 ```
+
+In mixed-format runs read `best_online_train_answer_accuracy_by_format` rather
+than the pooled number. The parallel-CoT arm contains an answer certificate and
+saturates early, which drags the pooled figure well above the filler arm.
+
+### Validation answer histogram
+
+Validation is filler-format only. `epoch_filler_accuracies` and
+`best_filler_accuracy` are the only names for it; the former `epoch_val_accuracies`
+and `best_val_accuracy` aliases have been removed, because two report keys
+holding one number read as corroboration when they agree.
+
+Reports now include the predicted True/False/other histogram at the validation
+`ANS` position, plus a `degenerate_predictor` flag:
+
+```text
+filler_answer_prediction_counts_per_seed
+filler_answer_is_degenerate_any_seed
+```
+
+Accuracy alone cannot distinguish a model scoring at `majority_class_baseline`
+from one emitting a single constant answer. Check the histogram before treating
+any accuracy at or near the baseline as a measurement.
 
 ## Phase 7 — Add explicit apparatus gates
 
@@ -272,8 +353,59 @@ majority baseline
 
 Only after the apparatus produces a credible positive-control learning curve should Experiment 0A be considered validated and Experiment 0B/H2 interpretation resume.
 
+## Post-repair observation at 100k (August 2026)
+
+The repaired apparatus was run at the first rung of the Phase 8 ladder, length 6
+/ dimension 3, 100,000 training samples, default 50/50 CoT/filler mixture:
+
+```text
+                              Llama       RWKV-7
+validation (filler) accuracy  0.524       0.524
+majority_class_baseline       0.524       0.524
+train answer, parallel_cot    1.0         0.99998
+train answer, filler          0.5505      0.5422
+cot_answer_given_cot          1.0         1.0
+cot_pair_position_semantic    0.93333     0.93333
+cot_match_index               0.0         0.0
+cot_sum_semantic              0.3088      0.3416   (chance 0.2711)
+```
+
+**The repair did not change the observed pattern at this scale, and that is the
+expected outcome.** 100k is 1% of the published 10M-sample budget. The two
+architectures agree to three or more digits across every metric despite
+differing in precision, batch size and epoch count, so these runs carry no
+architecture information and no filler-token information.
+
+The two constants that do not move with data are explained above and are not
+defects: `cot_pair_position_semantic` is at its mixture ceiling and
+`cot_match_index` is at the expected null for a model that has not learned the
+task.
+
+Nothing here revises the Phase 1-7 repairs. It records that the repairs are
+necessary but not sufficient, and that the apparatus has not yet been shown to
+produce a positive control at any scale.
+
+## Mixture caveat
+
+The 50/50 single-model CoT/filler mixture is a choice made by this repository.
+The published protocol trains a separate model per format. Mixing has two
+consequences that belong with any result reported from a mixed run:
+
+1. The parallel-CoT arm carries an answer certificate, saturates to 1.0 early,
+   and dominates the pooled training signal.
+2. The shared prefix makes the first continuation token format-ambiguous, which
+   is what pins the first pair's position metric at zero.
+
+Single-format runs remove both. Prefer them when the diagnostics are the point
+of the run, and mark any mixture-specific result as such.
+
 ## Interpretation rule
 
 The pre-repair August 2026 Llama runs are diagnostic artifacts, not negative experimental results. They were executed with a positionless transformer, without the supervised continuation-boundary state, with separate tuple/token input representations that removed the source implementation's shared-feature transfer path, and under different optimizer dynamics. The old CoT metric could also saturate from the supplied CoT answer certificate.
 
 The repaired protocol intentionally preserves the paper's `n^2` filler budget and dense parallel-CoT supervision while making the intermediate computation measurable.
+
+The repaired 100k runs are likewise not negative results. A flat filler curve at
+1% of the published sample budget is uninformative in both directions, and no
+0A/0B/H1 conclusion should be drawn until the Phase 8 ladder produces a
+positive control that separates from `majority_class_baseline`.

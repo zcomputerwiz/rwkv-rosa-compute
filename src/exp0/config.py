@@ -130,8 +130,19 @@ class TrainConfig:
     filler_ratio: float = 0.5
     serial_ratio: float = 0.0
     immediate_ratio: float = 0.0
+    neutral_ratio: float = 0.0
 
     def __post_init__(self):
+        format_ratios = {
+            "parallel_ratio": self.parallel_ratio,
+            "filler_ratio": self.filler_ratio,
+            "serial_ratio": self.serial_ratio,
+            "immediate_ratio": self.immediate_ratio,
+            "neutral_ratio": self.neutral_ratio,
+        }
+        for name, value in format_ratios.items():
+            if value < 0.0:
+                raise ValueError(f"{name} must be non-negative; got {value!r}")
         if self.num_workers < 0 or self.val_num_workers < 0:
             raise ValueError("DataLoader worker counts must be non-negative.")
         if self.prefetch_factor <= 0:

@@ -274,6 +274,27 @@ def _answer_predictions_from_loss_logits(
     return loss_logits[batch_indices, ans_positions].argmax(dim=-1)
 
 
+def first_slot_format_is_ambiguous(train_cfg: TrainConfig) -> bool:
+    """True when the first post-separator target is not format-identifiable.
+
+    Every format shares the tuple prefix and the ``:`` separator, then diverges:
+    parallel CoT emits one of a pair's two labels (so the parallel share is
+    split in half across two tokens), filler emits ``.``, neutral emits ``#``,
+    immediate emits ``ANS`` and serial CoT emits ``DIM``. If any single
+    non-CoT format outweighs ``parallel_ratio / 2`` the argmax at that slot is
+    never a CoT label, and the first pair's position metric is pinned at zero
+    regardless of what the model has learned.
+    """
+    cot_first_slot_mass = train_cfg.parallel_ratio * 0.5
+    competing_mass = max(
+        train_cfg.filler_ratio,
+        train_cfg.serial_ratio,
+        train_cfg.immediate_ratio,
+        train_cfg.neutral_ratio,
+    )
+    return competing_mass > cot_first_slot_mass
+
+
 def evaluate_accuracy(
     model: nn.Module,
     val_loader: DataLoader,
@@ -283,11 +304,22 @@ def evaluate_accuracy(
     ans_false_id: int,
     precision: str = "fp32",
     non_blocking: bool = False,
-) -> float:
-    """Evaluate exact True/False prediction using only ANS-position logits."""
+    return_prediction_counts: bool = False,
+) -> float | tuple[float, Dict[str, int]]:
+    """Evaluate exact True/False prediction using only ANS-position logits.
+
+    With ``return_prediction_counts`` the predicted-class histogram is returned
+    alongside the accuracy. Without it there is no way to distinguish a model
+    scoring at the majority-class baseline from a model that emits a single
+    constant answer, which is the difference between a weak result and a null
+    one.
+    """
     model.eval()
     total = 0
     correct_device = torch.zeros((), dtype=torch.int64, device=device)
+    predicted_true_device = torch.zeros((), dtype=torch.int64, device=device)
+    predicted_false_device = torch.zeros((), dtype=torch.int64, device=device)
+    label_true_device = torch.zeros((), dtype=torch.int64, device=device)
 
     with torch.no_grad():
         for batch in val_loader:
@@ -343,10 +375,33 @@ def evaluate_accuracy(
                 torch.full_like(predictions, ans_false_id),
             )
             correct_device.add_(predictions.eq(expected).sum())
+            predicted_true_device.add_(predictions.eq(ans_true_id).sum())
+            predicted_false_device.add_(predictions.eq(ans_false_id).sum())
+            label_true_device.add_(has_3sum.sum())
             total += targets.shape[0]
 
     correct = int(correct_device.item()) if total else 0
-    return correct / total if total > 0 else 0.0
+    accuracy = correct / total if total > 0 else 0.0
+    if not return_prediction_counts:
+        return accuracy
+
+    predicted_true = int(predicted_true_device.item()) if total else 0
+    predicted_false = int(predicted_false_device.item()) if total else 0
+    counts = {
+        "predicted_true": predicted_true,
+        "predicted_false": predicted_false,
+        "predicted_other": total - predicted_true - predicted_false,
+        "label_true": int(label_true_device.item()) if total else 0,
+        "label_false": (total - int(label_true_device.item())) if total else 0,
+        "total": total,
+        # True when every validation example received the same answer token.
+        "degenerate_predictor": bool(
+            total > 0
+            and max(predicted_true, predicted_false, total - predicted_true - predicted_false)
+            == total
+        ),
+    }
+    return accuracy, counts
 
 
 def _best_cot_diagnostics(
@@ -386,6 +441,15 @@ def _best_cot_diagnostics(
             "cot_chance_baselines", {}
         )
         best["cot_per_pair"] = epoch_diagnostics[-1].get("cot_per_pair", [])
+        # Protocol constants, not per-epoch measurements: carry them through
+        # unchanged so the reported accuracy is never separated from the
+        # ceiling it has to be read against.
+        best["cot_pair_position_semantic_ceiling"] = epoch_diagnostics[-1].get(
+            "cot_pair_position_semantic_ceiling", 1.0
+        )
+        best["cot_first_slot_format_ambiguous"] = epoch_diagnostics[-1].get(
+            "cot_first_slot_format_ambiguous", False
+        )
     return best
 
 
@@ -501,9 +565,11 @@ def train_model(
     epoch_online_train_answer_accuracies: list[float] = []
     epoch_online_train_answer_accuracies_by_format: list[Dict[str, float | None]] = []
     epoch_filler_accuracies: list[float] = []
+    epoch_filler_prediction_counts: list[Dict[str, int]] = []
     epoch_cot_diagnostics: list[Dict[str, Any]] = []
     epoch_end_learning_rates: list[float] = []
     best_filler_acc = 0.0
+    best_filler_prediction_counts: Dict[str, int] = {}
     best_online_train_answer_acc = 0.0
     best_online_train_answer_by_format: Dict[str, float | None] = {
         name: None for name in FORMAT_NAMES
@@ -615,7 +681,7 @@ def train_model(
         epoch_online_train_answer_accuracies_by_format.append(format_accuracies)
         epoch_end_learning_rates.append(float(optimizer.param_groups[0]["lr"]))
 
-        filler_acc = evaluate_accuracy(
+        filler_acc, filler_prediction_counts = evaluate_accuracy(
             model,
             filler_val_loader,
             device,
@@ -624,8 +690,12 @@ def train_model(
             ans_false_id,
             precision=train_cfg.precision,
             non_blocking=non_blocking,
+            return_prediction_counts=True,
         )
         epoch_filler_accuracies.append(filler_acc)
+        epoch_filler_prediction_counts.append(filler_prediction_counts)
+        if filler_acc >= best_filler_acc:
+            best_filler_prediction_counts = filler_prediction_counts
         best_filler_acc = max(best_filler_acc, filler_acc)
 
         if cot_val_loader is not None:
@@ -640,6 +710,7 @@ def train_model(
                 task_mod=task_cfg.mod,
                 precision=train_cfg.precision,
                 non_blocking=non_blocking,
+                first_slot_format_ambiguous=first_slot_format_is_ambiguous(train_cfg),
             )
             epoch_cot_diagnostics.append(diagnostics)
 
@@ -660,10 +731,13 @@ def train_model(
         "best_online_train_answer_accuracy_by_format": (
             best_online_train_answer_by_format
         ),
+        # NOTE: validation is filler-format only. The former "epoch_val_accuracies"
+        # and "best_val_accuracy" keys were aliases of these two and are removed;
+        # two names for one number read as corroboration when they agree.
         "epoch_filler_accuracies": epoch_filler_accuracies,
-        "epoch_val_accuracies": epoch_filler_accuracies,
+        "epoch_filler_answer_prediction_counts": epoch_filler_prediction_counts,
         "best_filler_accuracy": best_filler_acc,
-        "best_val_accuracy": best_filler_acc,
+        "best_filler_answer_prediction_counts": best_filler_prediction_counts,
         "epochs_trained": epochs,
         "weight_decay": weight_decay,
         "grad_clip": grad_clip,

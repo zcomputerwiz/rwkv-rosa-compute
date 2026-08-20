@@ -43,12 +43,19 @@ def evaluate_cot_diagnostics(
     task_mod: int = 10,
     precision: str = "fp32",
     non_blocking: bool = False,
+    first_slot_format_ambiguous: bool = False,
 ) -> Dict[str, Any]:
     """Measure teacher-forced intermediate-token generation on parallel CoT.
 
     In addition to aggregate metrics, report per-pair specialization, explicit
     structured-chance baselines, and the irreducible NLL floor introduced by
     randomized coordinate selection in reduced-vocabulary sum targets.
+
+    ``first_slot_format_ambiguous`` records that the run mixes formats which
+    share the input prefix, so the first post-separator target is not
+    predictable from context. When set, ``cot_pair_position_semantic_accuracy``
+    carries a hard ceiling of ``(pair_count - 1) / pair_count`` and a value at
+    that ceiling means "saturated", not "13 out of 15 pairs learned".
     """
     model.eval()
     pairs = _pair_list(task_length)
@@ -78,7 +85,8 @@ def evaluate_cot_diagnostics(
         "pair_semantic_chance_sum",
         "sum_exact_chance_sum",
         "sum_semantic_chance_sum",
-        "match_exact_chance_sum",
+        "match_exact_chance_given_match_sum",
+        "match_exact_chance_unconditional_sum",
         "result_semantic_chance_sum",
     )
     counters = {
@@ -175,11 +183,28 @@ def evaluate_cot_diagnostics(
             # Empty advanced-index tensors and empty scatter_add inputs are safe;
             # avoiding Python truth-tests here prevents per-batch CUDA syncs.
             matched_pair_indices = next_pair_indices[match_mask]
-            eligible = task_length - pair_j[matched_pair_indices] - 1.0
-            match_chance = eligible.reciprocal()
-            counters["match_exact_chance_sum"].add_(match_chance.sum())
+            # ``eligible`` is zero when j is the final tuple index. Source-faithful
+            # match targets require k > j so that case cannot currently enter
+            # match_mask, but clamp rather than emit inf if that ever changes.
+            eligible = (task_length - pair_j[matched_pair_indices] - 1.0).clamp(min=1.0)
+            # Conditional baseline: assumes the guesser already knows this pair
+            # matches and only has to choose k among the eligible suffix. It is
+            # NOT the baseline for cot_match_index_accuracy, which is measured
+            # over a model that must first decide whether a match exists at all.
+            match_chance_given_match = eligible.reciprocal()
+            # Unconditional baseline: uniform choice over the result-slot target
+            # vocabulary (mod digits plus task_length tuple labels).
+            match_chance_unconditional = match_mask.sum().to(torch.float64) / float(
+                task_mod + task_length
+            )
+            counters["match_exact_chance_given_match_sum"].add_(
+                match_chance_given_match.sum()
+            )
+            counters["match_exact_chance_unconditional_sum"].add_(
+                match_chance_unconditional
+            )
             counters["result_semantic_chance_sum"].add_(
-                match_chance.sum() + sum_sem_chance.sum()
+                match_chance_unconditional + sum_sem_chance.sum()
             )
 
             per_token_nll = F.cross_entropy(
@@ -272,6 +297,12 @@ def evaluate_cot_diagnostics(
         "cot_pair_position_semantic_accuracy": _safe_ratio(
             scalar_values["pair_semantic"], scalar_values["pair_count"]
         ),
+        "cot_pair_position_semantic_ceiling": (
+            (pair_count - 1) / pair_count
+            if first_slot_format_ambiguous and pair_count
+            else 1.0
+        ),
+        "cot_first_slot_format_ambiguous": first_slot_format_ambiguous,
         "cot_sum_token_accuracy": _safe_ratio(
             scalar_values["sum_exact"], scalar_values["sum_count"]
         ),
@@ -304,7 +335,12 @@ def evaluate_cot_diagnostics(
                 scalar_values["sum_semantic_chance_sum"], scalar_values["sum_count"]
             ),
             "match_index_accuracy": _safe_ratio(
-                scalar_values["match_exact_chance_sum"], scalar_values["match_count"]
+                scalar_values["match_exact_chance_unconditional_sum"],
+                scalar_values["match_count"],
+            ),
+            "match_index_accuracy_given_match_known": _safe_ratio(
+                scalar_values["match_exact_chance_given_match_sum"],
+                scalar_values["match_count"],
             ),
             "result_semantic_accuracy": _safe_ratio(
                 scalar_values["result_semantic_chance_sum"], result_count
