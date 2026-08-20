@@ -258,19 +258,17 @@ def _reduced_parallel_cot_tensors(
     vocab: Vocabulary,
     rng: random.Random,
     include_separator_token: bool,
+    include_eos_target: bool,
     mod: int = 10,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Build reduced CoT targets and diagnostics in one pair traversal.
-
-    This replaces the old hot path that formatted/split a Python string and then
-    recomputed every pair a second time solely for diagnostics.
-    """
+    """Build reduced CoT targets and diagnostics in one pair traversal."""
     labels = get_token_labels(len(instance.tuples))
     dimension = len(instance.tuples[0])
     max_valid = max(2, dimension)
     pair_count = len(instance.tuples) * (len(instance.tuples) - 1) // 2
     prefix = 1 if include_separator_token else 0
-    target_len = prefix + 2 * pair_count + 2
+    suffix = 3 if include_eos_target else 2
+    target_len = prefix + 2 * pair_count + suffix
 
     target_ids = torch.empty(target_len, dtype=torch.long)
     diag_type = torch.full((target_len,), COT_DIAG_NONE, dtype=torch.int8)
@@ -318,7 +316,11 @@ def _reduced_parallel_cot_tensors(
     target_ids[cursor] = vocab.token2id["ANS"]
     cursor += 1
     target_ids[cursor] = vocab.token2id[str(instance.has_3sum)]
-    if cursor != target_len - 1:
+    cursor += 1
+    if include_eos_target:
+        target_ids[cursor] = vocab.token2id[vocab.pad_token]
+        cursor += 1
+    if cursor != target_len:
         raise AssertionError("Reduced parallel CoT target construction misaligned.")
 
     return (
@@ -398,6 +400,7 @@ class Task3SumDataset(Dataset):
         vocab: Optional[Vocabulary] = None,
         vocab_reduction: bool = True,
         include_separator_token: bool = True,
+        include_eos_target: bool = True,
         seed: int = 42,
         parallel_ratio: float = 0.5,
         filler_ratio: float = 0.5,
@@ -410,6 +413,12 @@ class Task3SumDataset(Dataset):
         self.num_filler = num_filler
         self.vocab_reduction = vocab_reduction
         self.include_separator_token = include_separator_token
+        self.include_eos_target = include_eos_target
+        if not include_eos_target:
+            raise ValueError(
+                "Experiment 0 source-fidelity dataset requires the supervised "
+                "EOS target after True/False."
+            )
 
         if isinstance(instances, PackedInstances):
             length = instances.length
@@ -502,6 +511,7 @@ class Task3SumDataset(Dataset):
                 self.vocab,
                 item_rng,
                 self.include_separator_token,
+                self.include_eos_target,
             )
         else:
             if fmt == "parallel_cot":
@@ -528,6 +538,8 @@ class Task3SumDataset(Dataset):
             target_tokens = tokens[
                 sep_idx if self.include_separator_token else sep_idx + 1 :
             ]
+            if self.include_eos_target:
+                target_tokens = [*target_tokens, self.vocab.pad_token]
             target_ids = torch.tensor(
                 self.vocab.encode(target_tokens),
                 dtype=torch.long,
