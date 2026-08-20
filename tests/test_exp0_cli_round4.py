@@ -9,6 +9,8 @@ from scripts.sweep_n import (
     build_runner_command,
     canonical_sweep_config,
     compute_sweep_id,
+    summarize_run_report,
+    sweep_execution_protocol,
 )
 from scripts.sweep_n import get_parser as get_sweep_parser
 
@@ -260,7 +262,7 @@ def test_sweep_id_changes_with_scientific_configuration():
 
 
 def test_sweep_forwards_immediate_protocol_suppression():
-    """The N=0 arm of a sweep is only compute-matched if the flag reaches it."""
+    """The N=0 arm is training-budget aligned only if suppression reaches it."""
     cmd = build_runner_command(
         _sweep_args(immediate_protocol=False), 0, Path("out")
     )
@@ -277,3 +279,63 @@ def test_immediate_protocol_default_preserves_sweep_identity():
     suppressed = _sweep_args(immediate_protocol=False)
     assert canonical_sweep_config(suppressed)["immediate_protocol"] is False
     assert compute_sweep_id(base) != compute_sweep_id(suppressed)
+
+
+def test_sweep_execution_protocol_is_durable_but_not_part_of_identity():
+    default = _sweep_args()
+    canonical = canonical_sweep_config(default)
+    execution = sweep_execution_protocol(default)
+
+    assert "immediate_protocol" not in canonical
+    assert execution["immediate_protocol_enabled"] is True
+    assert execution["n0_training_budget_relation"] == "published_immediate_protocol"
+    assert "actual model compute" in execution["compute_note"]
+
+    suppressed = sweep_execution_protocol(_sweep_args(immediate_protocol=False))
+    assert suppressed["immediate_protocol_enabled"] is False
+    assert (
+        suppressed["n0_training_budget_relation"]
+        == "same_requested_epochs_weight_decay_and_grad_clip"
+    )
+    assert "does not equalize FLOPs or runtime" in suppressed["compute_note"]
+
+
+def test_sweep_summary_preserves_child_execution_provenance():
+    report = {
+        "run_id": "run-0",
+        "metrics": {
+            "filler_accuracy": 0.75,
+            "fixed_budget_run": False,
+            "immediate_protocol_applied_any_seed": True,
+            "immediate_protocol_per_seed": [
+                {
+                    "enabled": True,
+                    "applied": True,
+                    "trigger": "num_filler == 0",
+                    "epochs_requested": 5,
+                    "epochs_effective": 25,
+                    "weight_decay_requested": 0.01,
+                    "weight_decay_effective": 0.1,
+                    "grad_clip_requested": 1.0,
+                    "grad_clip_effective": 0.5,
+                }
+            ],
+            "early_stopping_per_seed": [
+                {
+                    "epochs_requested": 5,
+                    "epochs_effective": 25,
+                    "epochs_trained": 10,
+                }
+            ],
+        },
+    }
+
+    summary = summarize_run_report(0, Path("n0/report.json"), report)
+
+    assert summary["n"] == 0
+    assert summary["run_id"] == "run-0"
+    assert summary["immediate_protocol_applied_any_seed"] is True
+    assert summary["epochs_requested_per_seed"] == [5]
+    assert summary["epochs_effective_per_seed"] == [25]
+    assert summary["epochs_trained_per_seed"] == [10]
+    assert summary["immediate_protocol_per_seed"][0]["weight_decay_effective"] == 0.1
