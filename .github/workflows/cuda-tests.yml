@@ -30,7 +30,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
-          pip install -e .
+          # The [cuda] extra installs ninja. Without it torch.utils.cpp_extension
+          # cannot JIT-build the pinned RWKV-7 recurrence kernel, and every
+          # rwkv7_fused_cuda test fails with "Ninja is required to load C++
+          # extensions".
+          pip install -e ".[cuda]"
           cd external/rosa_soft && USE_CUDA=1 pip install -e .
 
       - name: Verify CUDA Extension Capabilities
@@ -38,5 +42,11 @@ jobs:
           python -c "import rosa_soft; caps = rosa_soft.BUILD_CAPABILITIES; print(caps); assert caps.rosa_soft_cuda, 'CUDA extension not built!'"
 
       - name: Run CUDA Pytest
+        env:
+          # Without this the fused-kernel tests skip when nvcc is missing, so a
+          # runner with a broken CUDA toolchain reports a green GPU job that
+          # exercised no GPU kernel. On this runner a missing toolkit is a
+          # failure, not a skip.
+          EXP0_REQUIRE_RWKV_CUDA: "1"
         run: |
           pytest -m "cuda" -v
