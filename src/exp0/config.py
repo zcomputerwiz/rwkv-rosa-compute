@@ -3,6 +3,12 @@
 from dataclasses import dataclass
 from typing import Optional
 
+from exp0.task3sum import (
+    DEFAULT_CORRUPTION_RATE,
+    GENERATOR_MODES,
+    SOURCE_GENERATOR,
+)
+
 
 @dataclass
 class Task3SumConfig:
@@ -15,6 +21,9 @@ class Task3SumConfig:
     true_rate: float = 0.5
     vocab_reduction: bool = True
     include_separator_token: bool = True
+    include_eos_target: bool = True
+    generator_mode: str = SOURCE_GENERATOR
+    corruption_rate: float = DEFAULT_CORRUPTION_RATE
     seed: int = 42
     num_samples: int = 10000
 
@@ -24,11 +33,25 @@ class Task3SumConfig:
                 f"Modulus other than 10 is not supported in Experiment 0, "
                 f"got mod={self.mod}"
             )
+        if not 0.0 <= self.true_rate <= 1.0:
+            raise ValueError("true_rate must be in [0, 1].")
         if not self.include_separator_token:
             raise ValueError(
                 "Experiment 0 requires the supervised continuation separator. "
                 "The pre-repair separator-dropping protocol is not supported."
             )
+        if not self.include_eos_target:
+            raise ValueError(
+                "Experiment 0 source-fidelity protocol requires a supervised "
+                "EOS target after the final True/False token."
+            )
+        if self.generator_mode not in GENERATOR_MODES:
+            raise ValueError(
+                f"generator_mode must be one of {GENERATOR_MODES}; "
+                f"got {self.generator_mode!r}"
+            )
+        if self.corruption_rate < 1.0:
+            raise ValueError("corruption_rate must be >= 1.0.")
 
 
 @dataclass
@@ -49,6 +72,7 @@ class ModelConfig:
     llama_initializer_range: float = 0.02
     match3_shared_input_features: bool = True
     vocab_size: int = 256
+    output_vocab_size: Optional[int] = None
     device: str = "cpu"
 
     def __post_init__(self):
@@ -67,6 +91,8 @@ class ModelConfig:
             raise ValueError(
                 "The pinned RWKV-7 CUDA kernel currently requires head_dim=64."
             )
+        if self.output_vocab_size is not None and self.output_vocab_size <= 0:
+            raise ValueError("output_vocab_size must be greater than zero when set.")
         if self.llama_rope_theta <= 0:
             raise ValueError("llama_rope_theta must be greater than zero.")
         if self.llama_initializer_range <= 0:

@@ -17,7 +17,7 @@ from exp0.dataset import (
 )
 from exp0.diagnostics import evaluate_cot_diagnostics
 from exp0.models.llama import RotaryEmbedding
-from exp0.task3sum import generate_instance
+from exp0.task3sum import LEGACY_GENERATOR, SOURCE_GENERATOR, generate_instance
 from exp0.train import _make_lr_scheduler, create_model, train_model
 from scripts.run_experiment import build_configs, get_parser
 
@@ -67,9 +67,12 @@ def test_runner_retains_positive_control_protocol_defaults():
 
     assert task_cfg.num_filler == 36
     assert task_cfg.include_separator_token is True
+    assert task_cfg.generator_mode == SOURCE_GENERATOR
+    assert task_cfg.corruption_rate == pytest.approx(4 / 3)
     assert model_cfg.llama_rope_theta == 10000.0
     assert model_cfg.llama_initializer_range == 0.02
     assert model_cfg.match3_shared_input_features is True
+    assert model_cfg.output_vocab_size == 32000
     assert train_cfg.adam_beta1 == 0.9
     assert train_cfg.adam_beta2 == 0.95
     assert train_cfg.lr_schedule == "linear_warmup_decay"
@@ -119,6 +122,39 @@ def test_shared_input_projection_reuses_tuple_position_and_digit_columns():
     torch.testing.assert_close(tuple_hidden, target_hidden)
 
 
+def test_task_vocab_and_output_head_width_are_independent():
+    task_cfg = Task3SumConfig(length=3, dimension=1)
+    vocab = build_default_vocab(length=3, dimension=1)
+    model = create_model(
+        ModelConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            intermediate_size=64,
+            vocab_size=len(vocab),
+            output_vocab_size=32000,
+        ),
+        d_input=13,
+        vocab=vocab,
+        task_cfg=task_cfg,
+    )
+
+    assert model.vocab_size == len(vocab)
+    assert model.target_feature_indices.numel() == len(vocab)
+    assert model.output_vocab_size == 32000
+    assert model.head.out_features == 32000
+
+    input_tuples = torch.zeros(2, 3, 13)
+    targets = torch.tensor(
+        [
+            [vocab.token2id[":"], vocab.token2id["ANS"], vocab.token2id["True"]],
+            [vocab.token2id[":"], vocab.token2id["ANS"], vocab.token2id["False"]],
+        ]
+    )
+    logits = model.loss_logits(input_tuples, targets)
+    assert logits.shape == (2, 2, 32000)
+
+
 def test_llama_backbone_and_head_use_initializer_range_but_input_proj_is_default():
     torch.manual_seed(11)
     task_cfg = Task3SumConfig(length=6, dimension=3)
@@ -143,9 +179,6 @@ def test_llama_backbone_and_head_use_initializer_range_but_input_proj_is_default
     assert q_std == pytest.approx(0.02, abs=0.002)
     assert head_std == pytest.approx(0.02, abs=0.002)
 
-    # nn.Linear.reset_parameters uses U(-1/sqrt(fan_in), +1/sqrt(fan_in)).
-    # Checking its exact support is stable even when that uniform distribution's
-    # standard deviation happens to be numerically close to 0.02.
     bound = 1.0 / math.sqrt(model.input_feature_dim)
     assert model.input_proj.weight.abs().max().item() <= bound + 1e-7
     assert model.input_proj.bias.abs().max().item() <= bound + 1e-7
@@ -177,6 +210,7 @@ def test_dataset_keeps_separator_and_marks_cot_semantics():
         dimension=3,
         target_has_3sum=False,
         rng=rng,
+        generator_mode=LEGACY_GENERATOR,
     )
     vocab = build_default_vocab(length=5, dimension=3)
     dataset = Task3SumDataset(
@@ -214,9 +248,7 @@ def test_dataset_keeps_separator_and_marks_cot_semantics():
 
 def test_cot_diagnostics_separate_answer_leakage_from_generation():
     rng = random.Random(123)
-    instances = [
-        generate_instance(length=5, dimension=2, rng=rng) for _ in range(8)
-    ]
+    instances = [generate_instance(length=5, dimension=2, rng=rng) for _ in range(8)]
     vocab = build_default_vocab(length=5, dimension=2)
     dataset = Task3SumDataset(
         instances,
@@ -260,12 +292,15 @@ def test_cot_diagnostics_separate_answer_leakage_from_generation():
         ans_id,
         true_id,
         false_id,
+        task_length=5,
     )
 
     assert diagnostics["cot_answer_given_cot_accuracy"] == 1.0
     assert diagnostics["cot_pair_position_token_accuracy"] == 1.0
     assert diagnostics["cot_result_semantic_accuracy"] == 0.0
     assert diagnostics["cot_match_index_accuracy"] == 0.0
+    assert len(diagnostics["cot_per_pair"]) == 10
+    assert diagnostics["cot_chance_baselines"]["sum_token_accuracy"] == pytest.approx(0.1)
 
 
 def test_tiny_immediate_dataset_can_be_overfit_on_cpu():
@@ -320,4 +355,5 @@ def test_tiny_immediate_dataset_can_be_overfit_on_cpu():
     )
 
     assert history["best_online_train_answer_accuracy"] >= 0.95
+    assert history["best_online_train_answer_accuracy_by_format"]["immediate"] >= 0.95
     assert history["best_filler_accuracy"] >= 0.95

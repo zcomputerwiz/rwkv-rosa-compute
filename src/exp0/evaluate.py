@@ -6,7 +6,7 @@ from dataclasses import asdict
 from typing import Any, Dict, List
 
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
-from exp0.dataset import build_default_vocab
+from exp0.dataset import FORMAT_NAMES, build_default_vocab
 
 
 def _resolved_model_dict(
@@ -110,9 +110,47 @@ def _mean_present(values: List[float | None]) -> float | None:
     return sum(present) / len(present)
 
 
+def _aggregate_per_pair(
+    per_seed_results: List[Dict[str, Any]],
+) -> list[Dict[str, Any]]:
+    per_seed_pairs = [
+        result.get("best_cot_diagnostics", {}).get("cot_per_pair", [])
+        for result in per_seed_results
+    ]
+    per_seed_pairs = [pairs for pairs in per_seed_pairs if pairs]
+    if not per_seed_pairs:
+        return []
+
+    pair_count = len(per_seed_pairs[0])
+    if any(len(pairs) != pair_count for pairs in per_seed_pairs):
+        raise ValueError("CoT per-pair diagnostic layouts differ across seeds.")
+
+    metrics = (
+        "pair_semantic_accuracy",
+        "sum_semantic_accuracy",
+        "match_index_accuracy",
+        "result_semantic_accuracy",
+    )
+    aggregated = []
+    for index in range(pair_count):
+        template = per_seed_pairs[0][index]
+        item: Dict[str, Any] = {
+            "pair_index": template["pair_index"],
+            "i": template["i"],
+            "j": template["j"],
+            "result_count": template.get("result_count"),
+        }
+        for name in metrics:
+            item[name] = _mean_present(
+                [pairs[index].get(name) for pairs in per_seed_pairs]
+            )
+        aggregated.append(item)
+    return aggregated
+
+
 def _aggregate_cot_diagnostics(
     per_seed_results: List[Dict[str, Any]],
-) -> Dict[str, float | None]:
+) -> Dict[str, Any]:
     metric_names = [
         "cot_answer_given_cot_accuracy",
         "cot_pair_position_token_accuracy",
@@ -122,8 +160,9 @@ def _aggregate_cot_diagnostics(
         "cot_match_index_accuracy",
         "cot_result_semantic_accuracy",
         "cot_result_nll",
+        "cot_result_nll_floor",
     ]
-    aggregated: Dict[str, float | None] = {}
+    aggregated: Dict[str, Any] = {}
     for name in metric_names:
         aggregated[name] = _mean_present(
             [
@@ -131,7 +170,38 @@ def _aggregate_cot_diagnostics(
                 for result in per_seed_results
             ]
         )
+
+    baselines = [
+        result.get("best_cot_diagnostics", {}).get("cot_chance_baselines")
+        for result in per_seed_results
+    ]
+    baselines = [item for item in baselines if item]
+    if baselines:
+        baseline_keys = baselines[0].keys()
+        aggregated["cot_chance_baselines"] = {
+            key: _mean_present([item.get(key) for item in baselines])
+            for key in baseline_keys
+        }
+    else:
+        aggregated["cot_chance_baselines"] = {}
+    aggregated["cot_per_pair"] = _aggregate_per_pair(per_seed_results)
     return aggregated
+
+
+def _aggregate_training_by_format(
+    per_seed_results: List[Dict[str, Any]],
+) -> Dict[str, float | None]:
+    return {
+        name: _mean_present(
+            [
+                result.get("best_online_train_answer_accuracy_by_format", {}).get(
+                    name
+                )
+                for result in per_seed_results
+            ]
+        )
+        for name in FORMAT_NAMES
+    }
 
 
 def compile_experiment_report(
@@ -167,6 +237,7 @@ def compile_experiment_report(
     min_acc = min(filler_accuracies) if filler_accuracies else 0.0
     max_acc = max(filler_accuracies) if filler_accuracies else 0.0
     cot_diagnostics = _aggregate_cot_diagnostics(per_seed_results)
+    training_by_format = _aggregate_training_by_format(per_seed_results)
 
     model_dict = _resolved_model_dict(model_cfg, task_cfg)
     train_dict = asdict(train_cfg)
@@ -183,6 +254,25 @@ def compile_experiment_report(
         raise ValueError(
             "Training/report vocabulary resolution disagrees across seeds: "
             f"expected {model_dict['vocab_size']}, got {sorted(resolved_vocab_sizes)}."
+        )
+
+    expected_output_vocab_size = (
+        model_dict["output_vocab_size"]
+        if model_dict["output_vocab_size"] is not None
+        else model_dict["vocab_size"]
+    )
+    reported_output_vocab_sizes = {
+        result["output_vocab_size"]
+        for result in per_seed_results
+        if "output_vocab_size" in result
+    }
+    if reported_output_vocab_sizes and reported_output_vocab_sizes != {
+        expected_output_vocab_size
+    }:
+        raise ValueError(
+            "Training/report output head resolution disagrees across seeds: "
+            f"expected {expected_output_vocab_size}, "
+            f"got {sorted(reported_output_vocab_sizes)}."
         )
 
     seeds_run = [res["seed"] for res in per_seed_results]
@@ -210,6 +300,7 @@ def compile_experiment_report(
         "max_accuracy": max_acc,
         "per_seed_accuracies": filler_accuracies,
         "best_online_training_answer_accuracy": mean_online_train_answer_acc,
+        "best_online_training_answer_accuracy_by_format": training_by_format,
         **cot_diagnostics,
     }
 
@@ -217,10 +308,7 @@ def compile_experiment_report(
         "run_id": run_id,
         "run_config": run_config,
         "model": model_dict,
-        "initialization": _initialization_from_results(
-            model_cfg,
-            per_seed_results,
-        ),
+        "initialization": _initialization_from_results(model_cfg, per_seed_results),
         "training_protocol": train_dict,
         "task_config": task_dict,
         "compute_budget": {
@@ -237,41 +325,50 @@ def compile_experiment_report(
         "metrics": metrics,
         "metric_semantics": {
             "best_online_training_answer_accuracy": (
-                "Best per-epoch answer accuracy accumulated from each training "
-                "batch's existing forward pass before that batch's optimizer "
-                "update. This is an online fit diagnostic, not a frozen "
-                "end-of-epoch evaluation of the full training set."
+                "online fit diagnostic: best per-epoch answer accuracy accumulated "
+                "from each training batch's existing forward pass before that "
+                "batch's optimizer update. Mixed-format runs can be shortcut-"
+                "contaminated, so use the per-format breakdown for interpretation."
+            ),
+            "best_online_training_answer_accuracy_by_format": (
+                "Best online answer accuracy split by realized training format."
             ),
             "cot_answer_given_cot_accuracy": (
                 "Final True/False accuracy when the ground-truth CoT prefix is "
-                "teacher-forced. This is retained as a leakage-aware diagnostic "
-                "and is not evidence that the model independently computed 3SUM."
+                "teacher-forced; not evidence of independent 3SUM computation."
             ),
             "cot_pair_position_token_accuracy": (
-                "Exact next-token accuracy on reduced CoT pair-position tokens; "
-                "randomized vocab reduction imposes an artificial ceiling."
+                "Exact next-token accuracy on randomized reduced CoT pair tokens."
             ),
             "cot_pair_position_semantic_accuracy": (
-                "Pair-position accuracy accepting either semantically valid "
-                "summand token under reduced-vocabulary randomization."
+                "Pair-position accuracy accepting either valid summand token."
             ),
             "cot_sum_token_accuracy": (
                 "Exact next-token accuracy on sampled unmatched pair-sum tokens."
             ),
             "cot_sum_semantic_accuracy": (
-                "Unmatched pair-sum accuracy accepting any coordinate digit that "
-                "is valid for the pair under vocab reduction."
+                "Unmatched pair-sum accuracy accepting any coordinate digit valid "
+                "for the pair under vocabulary reduction."
             ),
             "cot_match_index_accuracy": (
-                "Exact accuracy for matched-pair result tokens that identify the "
-                "third matching tuple."
+                "Exact accuracy for source-faithful matched-pair third-index tokens."
             ),
             "cot_result_semantic_accuracy": (
                 "Semantic accuracy across all CoT result slots (sum or match)."
             ),
             "cot_result_nll": (
-                "Mean teacher-forced negative log-likelihood over CoT result "
-                "slots only, excluding pair-position tokens and final answer."
+                "Mean teacher-forced NLL over CoT result slots only."
+            ),
+            "cot_result_nll_floor": (
+                "Expected irreducible result-slot NLL from randomized coordinate "
+                "selection; match-index targets are deterministic."
+            ),
+            "cot_chance_baselines": (
+                "Structured random baselines computed from the fixed validation "
+                "layout and source-faithful k>j candidate sets."
+            ),
+            "cot_per_pair": (
+                "Per-(i,j) specialization metrics in lexicographic pair order."
             ),
         },
         "eval_seed": eval_seed,

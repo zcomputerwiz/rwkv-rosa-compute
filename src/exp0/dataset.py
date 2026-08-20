@@ -1,5 +1,6 @@
 """Dataset tensorization, vocabulary mapping, and compact 3SUM storage."""
 
+import math
 import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence
@@ -16,9 +17,16 @@ from exp0.sequences import (
     format_e_neutral,
     get_token_labels,
 )
-from exp0.task3sum import Instance3Sum, generate_instance
+from exp0.task3sum import (
+    DEFAULT_CORRUPTION_RATE,
+    SOURCE_GENERATOR,
+    Instance3Sum,
+    generate_instance,
+    matching_k_after_pair,
+)
 
 _FORMATS = ("parallel_cot", "filler", "serial_cot", "immediate", "neutral")
+FORMAT_NAMES = _FORMATS
 _FORMAT_TO_CODE = {name: idx for idx, name in enumerate(_FORMATS)}
 
 COT_DIAG_NONE = 0
@@ -99,14 +107,7 @@ def build_default_vocab(
 
 @dataclass
 class PackedInstances:
-    """Compact tensor-backed storage for a collection of 3SUM instances.
-
-    The default 12x3 task uses 43 bytes/sample for tuple values, the Boolean
-    label, and matching indices, versus a much larger graph of Python
-    dataclasses/lists/tuples/integers. Torch tensor storage is also friendly to
-    DataLoader multiprocessing because tensor storage can be shared between
-    worker processes instead of recursively copying Python objects.
-    """
+    """Compact tensor-backed storage for a collection of 3SUM instances."""
 
     tuples: torch.Tensor
     has_3sum: torch.Tensor
@@ -166,14 +167,11 @@ def generate_packed_instances(
     dimension: int = 3,
     mod: int = 10,
     rng: Optional[random.Random] = None,
+    *,
+    generator_mode: str = SOURCE_GENERATOR,
+    corruption_rate: float = DEFAULT_CORRUPTION_RATE,
 ) -> PackedInstances:
-    """Generate instances directly into compact shared tensor storage.
-
-    Generation consumes the same RNG stream, in the same order, as repeatedly
-    calling :func:`generate_instance`; only the retained representation changes.
-    NumPy buffers are filled in-place and wrapped once with ``torch.from_numpy``
-    to avoid one tiny Tensor allocation per generated sample.
-    """
+    """Generate instances directly into compact shared tensor storage."""
     if num_samples < 0:
         raise ValueError("num_samples must be non-negative.")
     if length >= 32768:
@@ -191,6 +189,8 @@ def generate_packed_instances(
             dimension=dimension,
             mod=mod,
             rng=rng,
+            generator_mode=generator_mode,
+            corruption_rate=corruption_rate,
         )
         tuple_array[idx] = instance.tuples
         label_array[idx] = instance.has_3sum
@@ -238,17 +238,98 @@ def _matching_k_for_pair(
     j: int,
     mod: int = 10,
 ) -> tuple[tuple[int, ...], Optional[int]]:
-    dimension = len(instance.tuples[0])
-    sum_ij = tuple(
-        (instance.tuples[i][dim] + instance.tuples[j][dim]) % mod
-        for dim in range(dimension)
-    )
-    target = tuple((-value) % mod for value in sum_ij)
+    return matching_k_after_pair(instance.tuples, i, j, mod=mod)
 
-    for k, value in enumerate(instance.tuples):
-        if k != i and k != j and value == target:
-            return sum_ij, k
-    return sum_ij, None
+
+def _sum_token_entropy(sum_ij: tuple[int, ...]) -> float:
+    """Entropy of the source's uniformly sampled coordinate digit target."""
+    counts: dict[int, int] = {}
+    for value in sum_ij:
+        counts[value] = counts.get(value, 0) + 1
+    dimension = len(sum_ij)
+    return -sum(
+        (count / dimension) * math.log(count / dimension)
+        for count in counts.values()
+    )
+
+
+def _reduced_parallel_cot_tensors(
+    instance: Instance3Sum,
+    vocab: Vocabulary,
+    rng: random.Random,
+    include_separator_token: bool,
+    include_eos_target: bool,
+    mod: int = 10,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build reduced CoT targets and diagnostics in one pair traversal."""
+    labels = get_token_labels(len(instance.tuples))
+    dimension = len(instance.tuples[0])
+    max_valid = max(2, dimension)
+    pair_count = len(instance.tuples) * (len(instance.tuples) - 1) // 2
+    prefix = 1 if include_separator_token else 0
+    suffix = 3 if include_eos_target else 2
+    target_len = prefix + 2 * pair_count + suffix
+
+    target_ids = torch.empty(target_len, dtype=torch.long)
+    diag_type = torch.full((target_len,), COT_DIAG_NONE, dtype=torch.int8)
+    valid_ids = torch.full((target_len, max_valid), -1, dtype=torch.long)
+    pair_indices = torch.full((target_len,), -1, dtype=torch.int16)
+    stochastic_nll_floor = torch.zeros(target_len, dtype=torch.float32)
+
+    cursor = 0
+    if include_separator_token:
+        target_ids[cursor] = vocab.token2id[":"]
+        cursor += 1
+
+    pair_index = 0
+    for i in range(len(instance.tuples)):
+        for j in range(i + 1, len(instance.tuples)):
+            sum_ij, matching_k = _matching_k_for_pair(instance, i, j, mod=mod)
+
+            pair_token = labels[i] if rng.random() < 0.5 else labels[j]
+            pair_id = vocab.token2id[pair_token]
+            target_ids[cursor] = pair_id
+            diag_type[cursor] = COT_DIAG_PAIR_POSITION
+            valid_ids[cursor, 0] = vocab.token2id[labels[i]]
+            valid_ids[cursor, 1] = vocab.token2id[labels[j]]
+            pair_indices[cursor] = pair_index
+            stochastic_nll_floor[cursor] = math.log(2.0)
+            cursor += 1
+
+            if matching_k is not None:
+                result_id = vocab.token2id[labels[matching_k]]
+                target_ids[cursor] = result_id
+                diag_type[cursor] = COT_DIAG_MATCH_RESULT
+                valid_ids[cursor, 0] = result_id
+            else:
+                sampled_sum = str(rng.choice(sum_ij))
+                target_ids[cursor] = vocab.token2id[sampled_sum]
+                diag_type[cursor] = COT_DIAG_SUM_RESULT
+                unique_digits = list(dict.fromkeys(str(value) for value in sum_ij))
+                for offset, token in enumerate(unique_digits):
+                    valid_ids[cursor, offset] = vocab.token2id[token]
+                stochastic_nll_floor[cursor] = _sum_token_entropy(sum_ij)
+            pair_indices[cursor] = pair_index
+            cursor += 1
+            pair_index += 1
+
+    target_ids[cursor] = vocab.token2id["ANS"]
+    cursor += 1
+    target_ids[cursor] = vocab.token2id[str(instance.has_3sum)]
+    cursor += 1
+    if include_eos_target:
+        target_ids[cursor] = vocab.token2id[vocab.pad_token]
+        cursor += 1
+    if cursor != target_len:
+        raise AssertionError("Reduced parallel CoT target construction misaligned.")
+
+    return (
+        target_ids,
+        diag_type,
+        valid_ids,
+        pair_indices,
+        stochastic_nll_floor,
+    )
 
 
 def _parallel_cot_diagnostics(
@@ -257,30 +338,18 @@ def _parallel_cot_diagnostics(
     target_tokens: List[str],
     vocab_reduction: bool,
     include_separator_token: bool,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build semantic target metadata for teacher-forced CoT generation.
-
-    The reduced CoT deliberately randomizes which summand index and coordinate
-    digit are emitted. Exact next-token accuracy therefore has an irreducible
-    stochastic component. ``valid_ids`` records every token that is
-    semantically correct for the sampled pair so evaluation can report both
-    paper-style exact accuracy and stochasticity-aware semantic accuracy.
-    """
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build semantic metadata for the non-reduced compatibility path."""
     dimension = len(instance.tuples[0])
     max_valid = max(2, dimension)
-    diag_type = torch.full(
-        (len(target_tokens),),
-        COT_DIAG_NONE,
-        dtype=torch.int8,
-    )
-    valid_ids = torch.full(
-        (len(target_tokens), max_valid),
-        -1,
-        dtype=torch.long,
-    )
+    diag_type = torch.full((len(target_tokens),), COT_DIAG_NONE, dtype=torch.int8)
+    valid_ids = torch.full((len(target_tokens), max_valid), -1, dtype=torch.long)
+    pair_indices = torch.full((len(target_tokens),), -1, dtype=torch.int16)
+    stochastic_nll_floor = torch.zeros(len(target_tokens), dtype=torch.float32)
 
     labels = get_token_labels(len(instance.tuples))
     cursor = 1 if include_separator_token else 0
+    pair_index = 0
 
     for i in range(len(instance.tuples)):
         for j in range(i + 1, len(instance.tuples)):
@@ -290,9 +359,12 @@ def _parallel_cot_diagnostics(
                 raise ValueError("Parallel CoT diagnostic layout exceeds target length.")
 
             diag_type[pair_pos] = COT_DIAG_PAIR_POSITION
+            pair_indices[pair_pos] = pair_index
+            pair_indices[result_pos] = pair_index
             if vocab_reduction:
                 valid_ids[pair_pos, 0] = vocab.token2id[labels[i]]
                 valid_ids[pair_pos, 1] = vocab.token2id[labels[j]]
+                stochastic_nll_floor[pair_pos] = math.log(2.0)
             else:
                 valid_ids[pair_pos, 0] = vocab.token2id[f"{labels[i]}{labels[j]}"]
 
@@ -306,13 +378,15 @@ def _parallel_cot_diagnostics(
                     unique_digits = list(dict.fromkeys(str(value) for value in sum_ij))
                     for offset, token in enumerate(unique_digits):
                         valid_ids[result_pos, offset] = vocab.token2id[token]
+                    stochastic_nll_floor[result_pos] = _sum_token_entropy(sum_ij)
                 else:
                     sum_token = "".join(str(value) for value in sum_ij)
                     valid_ids[result_pos, 0] = vocab.token2id[sum_token]
 
             cursor += 2
+            pair_index += 1
 
-    return diag_type, valid_ids
+    return diag_type, valid_ids, pair_indices, stochastic_nll_floor
 
 
 class Task3SumDataset(Dataset):
@@ -326,6 +400,7 @@ class Task3SumDataset(Dataset):
         vocab: Optional[Vocabulary] = None,
         vocab_reduction: bool = True,
         include_separator_token: bool = True,
+        include_eos_target: bool = True,
         seed: int = 42,
         parallel_ratio: float = 0.5,
         filler_ratio: float = 0.5,
@@ -338,6 +413,12 @@ class Task3SumDataset(Dataset):
         self.num_filler = num_filler
         self.vocab_reduction = vocab_reduction
         self.include_separator_token = include_separator_token
+        self.include_eos_target = include_eos_target
+        if not include_eos_target:
+            raise ValueError(
+                "Experiment 0 source-fidelity dataset requires the supervised "
+                "EOS target after True/False."
+            )
 
         if isinstance(instances, PackedInstances):
             length = instances.length
@@ -347,6 +428,8 @@ class Task3SumDataset(Dataset):
             dimension = len(instances[0].tuples[0])
         else:
             length, dimension = 12, 3
+        self.length = length
+        self.dimension = dimension
 
         self.vocab = (
             build_default_vocab(length=length, dimension=dimension)
@@ -390,12 +473,10 @@ class Task3SumDataset(Dataset):
 
     @property
     def assigned_formats(self) -> List[str]:
-        """Compatibility view; materialized only when explicitly requested."""
         return [_FORMATS[int(code)] for code in self._format_codes.tolist()]
 
     @property
     def packed_storage_nbytes(self) -> Optional[int]:
-        """Bytes used by compact instance and format-code tensor storage."""
         if not isinstance(self.instances, PackedInstances):
             return None
         return self.instances.storage_nbytes + (
@@ -409,7 +490,8 @@ class Task3SumDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor | str]:
         instance = self._instance_at(idx)
-        fmt = _FORMATS[int(self._format_codes[idx].item())]
+        format_code = int(self._format_codes[idx].item())
+        fmt = _FORMATS[format_code]
         item_rng = random.Random(f"{self.seed}_{idx}")
 
         if isinstance(self.instances, PackedInstances):
@@ -417,58 +499,95 @@ class Task3SumDataset(Dataset):
         else:
             input_embeds = encode_input_tuples(instance)
 
-        if fmt == "parallel_cot":
-            seq_str = format_a_parallel_cot(
-                instance,
-                vocab_reduction=self.vocab_reduction,
-                rng=item_rng,
-            )
-        elif fmt == "filler":
-            seq_str = format_b_filler(instance, num_filler=self.num_filler)
-        elif fmt == "immediate":
-            seq_str = format_c_immediate(instance)
-        elif fmt == "serial_cot":
-            seq_str = format_d_serial_cot(instance)
-        elif fmt == "neutral":
-            seq_str = format_e_neutral(instance, num_filler=self.num_filler)
-        else:
-            raise ValueError(f"Unknown format type: {fmt}")
-
-        tokens = seq_str.split()
-        if ":" not in tokens:
-            raise ValueError("Experiment 0 sequence is missing the ':' separator token.")
-        sep_idx = tokens.index(":")
-        target_tokens = tokens[
-            sep_idx if self.include_separator_token else sep_idx + 1 :
-        ]
-        target_ids = self.vocab.encode(target_tokens)
-
-        max_valid = max(2, len(instance.tuples[0]))
-        cot_diag_type = torch.full(
-            (len(target_tokens),),
-            COT_DIAG_NONE,
-            dtype=torch.int8,
-        )
-        cot_valid_ids = torch.full(
-            (len(target_tokens), max_valid),
-            -1,
-            dtype=torch.long,
-        )
-        if fmt == "parallel_cot":
-            cot_diag_type, cot_valid_ids = _parallel_cot_diagnostics(
+        if fmt == "parallel_cot" and self.vocab_reduction:
+            (
+                target_ids,
+                cot_diag_type,
+                cot_valid_ids,
+                cot_pair_index,
+                cot_stochastic_nll_floor,
+            ) = _reduced_parallel_cot_tensors(
                 instance,
                 self.vocab,
-                target_tokens,
-                self.vocab_reduction,
+                item_rng,
                 self.include_separator_token,
+                self.include_eos_target,
             )
+        else:
+            if fmt == "parallel_cot":
+                seq_str = format_a_parallel_cot(
+                    instance,
+                    vocab_reduction=self.vocab_reduction,
+                    rng=item_rng,
+                )
+            elif fmt == "filler":
+                seq_str = format_b_filler(instance, num_filler=self.num_filler)
+            elif fmt == "immediate":
+                seq_str = format_c_immediate(instance)
+            elif fmt == "serial_cot":
+                seq_str = format_d_serial_cot(instance)
+            elif fmt == "neutral":
+                seq_str = format_e_neutral(instance, num_filler=self.num_filler)
+            else:
+                raise ValueError(f"Unknown format type: {fmt}")
+
+            tokens = seq_str.split()
+            if ":" not in tokens:
+                raise ValueError("Experiment 0 sequence is missing the ':' separator token.")
+            sep_idx = tokens.index(":")
+            target_tokens = tokens[
+                sep_idx if self.include_separator_token else sep_idx + 1 :
+            ]
+            if self.include_eos_target:
+                target_tokens = [*target_tokens, self.vocab.pad_token]
+            target_ids = torch.tensor(
+                self.vocab.encode(target_tokens),
+                dtype=torch.long,
+            )
+
+            max_valid = max(2, len(instance.tuples[0]))
+            cot_diag_type = torch.full(
+                (len(target_tokens),),
+                COT_DIAG_NONE,
+                dtype=torch.int8,
+            )
+            cot_valid_ids = torch.full(
+                (len(target_tokens), max_valid),
+                -1,
+                dtype=torch.long,
+            )
+            cot_pair_index = torch.full(
+                (len(target_tokens),),
+                -1,
+                dtype=torch.int16,
+            )
+            cot_stochastic_nll_floor = torch.zeros(
+                len(target_tokens),
+                dtype=torch.float32,
+            )
+            if fmt == "parallel_cot":
+                (
+                    cot_diag_type,
+                    cot_valid_ids,
+                    cot_pair_index,
+                    cot_stochastic_nll_floor,
+                ) = _parallel_cot_diagnostics(
+                    instance,
+                    self.vocab,
+                    target_tokens,
+                    self.vocab_reduction,
+                    self.include_separator_token,
+                )
 
         return {
             "input_tuples": input_embeds,
-            "targets": torch.tensor(target_ids, dtype=torch.long),
+            "targets": target_ids,
             "has_3sum": torch.tensor(instance.has_3sum, dtype=torch.bool),
             "cot_diag_type": cot_diag_type,
             "cot_valid_ids": cot_valid_ids,
+            "cot_pair_index": cot_pair_index,
+            "cot_stochastic_nll_floor": cot_stochastic_nll_floor,
+            "format_code": torch.tensor(format_code, dtype=torch.int8),
             "format": fmt,
         }
 
@@ -483,24 +602,19 @@ def pad_collate_fn(
     has_3sum = torch.stack(
         [item["has_3sum"] for item in batch]  # type: ignore[list-item]
     )
+    format_codes = torch.stack(
+        [item["format_code"] for item in batch]  # type: ignore[list-item]
+    )
     targets_list = [item["targets"] for item in batch]
     max_len = max(target.size(0) for target in targets_list)  # type: ignore[union-attr]
 
-    padded_targets = torch.full(
-        (len(batch), max_len),
-        fill_value=0,
-        dtype=torch.long,
-    )
-    loss_masks = torch.full(
-        (len(batch), max_len),
-        fill_value=-100,
-        dtype=torch.long,
-    )
+    padded_targets = torch.full((len(batch), max_len), fill_value=0, dtype=torch.long)
+    loss_masks = torch.full((len(batch), max_len), fill_value=-100, dtype=torch.long)
     padded_diag_types = torch.full(
-        (len(batch), max_len),
-        COT_DIAG_NONE,
-        dtype=torch.int8,
+        (len(batch), max_len), COT_DIAG_NONE, dtype=torch.int8
     )
+    padded_pair_indices = torch.full((len(batch), max_len), -1, dtype=torch.int16)
+    padded_nll_floor = torch.zeros((len(batch), max_len), dtype=torch.float32)
     max_valid = max(
         item["cot_valid_ids"].shape[1]  # type: ignore[union-attr]
         for item in batch
@@ -515,12 +629,16 @@ def pad_collate_fn(
         target = item["targets"]
         diag_type = item["cot_diag_type"]
         valid_ids = item["cot_valid_ids"]
+        pair_index = item["cot_pair_index"]
+        nll_floor = item["cot_stochastic_nll_floor"]
         seq_len = target.size(0)  # type: ignore[union-attr]
         valid_width = valid_ids.shape[1]  # type: ignore[union-attr]
         padded_targets[idx, :seq_len] = target  # type: ignore[index]
         loss_masks[idx, :seq_len] = target  # type: ignore[index]
         padded_diag_types[idx, :seq_len] = diag_type  # type: ignore[index]
         padded_valid_ids[idx, :seq_len, :valid_width] = valid_ids  # type: ignore[index]
+        padded_pair_indices[idx, :seq_len] = pair_index  # type: ignore[index]
+        padded_nll_floor[idx, :seq_len] = nll_floor  # type: ignore[index]
 
     return {
         "input_tuples": input_tuples,
@@ -529,4 +647,7 @@ def pad_collate_fn(
         "has_3sum": has_3sum,
         "cot_diag_type": padded_diag_types,
         "cot_valid_ids": padded_valid_ids,
+        "cot_pair_index": padded_pair_indices,
+        "cot_stochastic_nll_floor": padded_nll_floor,
+        "format_code": format_codes,
     }

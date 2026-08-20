@@ -9,17 +9,19 @@ from pathlib import Path
 import torch
 
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
-from exp0.dataset import (
-    Task3SumDataset,
-    build_default_vocab,
-    generate_packed_instances,
-)
+from exp0.dataset import Task3SumDataset, build_default_vocab
 from exp0.evaluate import (
     canonical_run_config,
     compile_experiment_report,
     compute_run_id,
 )
+from exp0.generation import generate_protocol_packed_instances
 from exp0.rwkv_checkpoint import sha256_file
+from exp0.task3sum import (
+    DEFAULT_CORRUPTION_RATE,
+    GENERATOR_MODES,
+    SOURCE_GENERATOR,
+)
 from exp0.train import train_model
 
 
@@ -66,9 +68,41 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num_attention_heads", type=int, default=6)
     parser.add_argument("--intermediate_size", type=int, default=1536)
     parser.add_argument("--head_dim", type=int, default=64)
+    parser.add_argument(
+        "--output_vocab_size",
+        type=int,
+        default=32000,
+        help=(
+            "Classifier width. 32000 matches the Llama config used by the "
+            "published Match-3 positive control; task input token IDs remain compact."
+        ),
+    )
     parser.add_argument("--length", type=int, default=12)
     parser.add_argument("--dimension", type=int, default=3)
     parser.add_argument("--num_filler", type=int, default=None)
+    parser.add_argument(
+        "--true_rate",
+        type=float,
+        default=0.5,
+        help="Requested fraction of planted-positive Match-3 examples.",
+    )
+    parser.add_argument(
+        "--generator_mode",
+        type=str,
+        default=SOURCE_GENERATOR,
+        choices=list(GENERATOR_MODES),
+        help=(
+            "Match-3 data distribution. source_corrupted reproduces the "
+            "published planted-positive/geometrically-corrupted-negative setup; "
+            "uniform_conditioned preserves the pre-fidelity repository generator."
+        ),
+    )
+    parser.add_argument(
+        "--corruption_rate",
+        type=float,
+        default=DEFAULT_CORRUPTION_RATE,
+        help="Mean geometric corruption count parameter used by source_corrupted.",
+    )
     parser.add_argument(
         "--format_type",
         type=str,
@@ -213,8 +247,11 @@ def build_configs(
         num_filler=(
             args.num_filler if args.num_filler is not None else args.length**2
         ),
+        true_rate=args.true_rate,
         num_samples=args.num_samples,
         vocab_reduction=args.vocab_reduction,
+        generator_mode=args.generator_mode,
+        corruption_rate=args.corruption_rate,
     )
 
     num_heads = args.num_attention_heads
@@ -232,6 +269,7 @@ def build_configs(
         num_attention_heads=num_heads,
         intermediate_size=args.intermediate_size,
         head_dim=args.head_dim,
+        output_vocab_size=args.output_vocab_size,
         device=args.device,
     )
 
@@ -239,9 +277,7 @@ def build_configs(
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         epochs=args.epochs,
-        mixture=(
-            args.format_type if args.format_type else "50_50_cot_filler"
-        ),
+        mixture=(args.format_type if args.format_type else "50_50_cot_filler"),
         parallel_ratio=args.parallel_ratio,
         filler_ratio=args.filler_ratio,
         serial_ratio=args.serial_ratio,
@@ -332,13 +368,21 @@ def main():
         dimension=args.dimension,
         mod=task_cfg.mod,
     )
+    if model_cfg.output_vocab_size is not None and model_cfg.output_vocab_size < len(vocab):
+        raise ValueError(
+            "output_vocab_size must cover the resolved task vocabulary: "
+            f"output={model_cfg.output_vocab_size}, task={len(vocab)}."
+        )
 
-    val_instances = generate_packed_instances(
+    val_instances = generate_protocol_packed_instances(
         num_samples=args.val_samples,
         length=args.length,
         dimension=args.dimension,
         mod=task_cfg.mod,
+        true_rate=task_cfg.true_rate,
         rng=random.Random(args.eval_seed),
+        generator_mode=task_cfg.generator_mode,
+        corruption_rate=task_cfg.corruption_rate,
     )
     filler_val_ds = Task3SumDataset(
         val_instances,
@@ -367,12 +411,15 @@ def main():
     realized_counts_aggregate: dict[str, int] = {}
 
     for seed in args.seeds:
-        train_instances = generate_packed_instances(
+        train_instances = generate_protocol_packed_instances(
             num_samples=args.num_samples,
             length=args.length,
             dimension=args.dimension,
             mod=task_cfg.mod,
+            true_rate=task_cfg.true_rate,
             rng=random.Random(seed),
+            generator_mode=task_cfg.generator_mode,
+            corruption_rate=task_cfg.corruption_rate,
         )
         train_ds = Task3SumDataset(
             train_instances,
@@ -387,18 +434,14 @@ def main():
         )
 
         for fmt, count in train_ds.realized_counts.items():
-            realized_counts_aggregate[fmt] = (
-                realized_counts_aggregate.get(fmt, 0) + count
-            )
+            realized_counts_aggregate[fmt] = realized_counts_aggregate.get(fmt, 0) + count
 
         train_cfg = TrainConfig(
             seed=seed,
             batch_size=args.batch_size,
             learning_rate=args.learning_rate,
             epochs=args.epochs,
-            mixture=(
-                args.format_type if args.format_type else "50_50_cot_filler"
-            ),
+            mixture=(args.format_type if args.format_type else "50_50_cot_filler"),
             parallel_ratio=args.parallel_ratio,
             filler_ratio=args.filler_ratio,
             serial_ratio=args.serial_ratio,

@@ -4,6 +4,11 @@ import random
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+SOURCE_GENERATOR = "source_corrupted"
+LEGACY_GENERATOR = "uniform_conditioned"
+GENERATOR_MODES = (SOURCE_GENERATOR, LEGACY_GENERATOR)
+DEFAULT_CORRUPTION_RATE = 4 / 3
+
 
 @dataclass
 class Instance3Sum:
@@ -18,13 +23,7 @@ def check_3sum(
     tuples: List[Tuple[int, ...]],
     mod: int = 10,
 ) -> Tuple[bool, Optional[Tuple[int, int, int]]]:
-    """Return the first matching triple using exact legacy search ordering.
-
-    The legacy implementation scanned ``i``, then ``j``, then every possible
-    ``k``. This version preserves that ordering while replacing the innermost
-    full scan with a tuple-value index, reducing the common search cost from
-    O(n^3) to O(n^2) lookups plus duplicate-value checks.
-    """
+    """Return the first matching triple using exact legacy search ordering."""
     n = len(tuples)
     d = len(tuples[0])
 
@@ -45,23 +44,201 @@ def check_3sum(
     return False, None
 
 
-def generate_instance(
+def matching_k_after_pair(
+    tuples: List[Tuple[int, ...]],
+    i: int,
+    j: int,
+    mod: int = 10,
+) -> tuple[Tuple[int, ...], Optional[int]]:
+    """Return pair sum and first source-faithful matching ``k > j``."""
+    dimension = len(tuples[0])
+    sum_ij = tuple(
+        (tuples[i][dim] + tuples[j][dim]) % mod
+        for dim in range(dimension)
+    )
+    target = tuple((-value) % mod for value in sum_ij)
+    for k in range(j + 1, len(tuples)):
+        if tuples[k] == target:
+            return sum_ij, k
+    return sum_ij, None
+
+
+def _validate_generation_args(
+    length: int,
+    dimension: int,
+    mod: int,
+    corruption_rate: float,
+) -> None:
+    if mod != 10:
+        raise ValueError(
+            f"Modulus other than 10 is not supported in Experiment 0, got mod={mod}"
+        )
+    if length < 3:
+        raise ValueError("Match-3 generation requires length >= 3.")
+    if dimension <= 0:
+        raise ValueError("Match-3 generation requires dimension > 0.")
+    if corruption_rate < 1.0:
+        raise ValueError("corruption_rate must be >= 1.0.")
+
+
+def _random_tuple(
+    dimension: int,
+    mod: int,
+    rng: random.Random,
+) -> Tuple[int, ...]:
+    return tuple(rng.randrange(mod) for _ in range(dimension))
+
+
+def _source_planted_triplet(
+    dimension: int,
+    mod: int,
+    rng: random.Random,
+) -> List[Tuple[int, ...]]:
+    """Construct the source implementation's planted three-row core."""
+    first = _random_tuple(dimension, mod, rng)
+    second = _random_tuple(dimension, mod, rng)
+    inverse = tuple(
+        (-first[dim] - second[dim]) % mod
+        for dim in range(dimension)
+    )
+    return [first, second, inverse]
+
+
+def _append_source_random_rows(
+    tuples: List[Tuple[int, ...]],
+    length: int,
+    dimension: int,
+    mod: int,
+    rng: random.Random,
+) -> List[Tuple[int, ...]]:
+    values = list(tuples)
+    values.extend(
+        _random_tuple(dimension, mod, rng)
+        for _ in range(length - len(values))
+    )
+    return values
+
+
+def _capped_geometric(
+    success_probability: float,
+    cap: int,
+    rng: random.Random,
+) -> int:
+    """Sample ``min(Geometric(p), cap)`` without a NumPy dependency."""
+    value = 1
+    while value < cap and rng.random() >= success_probability:
+        value += 1
+    return value
+
+
+def _apply_source_corruption(
+    tuples: List[Tuple[int, ...]],
+    corruptions: int,
+    dimension: int,
+    mod: int,
+    rng: random.Random,
+) -> List[Tuple[int, ...]]:
+    """Mirror the source NumPy advanced-index corruption semantics.
+
+    The published code assigns ``inputs[:corruptions, columns] = values``.
+    Because ``columns`` is an advanced index, every selected column is changed
+    across every one of the first ``corruptions`` rows; the value vector is
+    broadcast across rows. Repeated columns are resolved by later assignments.
+    """
+    mutable = [list(value) for value in tuples]
+    columns = [rng.randrange(dimension) for _ in range(corruptions)]
+    values = [rng.randrange(mod) for _ in range(corruptions)]
+    for column, value in zip(columns, values):
+        for row in range(corruptions):
+            mutable[row][column] = value
+    return [tuple(value) for value in mutable]
+
+
+def generate_source_instance(
+    length: int = 12,
+    dimension: int = 3,
+    mod: int = 10,
+    target_has_3sum: Optional[bool] = None,
+    rng: Optional[random.Random] = None,
+    corruption_rate: float = DEFAULT_CORRUPTION_RATE,
+) -> Instance3Sum:
+    """Generate one example from the checked-in Match-3 construction.
+
+    ``target_has_3sum`` selects the *construction arm* in source mode rather
+    than guaranteeing the final label. ``True`` plants a solution. ``False``
+    applies the source geometric corruption to a planted triplet. The source's
+    probabilistic dense path does not successfully reject corrupted examples
+    that still contain a 3SUM, so this function likewise computes and returns
+    the actual post-corruption label. This label imbalance is part of the
+    published positive-control distribution (and explains its >50% random
+    baseline at larger lengths).
+    """
+    _validate_generation_args(length, dimension, mod, corruption_rate)
+    if rng is None:
+        rng = random.Random()
+    if target_has_3sum is None:
+        target_has_3sum = rng.random() < 0.5
+
+    if target_has_3sum:
+        tuples = _source_planted_triplet(dimension, mod, rng)
+        tuples = _append_source_random_rows(
+            tuples,
+            length,
+            dimension,
+            mod,
+            rng,
+        )
+        rng.shuffle(tuples)
+        has_sol, indices = check_3sum(tuples, mod=mod)
+        if not has_sol or indices is None:
+            raise AssertionError("Planted positive Match-3 instance lost its solution.")
+        return Instance3Sum(
+            tuples=tuples,
+            has_3sum=True,
+            matching_indices=indices,
+        )
+
+    # Match source RNG order: planted core -> geometric corruption -> columns /
+    # replacement values -> random remaining rows -> shuffle.
+    tuples = _source_planted_triplet(dimension, mod, rng)
+    corruptions = _capped_geometric(1.0 / corruption_rate, 3, rng)
+    tuples = _apply_source_corruption(
+        tuples,
+        corruptions,
+        dimension,
+        mod,
+        rng,
+    )
+    tuples = _append_source_random_rows(
+        tuples,
+        length,
+        dimension,
+        mod,
+        rng,
+    )
+    rng.shuffle(tuples)
+    has_sol, indices = check_3sum(tuples, mod=mod)
+    return Instance3Sum(
+        tuples=tuples,
+        has_3sum=has_sol,
+        matching_indices=indices,
+    )
+
+
+def generate_uniform_conditioned_instance(
     length: int = 12,
     dimension: int = 3,
     mod: int = 10,
     target_has_3sum: Optional[bool] = None,
     rng: Optional[random.Random] = None,
 ) -> Instance3Sum:
-    """Generate a single 3SUM instance with specified length and dimension.
-
-    If ``target_has_3sum`` is True, guarantees a solution exists. If False,
-    guarantees no solution exists via corruption/resampling. If None, chooses
-    the target class with 50% probability.
-    """
-    if mod != 10:
-        raise ValueError(
-            f"Modulus other than 10 is not supported in Experiment 0, got mod={mod}"
-        )
+    """Generate using the pre-fidelity Experiment-0 conditioned distribution."""
+    _validate_generation_args(
+        length,
+        dimension,
+        mod,
+        DEFAULT_CORRUPTION_RATE,
+    )
     if rng is None:
         rng = random.Random()
 
@@ -73,10 +250,7 @@ def generate_instance(
     if target_has_3sum:
         for _ in range(max_attempts):
             i, j, k = sorted(rng.sample(range(length), 3))
-            tuples = [
-                tuple(rng.randrange(mod) for _ in range(dimension))
-                for _ in range(length)
-            ]
+            tuples = [_random_tuple(dimension, mod, rng) for _ in range(length)]
             target_k = tuple(
                 (-tuples[i][d] - tuples[j][d]) % mod
                 for d in range(dimension)
@@ -95,10 +269,7 @@ def generate_instance(
         )
 
     for _ in range(max_attempts):
-        tuples = [
-            tuple(rng.randrange(mod) for _ in range(dimension))
-            for _ in range(length)
-        ]
+        tuples = [_random_tuple(dimension, mod, rng) for _ in range(length)]
         has_sol, indices = check_3sum(tuples, mod=mod)
         if not has_sol:
             return Instance3Sum(
@@ -113,7 +284,7 @@ def generate_instance(
             (tuples[c_idx][d] + rng.randint(1, mod - 1)) % mod
             for d in range(dimension)
         )
-        has_sol, indices = check_3sum(tuples, mod=mod)
+        has_sol, _ = check_3sum(tuples, mod=mod)
         if not has_sol:
             return Instance3Sum(
                 tuples=tuples,
@@ -123,4 +294,37 @@ def generate_instance(
 
     raise RuntimeError(
         "Failed to generate a negative 3SUM instance within max attempts"
+    )
+
+
+def generate_instance(
+    length: int = 12,
+    dimension: int = 3,
+    mod: int = 10,
+    target_has_3sum: Optional[bool] = None,
+    rng: Optional[random.Random] = None,
+    *,
+    generator_mode: str = SOURCE_GENERATOR,
+    corruption_rate: float = DEFAULT_CORRUPTION_RATE,
+) -> Instance3Sum:
+    """Generate one instance under an explicit, provenance-worthy distribution."""
+    if generator_mode == SOURCE_GENERATOR:
+        return generate_source_instance(
+            length=length,
+            dimension=dimension,
+            mod=mod,
+            target_has_3sum=target_has_3sum,
+            rng=rng,
+            corruption_rate=corruption_rate,
+        )
+    if generator_mode == LEGACY_GENERATOR:
+        return generate_uniform_conditioned_instance(
+            length=length,
+            dimension=dimension,
+            mod=mod,
+            target_has_3sum=target_has_3sum,
+            rng=rng,
+        )
+    raise ValueError(
+        f"Unknown generator_mode={generator_mode!r}; expected one of {GENERATOR_MODES}."
     )

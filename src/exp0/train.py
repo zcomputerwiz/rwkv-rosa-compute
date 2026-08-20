@@ -12,7 +12,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
-from exp0.dataset import Task3SumDataset, pad_collate_fn
+from exp0.dataset import FORMAT_NAMES, Task3SumDataset, pad_collate_fn
 from exp0.diagnostics import evaluate_cot_diagnostics
 from exp0.models.base import InputEmbedWrapper
 from exp0.models.llama import LlamaBackbone
@@ -57,13 +57,7 @@ def _build_match3_target_feature_map(
     *,
     compact_reduced_features: bool = True,
 ) -> tuple[torch.Tensor, int]:
-    """Map continuation vocab ids onto the shared Match-3 input feature space.
-
-    The reduced positive-control path needs only tuple-position columns, digit
-    columns, and a small set of word features. When serial or non-reduced CoT is
-    actually used, callers disable compaction so otherwise-structured tokens
-    retain distinct fallback columns.
-    """
+    """Map continuation vocab ids onto the shared Match-3 input feature space."""
     d_input = task_cfg.mod * task_cfg.dimension + task_cfg.length
     labels = get_token_labels(task_cfg.length)
     label_to_position = {label: idx for idx, label in enumerate(labels)}
@@ -89,8 +83,6 @@ def _build_match3_target_feature_map(
                 task_cfg.mod * task_cfg.dimension + label_to_position[token]
             )
         elif len(token) == 1 and token.isdigit() and int(token) < task_cfg.mod:
-            # The authors' vectorizer maps a reduced standalone sum digit into
-            # the first coordinate's digit block.
             mapping[token_id] = int(token)
         elif compact_reduced_features:
             if token in compact_special_tokens:
@@ -99,10 +91,6 @@ def _build_match3_target_feature_map(
                     next_feature += 1
                 mapping[token_id] = special_features[token]
             else:
-                # These vocabulary entries do not occur in the reduced
-                # parallel/filler/immediate/neutral protocol. Keep one reserved
-                # column so the projection's fan-in reflects the active vector
-                # feature space instead of the much larger output vocabulary.
                 if other_feature is None:
                     other_feature = next_feature
                     next_feature += 1
@@ -118,14 +106,7 @@ def _initialize_llama_positive_control(
     model: InputEmbedWrapper,
     initializer_range: float,
 ) -> None:
-    """Match Hugging Face Llama initialization without touching input_proj.
-
-    The positive-control authors instantiate LlamaForCausalLM with
-    initializer_range=0.02, then wrap it in a separately constructed default
-    nn.Linear input adapter. We mirror that split: backbone/head use the Llama
-    normal initialization and the shared Match-3 input projection keeps
-    PyTorch's default nn.Linear initialization.
-    """
+    """Match Hugging Face Llama initialization without touching input_proj."""
     with torch.no_grad():
         for module in model.backbone.modules():
             if isinstance(module, nn.Linear):
@@ -179,6 +160,7 @@ def create_model(
         d_input=d_input,
         hidden_size=model_cfg.hidden_size,
         vocab_size=model_cfg.vocab_size,
+        output_vocab_size=model_cfg.output_vocab_size,
         target_feature_indices=target_feature_indices,
         input_feature_dim=input_feature_dim,
     )
@@ -384,11 +366,7 @@ def _best_cot_diagnostics(
     ]
     best: Dict[str, Any] = {}
     for name in metric_names:
-        values = [
-            item[name]
-            for item in epoch_diagnostics
-            if item.get(name) is not None
-        ]
+        values = [item[name] for item in epoch_diagnostics if item.get(name) is not None]
         best[name] = max(values) if values else None
 
     nll_values = [
@@ -397,6 +375,17 @@ def _best_cot_diagnostics(
         if item.get("cot_result_nll") is not None
     ]
     best["cot_result_nll"] = min(nll_values) if nll_values else None
+    floor_values = [
+        item["cot_result_nll_floor"]
+        for item in epoch_diagnostics
+        if item.get("cot_result_nll_floor") is not None
+    ]
+    best["cot_result_nll_floor"] = floor_values[-1] if floor_values else None
+    if epoch_diagnostics:
+        best["cot_chance_baselines"] = epoch_diagnostics[-1].get(
+            "cot_chance_baselines", {}
+        )
+        best["cot_per_pair"] = epoch_diagnostics[-1].get("cot_per_pair", [])
     return best
 
 
@@ -411,8 +400,6 @@ def _make_lr_scheduler(
     warmup_steps = max(1, int(total_steps * train_cfg.warmup_fraction))
 
     def lr_lambda(step: int) -> float:
-        # Match the positive-control implementation's 1/20 warmup followed by
-        # linear decay toward zero, while remaining defined for tiny CI runs.
         if step <= warmup_steps:
             return step / warmup_steps
         return max(0.0, 1.0 - (step / total_steps))
@@ -442,8 +429,7 @@ def train_model(
     if -1 in (ans_token_id, ans_true_id, ans_false_id):
         raise ValueError(
             "Vocabulary must contain 'ANS', 'True', and 'False'. "
-            f"Found: ANS={ans_token_id}, True={ans_true_id}, "
-            f"False={ans_false_id}"
+            f"Found: ANS={ans_token_id}, True={ans_true_id}, False={ans_false_id}"
         )
 
     resolved_model_cfg = replace(model_cfg, vocab_size=len(vocab))
@@ -464,19 +450,12 @@ def train_model(
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
 
-    is_immediate = (task_cfg.num_filler == 0) or (
-        train_cfg.mixture == "immediate"
-    )
+    is_immediate = (task_cfg.num_filler == 0) or (train_cfg.mixture == "immediate")
     weight_decay = 0.1 if is_immediate else train_cfg.weight_decay
     grad_clip = 0.5 if is_immediate else train_cfg.grad_clip
     epochs = train_cfg.epochs * 5 if is_immediate else train_cfg.epochs
 
-    train_loader = _create_loader(
-        train_dataset,
-        train_cfg,
-        device,
-        shuffle=True,
-    )
+    train_loader = _create_loader(train_dataset, train_cfg, device, shuffle=True)
     filler_val_loader = _create_loader(
         filler_val_dataset,
         train_cfg,
@@ -515,20 +494,20 @@ def train_model(
         total_steps=total_optimizer_steps,
     )
     criterion = nn.CrossEntropyLoss(ignore_index=-100)
-    scaler = (
-        torch.amp.GradScaler("cuda")
-        if train_cfg.precision == "fp16"
-        else None
-    )
+    scaler = torch.amp.GradScaler("cuda") if train_cfg.precision == "fp16" else None
 
     non_blocking = _transfer_non_blocking(train_cfg, device)
     epoch_train_losses: list[float] = []
     epoch_online_train_answer_accuracies: list[float] = []
+    epoch_online_train_answer_accuracies_by_format: list[Dict[str, float | None]] = []
     epoch_filler_accuracies: list[float] = []
     epoch_cot_diagnostics: list[Dict[str, Any]] = []
     epoch_end_learning_rates: list[float] = []
     best_filler_acc = 0.0
     best_online_train_answer_acc = 0.0
+    best_online_train_answer_by_format: Dict[str, float | None] = {
+        name: None for name in FORMAT_NAMES
+    }
 
     epoch_times: list[float] = []
     data_wait = 0.0
@@ -541,30 +520,23 @@ def train_model(
         t_last = time.perf_counter()
         loss_sum = torch.zeros((), device=device, dtype=torch.float64)
         loss_count = 0
-        train_answer_correct = torch.zeros(
-            (),
-            device=device,
-            dtype=torch.int64,
-        )
+        train_answer_correct = torch.zeros((), device=device, dtype=torch.int64)
         train_answer_count = 0
+        train_correct_by_format = torch.zeros(
+            len(FORMAT_NAMES), device=device, dtype=torch.int64
+        )
+        train_count_by_format = torch.zeros(
+            len(FORMAT_NAMES), device=device, dtype=torch.int64
+        )
 
         for batch in train_loader:
             data_wait += time.perf_counter() - t_last
-            input_tuples = batch["input_tuples"].to(
-                device,
-                non_blocking=non_blocking,
-            )
-            targets = batch["targets"].to(
-                device,
-                non_blocking=non_blocking,
-            )
-            loss_mask = batch["loss_mask"].to(
-                device,
-                non_blocking=non_blocking,
-            )
-            has_3sum = batch["has_3sum"].to(
-                device,
-                non_blocking=non_blocking,
+            input_tuples = batch["input_tuples"].to(device, non_blocking=non_blocking)
+            targets = batch["targets"].to(device, non_blocking=non_blocking)
+            loss_mask = batch["loss_mask"].to(device, non_blocking=non_blocking)
+            has_3sum = batch["has_3sum"].to(device, non_blocking=non_blocking)
+            format_codes = batch["format_code"].to(
+                device, dtype=torch.long, non_blocking=non_blocking
             )
 
             optimizer.zero_grad(set_to_none=True)
@@ -572,25 +544,29 @@ def train_model(
                 loss_logits = model.loss_logits(input_tuples, targets)
                 shift_targets = loss_mask[:, 1:].reshape(-1)
                 loss = criterion(
-                    loss_logits.reshape(-1, loss_logits.size(-1)),
-                    shift_targets,
+                    loss_logits.reshape(-1, loss_logits.size(-1)), shift_targets
                 )
 
             with torch.no_grad():
                 answer_predictions = _answer_predictions_from_loss_logits(
-                    loss_logits,
-                    targets,
-                    ans_token_id,
+                    loss_logits, targets, ans_token_id
                 )
                 expected_answers = torch.where(
                     has_3sum,
                     torch.full_like(answer_predictions, ans_true_id),
                     torch.full_like(answer_predictions, ans_false_id),
                 )
-                train_answer_correct.add_(
-                    answer_predictions.eq(expected_answers).sum()
-                )
+                answer_correct = answer_predictions.eq(expected_answers)
+                train_answer_correct.add_(answer_correct.sum())
                 train_answer_count += targets.shape[0]
+                train_count_by_format.scatter_add_(
+                    0,
+                    format_codes,
+                    torch.ones_like(format_codes, dtype=torch.int64),
+                )
+                train_correct_by_format.scatter_add_(
+                    0, format_codes, answer_correct.to(torch.int64)
+                )
 
             if scaler is not None:
                 scaler.scale(loss).backward()
@@ -612,19 +588,31 @@ def train_model(
 
         _sync_cuda(device)
         epoch_times.append(time.perf_counter() - t_epoch)
-        epoch_train_losses.append(
-            (loss_sum / loss_count).item() if loss_count else 0.0
-        )
+        epoch_train_losses.append((loss_sum / loss_count).item() if loss_count else 0.0)
         train_answer_acc = (
             int(train_answer_correct.item()) / train_answer_count
             if train_answer_count
             else 0.0
         )
         epoch_online_train_answer_accuracies.append(train_answer_acc)
-        best_online_train_answer_acc = max(
-            best_online_train_answer_acc,
-            train_answer_acc,
-        )
+        best_online_train_answer_acc = max(best_online_train_answer_acc, train_answer_acc)
+
+        format_correct = train_correct_by_format.cpu().tolist()
+        format_count = train_count_by_format.cpu().tolist()
+        format_accuracies: Dict[str, float | None] = {}
+        for index, name in enumerate(FORMAT_NAMES):
+            accuracy = (
+                format_correct[index] / format_count[index]
+                if format_count[index]
+                else None
+            )
+            format_accuracies[name] = accuracy
+            if accuracy is not None:
+                prior = best_online_train_answer_by_format[name]
+                best_online_train_answer_by_format[name] = (
+                    accuracy if prior is None else max(prior, accuracy)
+                )
+        epoch_online_train_answer_accuracies_by_format.append(format_accuracies)
         epoch_end_learning_rates.append(float(optimizer.param_groups[0]["lr"]))
 
         filler_acc = evaluate_accuracy(
@@ -648,6 +636,8 @@ def train_model(
                 ans_token_id,
                 ans_true_id,
                 ans_false_id,
+                task_length=task_cfg.length,
+                task_mod=task_cfg.mod,
                 precision=train_cfg.precision,
                 non_blocking=non_blocking,
             )
@@ -659,10 +649,17 @@ def train_model(
         cuda_peak_allocated = torch.cuda.max_memory_allocated(device)
         cuda_peak_reserved = torch.cuda.max_memory_reserved(device)
 
+    total_train_seconds = sum(epoch_times)
     history: Dict[str, Any] = {
         "epoch_train_losses": epoch_train_losses,
         "epoch_online_train_answer_accuracies": epoch_online_train_answer_accuracies,
+        "epoch_online_train_answer_accuracies_by_format": (
+            epoch_online_train_answer_accuracies_by_format
+        ),
         "best_online_train_answer_accuracy": best_online_train_answer_acc,
+        "best_online_train_answer_accuracy_by_format": (
+            best_online_train_answer_by_format
+        ),
         "epoch_filler_accuracies": epoch_filler_accuracies,
         "epoch_val_accuracies": epoch_filler_accuracies,
         "best_filler_accuracy": best_filler_acc,
@@ -676,11 +673,13 @@ def train_model(
         "optimizer_steps": optimizer_steps,
         "epoch_end_learning_rates": epoch_end_learning_rates,
         "epoch_seconds": epoch_times,
-        "total_train_seconds": sum(epoch_times),
+        "total_train_seconds": total_train_seconds,
         "data_wait_seconds": data_wait,
+        "data_wait_fraction": data_wait / max(total_train_seconds, 1e-9),
         "samples_per_second": (len(train_dataset) * epochs)
-        / max(sum(epoch_times), 1e-9),
+        / max(total_train_seconds, 1e-9),
         "resolved_vocab_size": len(vocab),
+        "output_vocab_size": model.output_vocab_size,
         "input_feature_dim": model.input_feature_dim,
         "compact_reduced_input_features": compact_reduced_features,
         "precision": train_cfg.precision,
@@ -690,14 +689,10 @@ def train_model(
         "validation_result_syncs_per_pass": 1 if device.type == "cuda" else 0,
         "non_blocking_transfers": non_blocking,
         "train_dataset_storage_bytes": getattr(
-            train_dataset,
-            "packed_storage_nbytes",
-            None,
+            train_dataset, "packed_storage_nbytes", None
         ),
         "validation_dataset_storage_bytes": getattr(
-            filler_val_dataset,
-            "packed_storage_nbytes",
-            None,
+            filler_val_dataset, "packed_storage_nbytes", None
         ),
         "cuda_peak_memory_allocated_bytes": cuda_peak_allocated,
         "cuda_peak_memory_reserved_bytes": cuda_peak_reserved,

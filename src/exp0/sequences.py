@@ -4,7 +4,7 @@ import random
 import string
 from typing import List, Optional
 
-from exp0.task3sum import Instance3Sum
+from exp0.task3sum import Instance3Sum, matching_k_after_pair
 
 
 def get_token_labels(n: int) -> List[str]:
@@ -36,51 +36,36 @@ def format_a_parallel_cot(
     vocab_reduction: bool = True,
     rng: Optional[random.Random] = None,
 ) -> str:
-    """Format A: Parallelizable CoT.
+    """Format A: source-faithful parallelizable CoT.
 
-    Lexicographic order of all pairs (i, j) with i < j.
-    For pair (i, j), if (x_i + x_j + x_k) % mod == 0 for some k distinct from i, j:
-       write label(i) label(j) label(k) [or reduced: label(i)/label(j) + label(k)]
-    Else write pair intermediate token / sum coordinate.
+    Pairs are enumerated lexicographically as ``i < j``. Matching third tuples
+    are searched only in the suffix ``k > j``, matching the published Match-3
+    dense solver. Thus a solution triple ``i < j < k`` is exposed exactly once,
+    at pair ``(i, j)``, instead of redundantly through all three unordered pairs.
     """
     if rng is None:
         rng = random.Random()
 
     n = len(instance.tuples)
-    d = len(instance.tuples[0])
     labels = get_token_labels(n)
     prefix = format_inputs(instance)
-
-    # Map from tuple value -> list of indices
-    val_to_indices = {}
-    for idx, tup in enumerate(instance.tuples):
-        val_to_indices.setdefault(tup, []).append(idx)
-
     cot_tokens = []
 
     for i in range(n):
         for j in range(i + 1, n):
-            # Compute sum of i and j
-            sum_ij = tuple((instance.tuples[i][dim] + instance.tuples[j][dim]) % mod for dim in range(d))
-            target_k_val = tuple((-sum_ij[dim]) % mod for dim in range(d))
-
-            # Check if target_k_val exists at any k distinct from i and j
-            matching_k = None
-            if target_k_val in val_to_indices:
-                for k in val_to_indices[target_k_val]:
-                    if k != i and k != j:
-                        matching_k = k
-                        break
+            sum_ij, matching_k = matching_k_after_pair(
+                instance.tuples,
+                i,
+                j,
+                mod=mod,
+            )
 
             if vocab_reduction:
-                # Vocab reduction: randomly pick one coordinate digit from sum_ij and single label char
-                first_char = labels[i]
-                second_char = labels[j]
-                pair_label = first_char if rng.random() < 0.5 else second_char
-                sum_digit = str(rng.choice(sum_ij))
+                pair_label = labels[i] if rng.random() < 0.5 else labels[j]
                 if matching_k is not None:
                     cot_tokens.append(f"{pair_label} {labels[matching_k]}")
                 else:
+                    sum_digit = str(rng.choice(sum_ij))
                     cot_tokens.append(f"{pair_label} {sum_digit}")
             else:
                 pair_label = f"{labels[i]}{labels[j]}"
@@ -124,7 +109,6 @@ def format_d_serial_cot(instance: Instance3Sum, mod: int = 10) -> str:
     labels = get_token_labels(n)
 
     cot_tokens = []
-    # For each digit dim, check 1-D 3sum
     for dim in range(d):
         cot_tokens.append(f"DIM {dim}")
         for i in range(n):
@@ -139,8 +123,12 @@ def format_d_serial_cot(instance: Instance3Sum, mod: int = 10) -> str:
     return prefix + " ".join(cot_tokens) + " " + ans_str
 
 
-def format_e_neutral(instance: Instance3Sum, num_filler: Optional[int] = None, neutral_token: str = "#") -> str:
-    """Format E: Neutral token arm (replaces '.' with neutral_token, e.g. '#')."""
+def format_e_neutral(
+    instance: Instance3Sum,
+    num_filler: Optional[int] = None,
+    neutral_token: str = "#",
+) -> str:
+    """Format E: Neutral token arm (replaces '.' with neutral_token)."""
     n = len(instance.tuples)
     if num_filler is None:
         num_filler = n * n
