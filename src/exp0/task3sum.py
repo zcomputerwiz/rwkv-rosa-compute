@@ -23,13 +23,7 @@ def check_3sum(
     tuples: List[Tuple[int, ...]],
     mod: int = 10,
 ) -> Tuple[bool, Optional[Tuple[int, int, int]]]:
-    """Return the first matching triple using exact legacy search ordering.
-
-    The legacy implementation scanned ``i``, then ``j``, then every possible
-    ``k``. This version preserves that ordering while replacing the innermost
-    full scan with a tuple-value index, reducing the common search cost from
-    O(n^3) to O(n^2) lookups plus duplicate-value checks.
-    """
+    """Return the first matching triple using exact legacy search ordering."""
     n = len(tuples)
     d = len(tuples[0])
 
@@ -56,13 +50,7 @@ def matching_k_after_pair(
     j: int,
     mod: int = 10,
 ) -> tuple[Tuple[int, ...], Optional[int]]:
-    """Return pair sum and first source-faithful matching ``k > j``.
-
-    Jacob Pfau's Match-3 dense solver enumerates ``i < j`` and searches only
-    the suffix after the second summand. A solution triple ``i < j < k`` is
-    therefore exposed exactly once in the parallel CoT instead of once for
-    each of its three unordered pairs.
-    """
+    """Return pair sum and first source-faithful matching ``k > j``."""
     dimension = len(tuples[0])
     sum_ij = tuple(
         (tuples[i][dim] + tuples[j][dim]) % mod
@@ -134,6 +122,29 @@ def _capped_geometric(
     return value
 
 
+def _apply_source_corruption(
+    tuples: List[Tuple[int, ...]],
+    corruptions: int,
+    dimension: int,
+    mod: int,
+    rng: random.Random,
+) -> List[Tuple[int, ...]]:
+    """Mirror the source NumPy advanced-index corruption semantics.
+
+    The published code assigns ``inputs[:corruptions, columns] = values``.
+    Because ``columns`` is an advanced index, every selected column is changed
+    across every one of the first ``corruptions`` rows; the value vector is
+    broadcast across rows. Repeated columns are resolved by later assignments.
+    """
+    mutable = [list(value) for value in tuples]
+    columns = [rng.randrange(dimension) for _ in range(corruptions)]
+    values = [rng.randrange(mod) for _ in range(corruptions)]
+    for column, value in zip(columns, values):
+        for row in range(corruptions):
+            mutable[row][column] = value
+    return [tuple(value) for value in mutable]
+
+
 def generate_source_instance(
     length: int = 12,
     dimension: int = 3,
@@ -142,14 +153,14 @@ def generate_source_instance(
     rng: Optional[random.Random] = None,
     corruption_rate: float = DEFAULT_CORRUPTION_RATE,
 ) -> Instance3Sum:
-    """Generate from the published positive-control distribution.
+    """Generate from the published positive-control construction.
 
     Positive examples plant a valid triple, append random tuples, and shuffle.
-    Negative examples begin from the same planted construction, corrupt the
-    first 1--3 planted rows according to the source geometric rule, append the
-    remaining random tuples, shuffle, and reject/resample if any solution
-    remains. This mirrors ``JacobPfau/fillerTokens`` structurally while using
-    the caller's deterministic ``random.Random`` stream.
+    Negative examples begin from the same planted construction, apply the
+    source geometric corruption rule to the planted rows, shuffle, and
+    reject/resample if any solution remains. The rejection preserves this
+    harness's explicit ``target_has_3sum=False`` contract while matching the
+    source construction and corruption distribution.
     """
     _validate_generation_args(length, dimension, mod, corruption_rate)
     if rng is None:
@@ -173,12 +184,14 @@ def generate_source_instance(
     success_probability = 1.0 / corruption_rate
     for _ in range(max_attempts):
         planted = _source_planted_tuples(length, dimension, mod, rng)
-        mutable = [list(value) for value in planted]
         corruptions = _capped_geometric(success_probability, 3, rng)
-        for row in range(corruptions):
-            column = rng.randrange(dimension)
-            mutable[row][column] = rng.randrange(mod)
-        tuples = [tuple(value) for value in mutable]
+        tuples = _apply_source_corruption(
+            planted,
+            corruptions,
+            dimension,
+            mod,
+            rng,
+        )
         rng.shuffle(tuples)
 
         has_sol, _ = check_3sum(tuples, mod=mod)
@@ -220,10 +233,7 @@ def generate_uniform_conditioned_instance(
     if target_has_3sum:
         for _ in range(max_attempts):
             i, j, k = sorted(rng.sample(range(length), 3))
-            tuples = [
-                _random_tuple(dimension, mod, rng)
-                for _ in range(length)
-            ]
+            tuples = [_random_tuple(dimension, mod, rng) for _ in range(length)]
             target_k = tuple(
                 (-tuples[i][d] - tuples[j][d]) % mod
                 for d in range(dimension)
@@ -242,10 +252,7 @@ def generate_uniform_conditioned_instance(
         )
 
     for _ in range(max_attempts):
-        tuples = [
-            _random_tuple(dimension, mod, rng)
-            for _ in range(length)
-        ]
+        tuples = [_random_tuple(dimension, mod, rng) for _ in range(length)]
         has_sol, indices = check_3sum(tuples, mod=mod)
         if not has_sol:
             return Instance3Sum(
