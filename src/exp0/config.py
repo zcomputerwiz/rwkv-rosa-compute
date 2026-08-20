@@ -32,6 +32,8 @@ class Task3SumConfig:
                 f"Modulus other than 10 is not supported in Experiment 0, "
                 f"got mod={self.mod}"
             )
+        if not 0.0 <= self.true_rate <= 1.0:
+            raise ValueError("true_rate must be in [0, 1].")
         if not self.include_separator_token:
             raise ValueError(
                 "Experiment 0 requires the supervised continuation separator. "
