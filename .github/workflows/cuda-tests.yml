@@ -35,7 +35,12 @@ jobs:
           # rwkv7_fused_cuda test fails with "Ninja is required to load C++
           # extensions".
           pip install -e ".[cuda]"
-          cd external/rosa_soft && USE_CUDA=1 pip install -e .
+          # --no-build-isolation because the native build compiles against the
+          # PyTorch ABI of this environment, so it must see the torch installed
+          # above; rosa_soft's own pyproject.toml says as much. --no-deps
+          # because rosa_soft pins torch>=2.11,<2.12, and resolving that
+          # downgrades the torch this job just installed.
+          cd external/rosa_soft && USE_CUDA=1 pip install -e . --no-deps --no-build-isolation
 
       - name: Verify CUDA Extension Capabilities
         run: |
