@@ -3,6 +3,7 @@
 import random
 
 import pytest
+import torch
 
 import exp0.generation as generation
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
@@ -106,8 +107,10 @@ def test_protocol_generation_samples_construction_vector_before_tuple_contents(
     seed = 4321
     count = 40
     true_rate = 0.3
-    expected_rng = random.Random(seed)
-    expected_arms = [expected_rng.random() < true_rate for _ in range(count)]
+    master = random.Random(seed)
+    construction_rng = random.Random(master.getrandbits(128))
+    _tuple_seed = master.getrandbits(128)
+    expected_arms = [construction_rng.random() < true_rate for _ in range(count)]
     seen_arms = []
 
     def fake_generate_instance(
@@ -135,6 +138,27 @@ def test_protocol_generation_samples_construction_vector_before_tuple_contents(
     )
 
     assert seen_arms == expected_arms
+
+
+def test_protocol_generation_has_dataset_size_stable_common_prefix():
+    small = generation.generate_protocol_packed_instances(
+        8,
+        length=6,
+        dimension=3,
+        rng=random.Random(90210),
+        generator_mode=SOURCE_GENERATOR,
+    )
+    large = generation.generate_protocol_packed_instances(
+        12,
+        length=6,
+        dimension=3,
+        rng=random.Random(90210),
+        generator_mode=SOURCE_GENERATOR,
+    )
+
+    assert torch.equal(small.tuples, large.tuples[:8])
+    assert torch.equal(small.has_3sum, large.has_3sum[:8])
+    assert torch.equal(small.matching_indices, large.matching_indices[:8])
 
 
 def test_legacy_generator_remains_explicitly_available():
