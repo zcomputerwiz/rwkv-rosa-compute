@@ -7,6 +7,7 @@ import torch.nn as nn
 
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
 from exp0.dataset import Task3SumDataset
+from exp0.evaluate import compile_experiment_report
 from exp0.task3sum import generate_instance
 from exp0.train import evaluate_accuracy, train_model
 
@@ -281,6 +282,23 @@ def test_early_stop_target_resolution():
     assert not early_stop_reached(off_cfg, 1.0, 1.0)
 
 
+def test_early_stop_configuration_rejects_ambiguous_or_nonfinite_values():
+    with pytest.raises(ValueError, match="early_stop_target requires"):
+        TrainConfig(early_stop_target=0.9)
+
+    for value in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="early_stop_target must be finite"):
+            TrainConfig(
+                early_stop_metric="filler_accuracy",
+                early_stop_target=value,
+            )
+        with pytest.raises(ValueError, match="early_stop_tolerance must be finite"):
+            TrainConfig(
+                early_stop_metric="filler_accuracy",
+                early_stop_tolerance=value,
+            )
+
+
 def test_early_stopping_does_not_change_fixed_budget_run_id():
     from exp0.evaluate import canonical_run_config
 
@@ -343,8 +361,10 @@ def test_train_model_stops_early_and_reports_the_shortfall():
     assert history["epochs_requested"] == 3
     assert len(history["epoch_filler_accuracies"]) == 1
     early_stopping = history["early_stopping"]
+    assert early_stopping["criterion_reached"] is True
+    assert early_stopping["criterion_reached_after_epoch"] == 1
     assert early_stopping["triggered"] is True
-    assert early_stopping["stopped_after_epoch"] == 0
+    assert early_stopping["stopped_after_epoch"] == 1
     assert early_stopping["target"] == 0.0
 
     # Patience 2 needs a second qualifying epoch before it stops.
@@ -352,8 +372,53 @@ def test_train_model_stops_early_and_reports_the_shortfall():
     _, patient_history = train_model(
         model_cfg, patient_cfg, task_cfg, train_ds, val_ds
     )
+    patient_stop = patient_history["early_stopping"]
     assert patient_history["epochs_trained"] == 2
-    assert patient_history["early_stopping"]["stopped_after_epoch"] == 1
+    assert patient_stop["criterion_reached_after_epoch"] == 2
+    assert patient_stop["stopped_after_epoch"] == 2
+
+
+def test_criterion_reached_on_final_epoch_remains_fixed_budget():
+    task_cfg, model_cfg, train_cfg = get_tiny_configs()
+    train_cfg = replace(
+        train_cfg,
+        epochs=1,
+        early_stop_metric="filler_accuracy",
+        early_stop_target=0.0,
+    )
+    train_instances = _generate_instances(task_cfg, seed=600)
+    val_instances = _generate_instances(task_cfg, seed=601)
+    train_ds = Task3SumDataset(
+        train_instances,
+        vocab_reduction=task_cfg.vocab_reduction,
+    )
+    val_ds = Task3SumDataset(
+        val_instances,
+        format_type="filler",
+        vocab=train_ds.vocab,
+        vocab_reduction=task_cfg.vocab_reduction,
+    )
+
+    _, history = train_model(model_cfg, train_cfg, task_cfg, train_ds, val_ds)
+    early_stopping = history["early_stopping"]
+    assert history["epochs_trained"] == history["epochs_requested"] == 1
+    assert early_stopping["criterion_reached"] is True
+    assert early_stopping["criterion_reached_after_epoch"] == 1
+    assert early_stopping["triggered"] is False
+    assert early_stopping["stopped_after_epoch"] is None
+
+    history["seed"] = 42
+    report = compile_experiment_report(
+        model_cfg,
+        train_cfg,
+        task_cfg,
+        [history],
+        majority_class_baseline=0.5,
+        realized_mixture_counts=dict(train_ds.realized_counts),
+        eval_seed=9999,
+        val_samples=len(val_ds),
+    )
+    assert report["metrics"]["fixed_budget_run"] is True
 
 
 def test_fixed_budget_run_reports_no_early_stop():
@@ -376,4 +441,5 @@ def test_fixed_budget_run_reports_no_early_stop():
     assert history["epochs_trained"] == train_cfg.epochs
     assert history["epochs_requested"] == train_cfg.epochs
     assert history["early_stopping"]["enabled"] is False
+    assert history["early_stopping"]["criterion_reached"] is False
     assert history["early_stopping"]["triggered"] is False
