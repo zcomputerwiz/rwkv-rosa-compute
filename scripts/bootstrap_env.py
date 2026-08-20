@@ -155,6 +155,27 @@ def resolve_torch_index(args: argparse.Namespace) -> str | None:
     return None
 
 
+def torch_install_uses_cuda(args: argparse.Namespace, index: str | None) -> bool:
+    """Whether the resolved Torch source should get CUDA extension build tools.
+
+    --torch-index overrides --cpu when selecting Torch, so the editable project's
+    [cuda] extra must follow the resolved source rather than args.cpu directly.
+    An explicit non-CPU custom index is treated as CUDA-capable; the only cost of
+    a false positive is installing ninja.
+    """
+    if index is not None:
+        normalized = index.rstrip("/").lower()
+        if normalized == CPU_INDEX.rstrip("/").lower() or normalized.endswith(
+            "/cpu"
+        ):
+            return False
+        return True
+    if args.cpu:
+        return False
+    # Default Linux PyPI wheels include CUDA; default macOS wheels do not.
+    return platform.system() == "Linux"
+
+
 def install(py: Path, args: argparse.Namespace) -> None:
     run([str(py), "-m", "pip", "install", "--upgrade", "pip"])
 
@@ -174,13 +195,25 @@ def install(py: Path, args: argparse.Namespace) -> None:
             "and rerun with --torch-index <url>, or use --cpu for a CPU-only setup."
         ) from None
 
-    run([str(py), "-m", "pip", "install", "-r", str(REPO_ROOT / "requirements-dev.txt")])
+    run(
+        [
+            str(py),
+            "-m",
+            "pip",
+            "install",
+            "-r",
+            str(REPO_ROOT / "requirements-dev.txt"),
+        ]
+    )
 
     # The [cuda] extra is just ninja, but without it torch.utils.cpp_extension
-    # cannot JIT-build the fused RWKV-7 recurrence kernel and every
-    # rwkv7_fused_cuda test fails with "Ninja is required to load C++
-    # extensions". A CPU-only environment never builds an extension.
-    editable_target = str(REPO_ROOT) if args.cpu else f"{REPO_ROOT}[cuda]"
+    # cannot JIT-build the fused RWKV-7 recurrence kernel. Follow the resolved
+    # Torch source, because an explicit --torch-index overrides --cpu.
+    editable_target = (
+        f"{REPO_ROOT}[cuda]"
+        if torch_install_uses_cuda(args, index)
+        else str(REPO_ROOT)
+    )
     run([str(py), "-m", "pip", "install", "-e", editable_target])
 
 
@@ -319,8 +352,10 @@ def print_next_steps(py: Path, pairs: list[tuple[str, str]]) -> None:
     if not pairs:
         print()
         print("  To persist one across sessions:")
-        print("    python scripts/bootstrap_env.py --check "
-              "--persist-env ROSA_MODEL_PATH=/path/to/model.pth")
+        print(
+            "    python scripts/bootstrap_env.py --check "
+            "--persist-env ROSA_MODEL_PATH=/path/to/model.pth"
+        )
 
 
 def main() -> int:
@@ -336,8 +371,11 @@ def main() -> int:
     parser.add_argument(
         "--torch-index",
         default=None,
-        help="Explicit --index-url for torch (e.g. a different CUDA build). "
-             "Overrides platform defaults and --cpu.",
+        help=(
+            "Explicit --index-url for torch (e.g. a different CUDA build). "
+            "Overrides platform defaults and --cpu; CUDA build tools follow "
+            "the resolved index."
+        ),
     )
     parser.add_argument(
         "--no-venv",
@@ -356,7 +394,7 @@ def main() -> int:
         default=[],
         metavar="KEY=VALUE",
         help="Write KEY=VALUE into the venv activation scripts so it is set on "
-             "every activation. Repeatable. Idempotent.",
+        "every activation. Repeatable. Idempotent.",
     )
     args = parser.parse_args()
 
