@@ -17,6 +17,11 @@
     .github/workflows/cuda-tests.yml, with the same EXP0_REQUIRE_RWKV_CUDA=1
     that turns a missing CUDA toolkit into a failure instead of a skip.
 
+    Visual Studio 2022 (17.x) is the validated Windows host-toolchain family for
+    this repository. vswhere still selects the latest installed C++ toolchain;
+    if that is a newer/older Visual Studio family, the script warns but proceeds
+    so compatible future toolchains are not artificially blocked.
+
     It does not install anything. Use scripts/bootstrap_env.py for that.
 
 .PARAMETER Cold
@@ -72,14 +77,38 @@ Build Tools" with the "Desktop development with C++" workload, then rerun.
 "@
 }
 
-$vsPath = & $vswhere -latest -products * `
-    -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-    -property installationPath
+$vswhereArgs = @(
+    "-latest",
+    "-products", "*",
+    "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
+)
+$vsPath = & $vswhere @vswhereArgs -property installationPath
 if (-not $vsPath) {
     throw @"
 Visual Studio is installed but without the C++ toolset. Add the
 "Desktop development with C++" workload in the Visual Studio Installer.
 "@
+}
+
+$vsVersion = & $vswhere @vswhereArgs -property installationVersion
+$validatedVsMajor = 17  # Visual Studio 2022; locally validated with CUDA 12.9.
+if ($vsVersion) {
+    try {
+        $selectedVsMajor = ([version]$vsVersion).Major
+        if ($selectedVsMajor -ne $validatedVsMajor) {
+            Write-Warning @"
+vswhere selected Visual Studio $vsVersion at:
+  $vsPath
+This repository has validated the Windows CUDA extension build with Visual
+Studio 2022 (17.x). This toolchain may still work, so the test run will continue;
+interpret compiler/build failures as a possible host-toolchain compatibility issue.
+"@
+        }
+    } catch {
+        Write-Warning "Could not parse Visual Studio installationVersion '$vsVersion'; continuing with the selected toolchain."
+    }
+} else {
+    Write-Warning "vswhere did not report a Visual Studio version; continuing with $vsPath."
 }
 
 $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
@@ -111,6 +140,7 @@ function Show-Tool {
 }
 
 Write-Host "Toolchain:"
+Write-Host ("  {0,-9}: {1}" -f "VS", "$vsVersion  $vsPath")
 Show-Tool "cl.exe" "cl"
 Show-Tool "nvcc" "nvcc"
 Show-Tool "ninja" "ninja"
