@@ -256,6 +256,25 @@ def compile_experiment_report(
             f"expected {model_dict['vocab_size']}, got {sorted(resolved_vocab_sizes)}."
         )
 
+    expected_output_vocab_size = (
+        model_dict["output_vocab_size"]
+        if model_dict["output_vocab_size"] is not None
+        else model_dict["vocab_size"]
+    )
+    reported_output_vocab_sizes = {
+        result["output_vocab_size"]
+        for result in per_seed_results
+        if "output_vocab_size" in result
+    }
+    if reported_output_vocab_sizes and reported_output_vocab_sizes != {
+        expected_output_vocab_size
+    }:
+        raise ValueError(
+            "Training/report output head resolution disagrees across seeds: "
+            f"expected {expected_output_vocab_size}, "
+            f"got {sorted(reported_output_vocab_sizes)}."
+        )
+
     seeds_run = [res["seed"] for res in per_seed_results]
     run_config = canonical_run_config(
         model_cfg,
