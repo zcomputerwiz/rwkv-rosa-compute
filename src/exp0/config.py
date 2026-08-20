@@ -126,17 +126,20 @@ EARLY_STOP_FIELDS = (
 )
 
 
-def drop_disabled_early_stop_fields(train_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """Strip early-stopping keys from a TrainConfig dict when the feature is off.
+def drop_identity_neutral_fields(train_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip protocol options from a TrainConfig dict when they are at default.
 
-    A disabled feature must not change the fingerprint of runs that do not use
-    it, otherwise adding the option invalidates every existing run_id and every
-    checkpoint written before it. With the feature off the run is fixed-budget
-    and its identity is the same as before these fields existed.
+    A feature left at its default must not change the fingerprint of runs that
+    do not use it, otherwise adding the option invalidates every existing run_id
+    and every checkpoint written before it. A run with early stopping off and
+    the immediate-answer protocol enabled behaves exactly as it did before
+    either option existed, so its identity must match too.
     """
     if train_dict.get("early_stop_metric", "none") == "none":
         for key in EARLY_STOP_FIELDS:
             train_dict.pop(key, None)
+    if train_dict.get("immediate_protocol", True):
+        train_dict.pop("immediate_protocol", None)
     return train_dict
 
 
@@ -174,6 +177,13 @@ class TrainConfig:
     early_stop_target: Optional[float] = None
     early_stop_tolerance: float = 0.0
     early_stop_patience: int = 1
+    # The published immediate-answer protocol multiplies epochs and substitutes
+    # its own weight decay and gradient clip whenever num_filler is 0 or the
+    # mixture is "immediate". Leave this True to reproduce the source protocol.
+    # Set it False to hold epochs, weight decay, and gradient clip exactly as
+    # requested, which is what an N=0 arm needs to be compute-matched against an
+    # N>0 arm. Doing so is a different protocol and changes the run_id.
+    immediate_protocol: bool = True
 
     def __post_init__(self):
         format_ratios = {

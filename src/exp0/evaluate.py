@@ -9,7 +9,7 @@ from exp0.config import (
     ModelConfig,
     Task3SumConfig,
     TrainConfig,
-    drop_disabled_early_stop_fields,
+    drop_identity_neutral_fields,
 )
 from exp0.dataset import FORMAT_NAMES, build_default_vocab
 
@@ -41,7 +41,7 @@ def canonical_run_config(
     model_dict = _resolved_model_dict(model_cfg, task_cfg)
     model_dict.pop("rwkv_checkpoint", None)
 
-    train_dict = drop_disabled_early_stop_fields(asdict(train_cfg))
+    train_dict = drop_identity_neutral_fields(asdict(train_cfg))
     train_dict.pop("seed", None)
 
     task_dict = asdict(task_cfg)
@@ -430,7 +430,10 @@ def compile_experiment_report(
                 "which fires when num_filler is 0 or the mixture is "
                 "'immediate'. It multiplies the requested epochs and replaces "
                 "weight decay and gradient clip, so each value is reported both "
-                "as requested and as it actually ran."
+                "as requested and as it actually ran. enabled is false when the "
+                "run was launched with --no-immediate_protocol; in that case "
+                "suppressed_trigger names the condition the run met but did not "
+                "act on."
             ),
             "immediate_protocol_applied_any_seed": (
                 "True when at least one seed ran under the immediate-answer "

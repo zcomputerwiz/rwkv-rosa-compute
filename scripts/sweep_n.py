@@ -20,6 +20,7 @@ from exp0.task3sum import (
     GENERATOR_MODES,
     SOURCE_GENERATOR,
 )
+from exp0.train import IMMEDIATE_PROTOCOL_EPOCH_MULTIPLIER
 
 N_VALUES = [0, 1, 2, 4, 8, 16, 32]
 
@@ -109,6 +110,11 @@ def build_runner_command(
     )
     cmd.append("--pin_memory" if args.pin_memory else "--no-pin_memory")
     cmd.append("--fused_adamw" if args.fused_adamw else "--no-fused_adamw")
+    cmd.append(
+        "--immediate_protocol"
+        if args.immediate_protocol
+        else "--no-immediate_protocol"
+    )
     return cmd
 
 
@@ -140,6 +146,10 @@ def canonical_sweep_config(args: argparse.Namespace) -> dict:
     config["seeds"] = sorted(config["seeds"])
     config["n_values"] = N_VALUES
     config["fixed_protocol"] = _fixed_positive_control_protocol()
+    # An option left at its default must not change the fingerprint of sweeps
+    # that predate it, exactly as for run identity in exp0.config.
+    if config.get("immediate_protocol", True):
+        config.pop("immediate_protocol", None)
     return config
 
 
@@ -232,6 +242,17 @@ def get_parser() -> argparse.ArgumentParser:
         choices=["fp32", "bf16", "fp16"],
     )
     parser.add_argument(
+        "--immediate_protocol",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Apply the published immediate-answer protocol to the N=0 arm: five "
+            "times the requested epochs, weight decay 0.1, grad clip 0.5. Pass "
+            "--no-immediate_protocol to hold every arm of the sweep at the same "
+            "epoch budget and optimizer settings."
+        ),
+    )
+    parser.add_argument(
         "--fused_adamw",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -258,6 +279,15 @@ def main():
     sweep_id = compute_sweep_id(args)
     sweep_root = out_dir / f"{args.architecture}_{sweep_id}"
     sweep_root.mkdir(parents=True, exist_ok=True)
+
+    if args.immediate_protocol and 0 in N_VALUES:
+        print(
+            "WARNING: N=0 runs under the immediate-answer protocol, which trains "
+            f"{IMMEDIATE_PROTOCOL_EPOCH_MULTIPLIER}x the requested "
+            "epochs under a different weight decay and gradient clip. The N=0 "
+            "point is therefore not compute-matched to the rest of this sweep. "
+            "Pass --no-immediate_protocol for a matched curve."
+        )
 
     results = []
 

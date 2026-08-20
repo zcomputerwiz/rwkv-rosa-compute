@@ -30,7 +30,7 @@ from exp0.config import (
     ModelConfig,
     Task3SumConfig,
     TrainConfig,
-    drop_disabled_early_stop_fields,
+    drop_identity_neutral_fields,
 )
 from exp0.dataset import FORMAT_NAMES, Task3SumDataset, pad_collate_fn
 from exp0.diagnostics import evaluate_cot_diagnostics
@@ -588,7 +588,7 @@ def _checkpoint_signature(
     return {
         "run_id": checkpoint_run_id,
         "model": model_signature,
-        "training": drop_disabled_early_stop_fields(asdict(train_cfg)),
+        "training": drop_identity_neutral_fields(asdict(train_cfg)),
         "task": asdict(task_cfg),
         "train_dataset_size": len(train_dataset),
         "realized_format_counts": dict(train_dataset.realized_counts),
@@ -784,7 +784,14 @@ def train_model(
     # overridden value is therefore reported both ways below; see
     # IMMEDIATE_PROTOCOL_EPOCH_MULTIPLIER and the "immediate_protocol" history
     # block.
-    is_immediate = (task_cfg.num_filler == 0) or (train_cfg.mixture == "immediate")
+    immediate_trigger = (
+        "num_filler == 0"
+        if task_cfg.num_filler == 0
+        else "mixture == 'immediate'"
+        if train_cfg.mixture == "immediate"
+        else None
+    )
+    is_immediate = train_cfg.immediate_protocol and immediate_trigger is not None
     weight_decay = (
         IMMEDIATE_PROTOCOL_WEIGHT_DECAY if is_immediate else train_cfg.weight_decay
     )
@@ -1308,13 +1315,14 @@ def train_model(
         "epochs_requested": train_cfg.epochs,
         "epochs_effective": epochs,
         "immediate_protocol": {
+            "enabled": train_cfg.immediate_protocol,
             "applied": is_immediate,
-            "trigger": (
-                "num_filler == 0"
-                if task_cfg.num_filler == 0
-                else "mixture == 'immediate'"
-                if is_immediate
-                else None
+            "trigger": immediate_trigger if is_immediate else None,
+            # Set when the run met the trigger but the override was disabled,
+            # so a suppressed N=0 run is distinguishable from one that never
+            # qualified in the first place.
+            "suppressed_trigger": (
+                immediate_trigger if immediate_trigger and not is_immediate else None
             ),
             "epochs_requested": train_cfg.epochs,
             "epochs_effective": epochs,
