@@ -60,6 +60,8 @@ def build_runner_command(
             str(args.length),
             "--dimension",
             str(args.dimension),
+            "--true_rate",
+            str(args.true_rate),
             "--generator_mode",
             args.generator_mode,
             "--corruption_rate",
@@ -178,6 +180,7 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--head_dim", type=int, default=64)
     parser.add_argument("--length", type=int, default=12)
     parser.add_argument("--dimension", type=int, default=3)
+    parser.add_argument("--true_rate", type=float, default=0.5)
     parser.add_argument(
         "--generator_mode",
         type=str,
