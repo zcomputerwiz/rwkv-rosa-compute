@@ -160,6 +160,7 @@ def create_model(
         d_input=d_input,
         hidden_size=model_cfg.hidden_size,
         vocab_size=model_cfg.vocab_size,
+        output_vocab_size=model_cfg.output_vocab_size,
         target_feature_indices=target_feature_indices,
         input_feature_dim=input_feature_dim,
     )
@@ -678,6 +679,7 @@ def train_model(
         "samples_per_second": (len(train_dataset) * epochs)
         / max(total_train_seconds, 1e-9),
         "resolved_vocab_size": len(vocab),
+        "output_vocab_size": model.output_vocab_size,
         "input_feature_dim": model.input_feature_dim,
         "compact_reduced_input_features": compact_reduced_features,
         "precision": train_cfg.precision,
