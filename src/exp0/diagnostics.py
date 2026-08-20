@@ -172,13 +172,15 @@ def evaluate_cot_diagnostics(
             sum_sem_chance = (valid_counts / task_mod) * sum_mask
             counters["sum_semantic_chance_sum"].add_(sum_sem_chance.sum())
 
-            if torch.any(match_mask):
-                matched_pair_indices = next_pair_indices[match_mask]
-                eligible = task_length - pair_j[matched_pair_indices] - 1.0
-                match_chance = eligible.reciprocal()
-                counters["match_exact_chance_sum"].add_(match_chance.sum())
-                counters["result_semantic_chance_sum"].add_(match_chance.sum())
-            counters["result_semantic_chance_sum"].add_(sum_sem_chance.sum())
+            # Empty advanced-index tensors and empty scatter_add inputs are safe;
+            # avoiding Python truth-tests here prevents per-batch CUDA syncs.
+            matched_pair_indices = next_pair_indices[match_mask]
+            eligible = task_length - pair_j[matched_pair_indices] - 1.0
+            match_chance = eligible.reciprocal()
+            counters["match_exact_chance_sum"].add_(match_chance.sum())
+            counters["result_semantic_chance_sum"].add_(
+                match_chance.sum() + sum_sem_chance.sum()
+            )
 
             per_token_nll = F.cross_entropy(
                 logits.float().reshape(-1, logits.shape[-1]),
@@ -199,13 +201,12 @@ def evaluate_cot_diagnostics(
                     "result_semantic_correct",
                 ),
             ):
-                if torch.any(mask):
-                    indices = next_pair_indices[mask]
-                    ones = torch.ones_like(indices, dtype=torch.float64)
-                    per_pair[count_name].scatter_add_(0, indices, ones)
-                    per_pair[correct_name].scatter_add_(
-                        0, indices, correct[mask].to(torch.float64)
-                    )
+                indices = next_pair_indices[mask]
+                ones = torch.ones_like(indices, dtype=torch.float64)
+                per_pair[count_name].scatter_add_(0, indices, ones)
+                per_pair[correct_name].scatter_add_(
+                    0, indices, correct[mask].to(torch.float64)
+                )
 
             ans_positions = ans_positions_cpu.to(device, non_blocking=non_blocking)
             batch_indices = torch.arange(targets.shape[0], device=device)
