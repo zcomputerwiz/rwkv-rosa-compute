@@ -4,10 +4,10 @@ import random
 
 import pytest
 
+import exp0.generation as generation
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
 from exp0.dataset import Task3SumDataset, build_default_vocab, generate_packed_instances
 from exp0.evaluate import compute_run_id
-from exp0.generation import generate_protocol_packed_instances
 from exp0.sequences import format_a_parallel_cot
 from exp0.task3sum import (
     LEGACY_GENERATOR,
@@ -25,82 +25,107 @@ def _oracle_source_instance(
     *,
     length: int,
     dimension: int,
-    target: bool,
+    construction_positive: bool,
     seed: int,
     corruption_rate: float = 4 / 3,
 ) -> Instance3Sum:
-    """Independent transcription of JacobPfau/fillerTokens Match3 generation."""
+    """Independent transcription of JacobPfau/fillerTokens Match3 construction."""
     rng = random.Random(seed)
 
     def rand_tuple():
         return tuple(rng.randrange(10) for _ in range(dimension))
 
-    def planted():
-        first = rand_tuple()
-        second = rand_tuple()
-        inverse = tuple((-first[d] - second[d]) % 10 for d in range(dimension))
-        values = [first, second, inverse]
-        values.extend(rand_tuple() for _ in range(length - 3))
-        return values
+    first = rand_tuple()
+    second = rand_tuple()
+    inverse = tuple((-first[d] - second[d]) % 10 for d in range(dimension))
+    core = [first, second, inverse]
 
-    if target:
-        values = planted()
+    if construction_positive:
+        values = core + [rand_tuple() for _ in range(length - 3)]
         rng.shuffle(values)
         solved, indices = check_3sum(values)
         assert solved and indices is not None
         return Instance3Sum(values, True, indices)
 
+    corruptions = 1
     p = 1 / corruption_rate
-    for _ in range(1000):
-        values = [list(value) for value in planted()]
-        corruptions = 1
-        while corruptions < 3 and rng.random() >= p:
-            corruptions += 1
+    while corruptions < 3 and rng.random() >= p:
+        corruptions += 1
 
-        # Source: inputs[:corruptions, columns] = random_values. With a slice on
-        # rows and an advanced index on columns, NumPy broadcasts each selected
-        # column/value across all first `corruptions` rows.
-        columns = [rng.randrange(dimension) for _ in range(corruptions)]
-        replacements = [rng.randrange(10) for _ in range(corruptions)]
-        for column, replacement in zip(columns, replacements):
-            for row in range(corruptions):
-                values[row][column] = replacement
+    values = [list(value) for value in core]
+    columns = [rng.randrange(dimension) for _ in range(corruptions)]
+    replacements = [rng.randrange(10) for _ in range(corruptions)]
+    for column, replacement in zip(columns, replacements):
+        for row in range(corruptions):
+            values[row][column] = replacement
 
-        tuples = [tuple(value) for value in values]
-        rng.shuffle(tuples)
-        solved, _ = check_3sum(tuples)
-        if not solved:
-            return Instance3Sum(tuples, False, None)
-    raise AssertionError("oracle failed to generate a negative")
+    tuples = [tuple(value) for value in values]
+    tuples.extend(rand_tuple() for _ in range(length - 3))
+    rng.shuffle(tuples)
+    solved, indices = check_3sum(tuples)
+    return Instance3Sum(tuples, solved, indices)
 
 
-@pytest.mark.parametrize("target", [False, True])
-def test_source_generator_matches_independent_oracle(target):
+@pytest.mark.parametrize("construction_positive", [False, True])
+def test_source_generator_matches_independent_oracle(construction_positive):
     for seed in range(20):
         expected = _oracle_source_instance(
             length=6,
             dimension=3,
-            target=target,
+            construction_positive=construction_positive,
             seed=seed,
         )
         actual = generate_instance(
             length=6,
             dimension=3,
-            target_has_3sum=target,
+            target_has_3sum=construction_positive,
             rng=random.Random(seed),
             generator_mode=SOURCE_GENERATOR,
         )
         assert actual == expected
 
 
-def test_protocol_generation_samples_class_vector_before_tuple_contents():
+def test_source_corrupted_arm_can_still_have_positive_label():
+    survivors = [
+        generate_instance(
+            length=6,
+            dimension=3,
+            target_has_3sum=False,
+            rng=random.Random(seed),
+            generator_mode=SOURCE_GENERATOR,
+        ).has_3sum
+        for seed in range(100)
+    ]
+    assert any(survivors)
+    assert not all(survivors)
+
+
+def test_protocol_generation_samples_construction_vector_before_tuple_contents(
+    monkeypatch,
+):
     seed = 4321
     count = 40
     true_rate = 0.3
     expected_rng = random.Random(seed)
-    expected_labels = [expected_rng.random() < true_rate for _ in range(count)]
+    expected_arms = [expected_rng.random() < true_rate for _ in range(count)]
+    seen_arms = []
 
-    packed = generate_protocol_packed_instances(
+    def fake_generate_instance(
+        length,
+        dimension,
+        mod,
+        target_has_3sum,
+        rng,
+        *,
+        generator_mode,
+        corruption_rate,
+    ):
+        seen_arms.append(target_has_3sum)
+        tuples = [(0,) * dimension for _ in range(length)]
+        return Instance3Sum(tuples, bool(target_has_3sum), None)
+
+    monkeypatch.setattr(generation, "generate_instance", fake_generate_instance)
+    generation.generate_protocol_packed_instances(
         count,
         length=6,
         dimension=3,
@@ -109,7 +134,7 @@ def test_protocol_generation_samples_class_vector_before_tuple_contents():
         generator_mode=SOURCE_GENERATOR,
     )
 
-    assert packed.has_3sum.tolist() == expected_labels
+    assert seen_arms == expected_arms
 
 
 def test_legacy_generator_remains_explicitly_available():
@@ -127,7 +152,8 @@ def test_legacy_generator_remains_explicitly_available():
         rng=random.Random(123),
         generator_mode=LEGACY_GENERATOR,
     )
-    assert source.has_3sum is False
+    source_solved, _ = check_3sum(source.tuples)
+    assert source_solved == source.has_3sum
     assert legacy.has_3sum is False
     assert source.tuples != legacy.tuples
 
@@ -228,4 +254,14 @@ def test_true_rate_changes_run_identity():
     shifted = Task3SumConfig(true_rate=0.4)
     assert compute_run_id(model, train, balanced, 9999, 2000, [42]) != compute_run_id(
         model, train, shifted, 9999, 2000, [42]
+    )
+
+
+def test_output_head_width_changes_run_identity():
+    task = Task3SumConfig()
+    train = TrainConfig()
+    source_head = ModelConfig(output_vocab_size=32000)
+    compact_head = ModelConfig(output_vocab_size=2048)
+    assert compute_run_id(source_head, train, task, 9999, 2000, [42]) != compute_run_id(
+        compact_head, train, task, 9999, 2000, [42]
     )
