@@ -37,10 +37,7 @@ def _oracle_source_instance(
     def planted():
         first = rand_tuple()
         second = rand_tuple()
-        inverse = tuple(
-            (-first[d] - second[d]) % 10
-            for d in range(dimension)
-        )
+        inverse = tuple((-first[d] - second[d]) % 10 for d in range(dimension))
         values = [first, second, inverse]
         values.extend(rand_tuple() for _ in range(length - 3))
         return values
@@ -58,9 +55,16 @@ def _oracle_source_instance(
         corruptions = 1
         while corruptions < 3 and rng.random() >= p:
             corruptions += 1
-        for row in range(corruptions):
-            column = rng.randrange(dimension)
-            values[row][column] = rng.randrange(10)
+
+        # Source: inputs[:corruptions, columns] = random_values. With a slice on
+        # rows and an advanced index on columns, NumPy broadcasts each selected
+        # column/value across all first `corruptions` rows.
+        columns = [rng.randrange(dimension) for _ in range(corruptions)]
+        replacements = [rng.randrange(10) for _ in range(corruptions)]
+        for column, replacement in zip(columns, replacements):
+            for row in range(corruptions):
+                values[row][column] = replacement
+
         tuples = [tuple(value) for value in values]
         rng.shuffle(tuples)
         solved, _ = check_3sum(tuples)
