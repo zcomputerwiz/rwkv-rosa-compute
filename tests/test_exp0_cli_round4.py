@@ -5,7 +5,11 @@ from pathlib import Path
 import pytest
 
 from scripts import run_experiment
-from scripts.sweep_n import build_runner_command, compute_sweep_id
+from scripts.sweep_n import (
+    build_runner_command,
+    canonical_sweep_config,
+    compute_sweep_id,
+)
 from scripts.sweep_n import get_parser as get_sweep_parser
 
 
@@ -40,6 +44,7 @@ def _sweep_args(**overrides) -> argparse.Namespace:
         "precision": "fp32",
         "fused_adamw": False,
         "pin_memory": True,
+        "immediate_protocol": True,
         "device": "cpu",
         "out_dir": "results/sweeps",
     }
@@ -252,3 +257,23 @@ def test_sweep_id_changes_with_scientific_configuration():
     assert compute_sweep_id(base) != compute_sweep_id(changed_seeds)
     assert compute_sweep_id(base) != compute_sweep_id(changed_precision)
     assert compute_sweep_id(changed_kernel) != compute_sweep_id(rwkv_reference)
+
+
+def test_sweep_forwards_immediate_protocol_suppression():
+    """The N=0 arm of a sweep is only compute-matched if the flag reaches it."""
+    cmd = build_runner_command(
+        _sweep_args(immediate_protocol=False), 0, Path("out")
+    )
+    assert "--no-immediate_protocol" in cmd
+    assert "--immediate_protocol" not in cmd
+
+    default_cmd = build_runner_command(_sweep_args(), 0, Path("out"))
+    assert "--immediate_protocol" in default_cmd
+
+
+def test_immediate_protocol_default_preserves_sweep_identity():
+    base = _sweep_args()
+    assert "immediate_protocol" not in canonical_sweep_config(base)
+    suppressed = _sweep_args(immediate_protocol=False)
+    assert canonical_sweep_config(suppressed)["immediate_protocol"] is False
+    assert compute_sweep_id(base) != compute_sweep_id(suppressed)

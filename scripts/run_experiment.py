@@ -231,6 +231,19 @@ def get_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--immediate_protocol",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Apply the published immediate-answer protocol when num_filler is 0 "
+            "or the mixture is 'immediate': five times the requested epochs, "
+            "weight decay 0.1, grad clip 0.5. Pass --no-immediate_protocol to "
+            "train exactly the requested epochs, weight decay, and grad clip, "
+            "which is what an N=0 arm needs to be compute-matched against an "
+            "N>0 arm. That is a different protocol and changes the run_id."
+        ),
+    )
+    parser.add_argument(
         "--fused_adamw",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -371,6 +384,7 @@ def build_configs(
         early_stop_target=args.early_stop_target,
         early_stop_tolerance=args.early_stop_tolerance,
         early_stop_patience=args.early_stop_patience,
+        immediate_protocol=args.immediate_protocol,
         num_workers=args.num_workers,
         val_num_workers=args.val_num_workers,
         pin_memory=args.pin_memory,
@@ -568,6 +582,7 @@ def main():
             early_stop_target=args.early_stop_target,
             early_stop_tolerance=args.early_stop_tolerance,
             early_stop_patience=args.early_stop_patience,
+            immediate_protocol=args.immediate_protocol,
             num_workers=args.num_workers,
             val_num_workers=args.val_num_workers,
             pin_memory=args.pin_memory,

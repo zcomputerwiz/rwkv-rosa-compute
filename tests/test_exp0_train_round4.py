@@ -514,3 +514,44 @@ def test_filler_run_reports_no_immediate_protocol_override():
     assert history["epochs_effective"] == train_cfg.epochs
     assert override["weight_decay_effective"] == train_cfg.weight_decay
     assert override["grad_clip_effective"] == train_cfg.grad_clip
+
+
+def test_no_immediate_protocol_trains_exactly_what_was_requested():
+    """--no-immediate_protocol makes an N=0 arm compute-matched to an N>0 arm."""
+    from dataclasses import replace as dc_replace
+
+    task_cfg, model_cfg, train_cfg = get_tiny_configs()
+    task_cfg = dc_replace(task_cfg, num_filler=0)
+    train_cfg = dc_replace(train_cfg, epochs=1, immediate_protocol=False)
+    train_ds, val_ds = _filler_datasets(task_cfg, num_filler=0, seed=700)
+
+    _, history = train_model(model_cfg, train_cfg, task_cfg, train_ds, val_ds)
+
+    assert history["epochs_requested"] == 1
+    assert history["epochs_effective"] == 1
+    assert history["epochs_trained"] == 1
+    assert history["weight_decay"] == train_cfg.weight_decay
+    assert history["grad_clip"] == train_cfg.grad_clip
+
+    override = history["immediate_protocol"]
+    assert override["enabled"] is False
+    assert override["applied"] is False
+    assert override["trigger"] is None
+    # The run still met the condition; record that it was suppressed rather
+    # than looking identical to a run that never qualified.
+    assert override["suppressed_trigger"] == "num_filler == 0"
+
+
+def test_immediate_protocol_default_changes_no_existing_run_id():
+    from dataclasses import replace as dc_replace
+
+    from exp0.evaluate import canonical_run_config
+
+    task_cfg, model_cfg, train_cfg = get_tiny_configs()
+    baseline = canonical_run_config(model_cfg, train_cfg, task_cfg, 9999, 100, [42])
+    assert "immediate_protocol" not in baseline["training_protocol"]
+
+    disabled = dc_replace(train_cfg, immediate_protocol=False)
+    suppressed = canonical_run_config(model_cfg, disabled, task_cfg, 9999, 100, [42])
+    assert suppressed["training_protocol"]["immediate_protocol"] is False
+    assert suppressed != baseline

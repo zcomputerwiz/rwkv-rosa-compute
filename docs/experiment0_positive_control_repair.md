@@ -473,11 +473,30 @@ immediate_protocol_applied_any_seed  true when any seed took the override
 
 **An N=0 arm is not a compute-matched control for an N>0 arm from the same
 command line.** It trains five times the epochs under a different weight decay
-and gradient clip. To read an accuracy-vs-N curve as an accuracy-vs-compute
-relationship, either divide the requested epochs by five for the N=0 point or
-report the arms as what they are: each at its protocol-appropriate budget.
-`immediate_protocol_applied_any_seed` is the flag that says which situation a
-report describes.
+and gradient clip. `immediate_protocol_applied_any_seed` is the flag that says
+which situation a report describes.
+
+To get a matched arm, suppress the override:
+
+```text
+--no-immediate_protocol
+```
+
+The run then trains exactly the requested epochs, weight decay, and gradient
+clip. The report records `enabled: false` and names the condition the run met
+in `suppressed_trigger`, so a suppressed N=0 run stays distinguishable from one
+that never qualified. This is a different protocol from the published one and
+changes the `run_id`, which is correct: the two runs are not the same
+experiment. Reproducing the source protocol means leaving the flag alone.
+
+Dividing the requested epochs by five instead also lands on the right epoch
+count, but leaves weight decay and gradient clip substituted, so the arms still
+differ. Prefer the flag.
+
+`scripts/sweep_n.py` forwards the flag to every child run and, because its
+`N_VALUES` starts at 0, warns when a sweep is about to place an
+immediate-protocol N=0 point on a curve with fixed-budget N>0 points. An
+accuracy-vs-compute sweep should pass `--no-immediate_protocol`.
 
 Early stopping composes with this: the stop criterion is measured against
 `epochs_effective`, so an N=0 run that stops at epoch 10 of 25 is correctly
