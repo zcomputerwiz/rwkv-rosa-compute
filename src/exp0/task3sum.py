@@ -89,25 +89,34 @@ def _random_tuple(
     return tuple(rng.randrange(mod) for _ in range(dimension))
 
 
-def _source_planted_tuples(
-    length: int,
+def _source_planted_triplet(
     dimension: int,
     mod: int,
     rng: random.Random,
 ) -> List[Tuple[int, ...]]:
-    """Construct the source implementation's planted Match-3 base example."""
+    """Construct the source implementation's planted three-row core."""
     first = _random_tuple(dimension, mod, rng)
     second = _random_tuple(dimension, mod, rng)
     inverse = tuple(
         (-first[dim] - second[dim]) % mod
         for dim in range(dimension)
     )
-    tuples = [first, second, inverse]
-    tuples.extend(
+    return [first, second, inverse]
+
+
+def _append_source_random_rows(
+    tuples: List[Tuple[int, ...]],
+    length: int,
+    dimension: int,
+    mod: int,
+    rng: random.Random,
+) -> List[Tuple[int, ...]]:
+    values = list(tuples)
+    values.extend(
         _random_tuple(dimension, mod, rng)
-        for _ in range(length - 3)
+        for _ in range(length - len(values))
     )
-    return tuples
+    return values
 
 
 def _capped_geometric(
@@ -153,14 +162,16 @@ def generate_source_instance(
     rng: Optional[random.Random] = None,
     corruption_rate: float = DEFAULT_CORRUPTION_RATE,
 ) -> Instance3Sum:
-    """Generate from the published positive-control construction.
+    """Generate one example from the checked-in Match-3 construction.
 
-    Positive examples plant a valid triple, append random tuples, and shuffle.
-    Negative examples begin from the same planted construction, apply the
-    source geometric corruption rule to the planted rows, shuffle, and
-    reject/resample if any solution remains. The rejection preserves this
-    harness's explicit ``target_has_3sum=False`` contract while matching the
-    source construction and corruption distribution.
+    ``target_has_3sum`` selects the *construction arm* in source mode rather
+    than guaranteeing the final label. ``True`` plants a solution. ``False``
+    applies the source geometric corruption to a planted triplet. The source's
+    probabilistic dense path does not successfully reject corrupted examples
+    that still contain a 3SUM, so this function likewise computes and returns
+    the actual post-corruption label. This label imbalance is part of the
+    published positive-control distribution (and explains its >50% random
+    baseline at larger lengths).
     """
     _validate_generation_args(length, dimension, mod, corruption_rate)
     if rng is None:
@@ -168,9 +179,15 @@ def generate_source_instance(
     if target_has_3sum is None:
         target_has_3sum = rng.random() < 0.5
 
-    max_attempts = 1000
     if target_has_3sum:
-        tuples = _source_planted_tuples(length, dimension, mod, rng)
+        tuples = _source_planted_triplet(dimension, mod, rng)
+        tuples = _append_source_random_rows(
+            tuples,
+            length,
+            dimension,
+            mod,
+            rng,
+        )
         rng.shuffle(tuples)
         has_sol, indices = check_3sum(tuples, mod=mod)
         if not has_sol or indices is None:
@@ -181,30 +198,30 @@ def generate_source_instance(
             matching_indices=indices,
         )
 
-    success_probability = 1.0 / corruption_rate
-    for _ in range(max_attempts):
-        planted = _source_planted_tuples(length, dimension, mod, rng)
-        corruptions = _capped_geometric(success_probability, 3, rng)
-        tuples = _apply_source_corruption(
-            planted,
-            corruptions,
-            dimension,
-            mod,
-            rng,
-        )
-        rng.shuffle(tuples)
-
-        has_sol, _ = check_3sum(tuples, mod=mod)
-        if not has_sol:
-            return Instance3Sum(
-                tuples=tuples,
-                has_3sum=False,
-                matching_indices=None,
-            )
-
-    raise RuntimeError(
-        "Failed to generate a source-style negative Match-3 instance within "
-        "max attempts"
+    # Match source RNG order: planted core -> geometric corruption -> columns /
+    # replacement values -> random remaining rows -> shuffle.
+    tuples = _source_planted_triplet(dimension, mod, rng)
+    corruptions = _capped_geometric(1.0 / corruption_rate, 3, rng)
+    tuples = _apply_source_corruption(
+        tuples,
+        corruptions,
+        dimension,
+        mod,
+        rng,
+    )
+    tuples = _append_source_random_rows(
+        tuples,
+        length,
+        dimension,
+        mod,
+        rng,
+    )
+    rng.shuffle(tuples)
+    has_sol, indices = check_3sum(tuples, mod=mod)
+    return Instance3Sum(
+        tuples=tuples,
+        has_3sum=has_sol,
+        matching_indices=indices,
     )
 
 
