@@ -306,10 +306,10 @@ def compile_experiment_report(
         "metrics": metrics,
         "metric_semantics": {
             "best_online_training_answer_accuracy": (
-                "Best per-epoch answer accuracy accumulated from each training "
-                "batch's existing forward pass before that batch's optimizer "
-                "update; mixed-format runs can be shortcut-contaminated, so use "
-                "the per-format breakdown for interpretation."
+                "Online fit diagnostic: best per-epoch answer accuracy accumulated "
+                "from each training batch's existing forward pass before that "
+                "batch's optimizer update. Mixed-format runs can be shortcut-"
+                "contaminated, so use the per-format breakdown for interpretation."
             ),
             "best_online_training_answer_accuracy_by_format": (
                 "Best online answer accuracy split by realized training format."
