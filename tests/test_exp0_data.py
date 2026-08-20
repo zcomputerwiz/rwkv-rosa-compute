@@ -15,7 +15,12 @@ from exp0.sequences import (
     format_e_neutral,
     format_inputs,
 )
-from exp0.task3sum import Instance3Sum, check_3sum, generate_instance
+from exp0.task3sum import (
+    LEGACY_GENERATOR,
+    Instance3Sum,
+    check_3sum,
+    generate_instance,
+)
 
 
 @pytest.mark.exp0
@@ -32,11 +37,15 @@ def test_3sum_check_and_generation():
     assert has_sol is True
     assert indices == pos_inst.matching_indices
 
+    # source_corrupted=False selects the corrupted construction arm and may
+    # legitimately remain positive. Use the explicitly conditioned legacy
+    # generator when a unit test requires a guaranteed negative instance.
     neg_inst = generate_instance(
         length=8,
         dimension=3,
         target_has_3sum=False,
         rng=rng,
+        generator_mode=LEGACY_GENERATOR,
     )
     assert neg_inst.has_3sum is False
     has_sol_neg, indices_neg = check_3sum(neg_inst.tuples)
@@ -162,11 +171,11 @@ def test_parallel_cot_length_invariant():
 
 @pytest.mark.exp0
 def test_serial_cot_length_distributions():
-    """Positive and negative serial CoT examples must share observed lengths."""
+    """Positive and corrupted-arm serial CoT examples share observed lengths."""
     rng = random.Random(42)
     for length, dimension in [(8, 2), (12, 3)]:
         pos_lengths = []
-        neg_lengths = []
+        corrupted_lengths = []
         for _ in range(200):
             pos_inst = generate_instance(
                 length=length,
@@ -174,7 +183,7 @@ def test_serial_cot_length_distributions():
                 target_has_3sum=True,
                 rng=rng,
             )
-            neg_inst = generate_instance(
+            corrupted_inst = generate_instance(
                 length=length,
                 dimension=dimension,
                 target_has_3sum=False,
@@ -182,11 +191,11 @@ def test_serial_cot_length_distributions():
             )
 
             pos_lengths.append(len(format_d_serial_cot(pos_inst).split()))
-            neg_lengths.append(len(format_d_serial_cot(neg_inst).split()))
+            corrupted_lengths.append(len(format_d_serial_cot(corrupted_inst).split()))
 
         assert pos_lengths
-        assert neg_lengths
-        assert set(pos_lengths) & set(neg_lengths)
+        assert corrupted_lengths
+        assert set(pos_lengths) & set(corrupted_lengths)
 
 
 @pytest.mark.exp0
