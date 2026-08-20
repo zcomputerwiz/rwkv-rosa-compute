@@ -14,6 +14,7 @@ import platform
 import statistics
 import subprocess
 import sys
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +32,7 @@ from exp0.config import ModelConfig  # noqa: E402
 from exp0.models.rwkv import RWKV7_OP  # noqa: E402
 from exp0.models.rwkv_cuda import (  # noqa: E402
     CHUNK_LEN,
+    SUPPORTED_HEAD_DIM,
     rwkv7_cuda_recurrence,
 )
 from exp0.train import create_model  # noqa: E402
@@ -171,10 +173,10 @@ def make_result(
     return record
 
 
-def _command_output(command: Sequence[str]) -> str | None:
+def _command_output(command: Sequence[str], *, cwd: Path | None = None) -> str | None:
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=5,
-                                check=False)
+                                check=False, cwd=None if cwd is None else str(cwd))
     except (OSError, subprocess.SubprocessError):
         return None
     text = (result.stdout or result.stderr).strip()
@@ -196,7 +198,11 @@ def collect_provenance(cuda_available: bool | None = None) -> dict[str, Any]:
     except (ImportError, ModuleNotFoundError):
         CUDA_HOME = None
     return {
-        "git_commit": _command_output(["git", "rev-parse", "HEAD"]),
+        # Without cwd this records whatever repository the caller happened to
+        # be standing in, which defeats the point of a provenance field.
+        "git_commit": _command_output(
+            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT
+        ),
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "platform": platform.platform(),
         "python_version": platform.python_version(),
@@ -236,6 +242,32 @@ def execute_safely(workload: Workload, executor: Callable[[Workload], dict[str, 
         return make_result(workload, "error", error=f"{type(exc).__name__}: {exc}")
 
 
+def inference_context(backward: bool):
+    """Grad-disabling context for forward-only workloads.
+
+    Model parameters always require grad, so eval mode alone still builds an
+    autograd graph and saves activations for a backward that never runs. That
+    inflates forward-only peak memory above true inference memory and makes the
+    forward/forward+backward delta understate backward's real cost.
+    """
+    return nullcontext() if backward else torch.no_grad()
+
+
+def check_supported(workload: Workload) -> None:
+    """Reject configurations the fused kernel cannot run.
+
+    Raised as NotImplementedError so ``execute_safely`` records "unsupported"
+    rather than "error"; an unsupported head dimension is a property of the
+    kernel, not a failure of the run.
+    """
+    uses_fused_kernel = workload.mode.startswith(("fused_", "full_"))
+    if uses_fused_kernel and workload.head_dim != SUPPORTED_HEAD_DIM:
+        raise NotImplementedError(
+            f"fused RWKV-7 kernel supports head_dim={SUPPORTED_HEAD_DIM}, "
+            f"got {workload.head_dim}"
+        )
+
+
 class CudaExecutor:
     """Only component that allocates, launches, or synchronizes CUDA work."""
 
@@ -250,14 +282,19 @@ class CudaExecutor:
                                    requires_grad=backward) for _ in range(6)]
             r, raw_w, k, v, a, b = tensors
             def operation() -> None:
-                if spec.mode.startswith("fused_"):
-                    out = rwkv7_cuda_recurrence(r, raw_w, k, v, a, b,
-                                                head_dim=spec.head_dim)
-                else:
-                    w = -F.softplus(-raw_w.float()) - 0.5
-                    out = RWKV7_OP(r, w, k, v, a, b, head_dim=spec.head_dim)
-                if backward:
-                    out.backward(torch.ones_like(out), retain_graph=False)
+                with inference_context(backward):
+                    if spec.mode.startswith("fused_"):
+                        out = rwkv7_cuda_recurrence(r, raw_w, k, v, a, b,
+                                                    head_dim=spec.head_dim)
+                    else:
+                        w = -F.softplus(-raw_w.float()) - 0.5
+                        out = RWKV7_OP(r, w, k, v, a, b, head_dim=spec.head_dim)
+                    if backward:
+                        # Training zeroes gradients every step. Accumulating
+                        # them here would time a different operation.
+                        for tensor in tensors:
+                            tensor.grad = None
+                        out.backward(torch.ones_like(out), retain_graph=False)
             return operation
 
         model = create_model(
@@ -276,13 +313,16 @@ class CudaExecutor:
                              dtype=torch.bfloat16)
         targets = torch.randint(0, 256, (spec.batch, spec.timesteps), device="cuda")
         def operation() -> None:
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                out = model(inputs, targets)
-            if backward:
-                out.backward(torch.ones_like(out), retain_graph=False)
+            with inference_context(backward):
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    out = model(inputs, targets)
+                if backward:
+                    model.zero_grad(set_to_none=True)
+                    out.backward(torch.ones_like(out), retain_graph=False)
         return operation
 
     def __call__(self, spec: Workload) -> dict[str, Any]:
+        check_supported(spec)
         torch.cuda.reset_peak_memory_stats()
         operation = self._operation(spec)
         for _ in range(self.warmups):
@@ -296,13 +336,20 @@ class CudaExecutor:
             end.record()
         torch.cuda.synchronize()
         samples = [start.elapsed_time(end) for start, end in zip(starts, ends)]
-        return make_result(
+        result = make_result(
             spec, "success", timings_ms=samples,
             memory_allocated_bytes=torch.cuda.max_memory_allocated(),
             memory_reserved_bytes=torch.cuda.max_memory_reserved(),
         )
+        # Full-model modes build a fresh model per matrix cell. Dropping the
+        # closure and releasing cached blocks keeps a long matrix from failing
+        # its later, larger cells on fragmentation rather than real capacity.
+        del operation
+        torch.cuda.empty_cache()
+        return result
 
     def profile(self, spec: Workload, iterations: int) -> None:
+        check_supported(spec)
         operation = self._operation(spec)
         for _ in range(self.warmups):
             operation()

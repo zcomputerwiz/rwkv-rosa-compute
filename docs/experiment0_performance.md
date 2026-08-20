@@ -199,8 +199,16 @@ python .\scripts\benchmark_rwkv_cuda.py `
   --output .\results\cuda_benchmarks\full-model.json
 ```
 
-OOM configurations are recorded and the matrix continues. Other failures remain
-distinct. Forward and forward+backward modes remain separate so saved-state and
+The standard matrix is 60 workloads per mode, so the four-mode command above is
+240 workloads. The two reference modes alone execute roughly 200,000 sequential
+Python-loop timestep iterations; budget hours, not minutes, and prefer an
+explicit `--batches`/`--timesteps-list` subset when iterating.
+
+OOM configurations are recorded and the matrix continues, as do ordinary Python
+exceptions and configurations the fused kernel does not support. A device-side
+assertion or other sticky CUDA fault is different in kind: it poisons the CUDA
+context, so every later workload in the same process fails. Rerun the remaining
+matrix in a fresh process rather than trusting results after one. Forward and forward+backward modes remain separate so saved-state and
 gradient memory are visible. Before performance validation, use the existing
 cold extension-build check, then benchmark in a fresh process:
 
@@ -233,9 +241,23 @@ separately when a structured timing/memory JSON artifact is also required.
   batch and head counts. Physical totals use padded time.
 - **Recurrence-only** isolates the recurrence. **Full-model** includes time-mix
   projections, channel mixing, normalization, and every configured layer.
-- **Forward-only memory** excludes training gradients. **Forward+backward
-  memory** exposes saved-state, gradient, and backward costs. Allocated and
-  reserved peaks are distinct PyTorch allocator measurements.
+- **Forward-only memory** is measured under `torch.no_grad()`, so it excludes
+  both gradients and the activations autograd would otherwise save. Model
+  parameters always require grad, so eval mode alone is not sufficient: without
+  the no-grad guard, forward-only peaks include activations kept for a backward
+  that never runs. **Forward+backward memory** exposes saved-state, gradient,
+  and backward costs. Allocated and reserved peaks are distinct PyTorch
+  allocator measurements.
+- **Reference and fused modes differ in more than fusion.** `RWKV7_OP` is an
+  FP32 Python loop over timesteps; the fused path is a bf16 CUDA kernel. Their
+  ratio therefore combines kernel fusion, precision, and interpreter overhead,
+  and must not be quoted as a fused-kernel speedup on its own.
+- **The smallest cells measure launch overhead.** At `B=1, T=1` a single
+  chunk-padded kernel launch dominates, so those rows characterize dispatch
+  cost rather than recurrence throughput.
+- **Unsupported configurations are distinct from failures.** The fused kernel
+  requires `head_dim=64`; other values are recorded as `unsupported`, not
+  `error`.
 
 These benchmarks characterize implementation performance only. They are not
 Experiment 0 accuracy results and must not be interpreted as evidence for or

@@ -157,3 +157,58 @@ def test_cuda_unavailable_fails_clearly(monkeypatch, capsys):
         benchmark_rwkv_cuda.main(["--smoke"])
     assert exc.value.code == 2
     assert "CUDA is unavailable" in capsys.readouterr().err
+
+
+def test_forward_only_disables_autograd_but_backward_does_not():
+    """Forward-only must not save activations for a backward that never runs.
+
+    Model parameters always require grad, so eval mode alone leaves the graph
+    intact and inflates forward-only peak memory.
+    """
+    from scripts.benchmark_rwkv_cuda import inference_context
+
+    probe = torch.zeros(2, requires_grad=True)
+    with inference_context(backward=False):
+        assert not (probe * 2).requires_grad
+    with inference_context(backward=True):
+        assert (probe * 2).requires_grad
+
+
+@pytest.mark.parametrize(
+    "mode", ["fused_forward", "fused_forward_backward", "full_rwkv_forward"]
+)
+def test_unsupported_head_dim_is_reported_as_unsupported(mode):
+    from scripts.benchmark_rwkv_cuda import check_supported
+
+    workload = build_matrix([mode], [1], [16], 128, 32)[0]
+    with pytest.raises(NotImplementedError):
+        check_supported(workload)
+
+    result = execute_safely(workload, check_supported)
+    assert result["status"] == "unsupported"
+    assert "head_dim" in result["error"]
+
+
+def test_reference_modes_accept_any_head_dim():
+    """Only the fused kernel is head-dim constrained; the reference is not."""
+    from scripts.benchmark_rwkv_cuda import check_supported
+
+    check_supported(build_matrix(["reference_forward"], [1], [16], 128, 32)[0])
+    check_supported(build_matrix(["fused_forward"], [1], [16], 128, 64)[0])
+
+
+def test_provenance_records_this_repository_not_the_caller_directory(
+    monkeypatch, tmp_path
+):
+    import subprocess as sp
+
+    expected = sp.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+
+    monkeypatch.chdir(tmp_path)
+    assert collect_provenance(cuda_available=False)["git_commit"] == expected
