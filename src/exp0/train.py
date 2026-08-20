@@ -1,9 +1,11 @@
 """Training loop for Experiment 0 models."""
 
+import math
 import random
 import time
 from contextlib import nullcontext
-from dataclasses import replace
+from dataclasses import asdict, replace
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -11,6 +13,18 @@ import torch.nn as nn
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 
+from exp0.checkpointing import (
+    CHECKPOINT_VERSION,
+    ResumableRandomSampler,
+    atomic_copy,
+    atomic_torch_save,
+    capture_rng_state,
+    epoch_shuffle_seed,
+    load_training_checkpoint,
+    optimizer_state_to_device,
+    restore_rng_state,
+    validate_checkpoint_signature,
+)
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
 from exp0.dataset import FORMAT_NAMES, Task3SumDataset, pad_collate_fn
 from exp0.diagnostics import evaluate_cot_diagnostics
@@ -27,17 +41,20 @@ def _create_loader(
     device: torch.device,
     shuffle: bool = False,
     num_workers: Optional[int] = None,
+    sampler=None,
 ) -> DataLoader:
     """Create a DataLoader with bounded worker/prefetch memory."""
     workers = train_cfg.num_workers if num_workers is None else num_workers
     kwargs: Dict[str, Any] = {
         "dataset": dataset,
         "batch_size": train_cfg.batch_size,
-        "shuffle": shuffle,
+        "shuffle": shuffle if sampler is None else False,
         "collate_fn": pad_collate_fn,
         "num_workers": workers,
         "pin_memory": train_cfg.pin_memory and device.type == "cuda",
     }
+    if sampler is not None:
+        kwargs["sampler"] = sampler
     if workers > 0:
         kwargs["persistent_workers"] = True
         kwargs["prefetch_factor"] = train_cfg.prefetch_factor
@@ -394,7 +411,6 @@ def evaluate_accuracy(
         "label_true": int(label_true_device.item()) if total else 0,
         "label_false": (total - int(label_true_device.item())) if total else 0,
         "total": total,
-        # True when every validation example received the same answer token.
         "degenerate_predictor": bool(
             total > 0
             and max(predicted_true, predicted_false, total - predicted_true - predicted_false)
@@ -441,9 +457,6 @@ def _best_cot_diagnostics(
             "cot_chance_baselines", {}
         )
         best["cot_per_pair"] = epoch_diagnostics[-1].get("cot_per_pair", [])
-        # Protocol constants, not per-epoch measurements: carry them through
-        # unchanged so the reported accuracy is never separated from the
-        # ceiling it has to be read against.
         best["cot_pair_position_semantic_ceiling"] = epoch_diagnostics[-1].get(
             "cot_pair_position_semantic_ceiling", 1.0
         )
@@ -471,6 +484,152 @@ def _make_lr_scheduler(
     return LambdaLR(optimizer, lr_lambda=lr_lambda)
 
 
+def _checkpoint_signature(
+    model_cfg: ModelConfig,
+    train_cfg: TrainConfig,
+    task_cfg: Task3SumConfig,
+    train_dataset: Task3SumDataset,
+    *,
+    epochs: int,
+    steps_per_epoch: int,
+    checkpoint_run_id: str | None,
+) -> dict[str, Any]:
+    model_signature = asdict(model_cfg)
+    model_signature.pop("rwkv_checkpoint", None)
+    return {
+        "run_id": checkpoint_run_id,
+        "model": model_signature,
+        "training": asdict(train_cfg),
+        "task": asdict(task_cfg),
+        "train_dataset_size": len(train_dataset),
+        "realized_format_counts": dict(train_dataset.realized_counts),
+        "epochs": epochs,
+        "steps_per_epoch": steps_per_epoch,
+    }
+
+
+def _empty_completed_state() -> dict[str, Any]:
+    return {
+        "epoch_train_losses": [],
+        "epoch_online_train_answer_accuracies": [],
+        "epoch_online_train_answer_accuracies_by_format": [],
+        "epoch_filler_accuracies": [],
+        "epoch_filler_prediction_counts": [],
+        "epoch_cot_diagnostics": [],
+        "epoch_end_learning_rates": [],
+        "best_filler_acc": 0.0,
+        "best_filler_prediction_counts": {},
+        "best_online_train_answer_acc": 0.0,
+        "best_online_train_answer_by_format": {
+            name: None for name in FORMAT_NAMES
+        },
+        "epoch_times": [],
+        "data_wait": 0.0,
+        "cuda_peak_memory_allocated_bytes": None,
+        "cuda_peak_memory_reserved_bytes": None,
+    }
+
+
+def _partial_epoch_state(
+    *,
+    loss_sum: torch.Tensor,
+    loss_count: int,
+    train_answer_correct: torch.Tensor,
+    train_answer_count: int,
+    train_correct_by_format: torch.Tensor,
+    train_count_by_format: torch.Tensor,
+    epoch_elapsed_seconds: float,
+) -> dict[str, Any]:
+    return {
+        "loss_sum": float(loss_sum.item()),
+        "loss_count": int(loss_count),
+        "train_answer_correct": int(train_answer_correct.item()),
+        "train_answer_count": int(train_answer_count),
+        "train_correct_by_format": train_correct_by_format.cpu().tolist(),
+        "train_count_by_format": train_count_by_format.cpu().tolist(),
+        "epoch_elapsed_seconds": float(epoch_elapsed_seconds),
+    }
+
+
+def _save_training_checkpoint(
+    path: str | Path,
+    *,
+    signature: dict[str, Any],
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    lr_scheduler: LambdaLR | None,
+    scaler,
+    initialization: dict[str, Any],
+    progress: dict[str, Any],
+) -> Path:
+    payload = {
+        "checkpoint_version": CHECKPOINT_VERSION,
+        "signature": signature,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "lr_scheduler_state_dict": (
+            lr_scheduler.state_dict() if lr_scheduler is not None else None
+        ),
+        "scaler_state_dict": scaler.state_dict() if scaler is not None else None,
+        "initialization": initialization,
+        "progress": progress,
+        "rng_state": capture_rng_state(),
+    }
+    return atomic_torch_save(payload, path)
+
+
+def _load_training_checkpoint_into_state(
+    path: str | Path,
+    *,
+    signature: dict[str, Any],
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    lr_scheduler: LambdaLR | None,
+    scaler,
+    device: torch.device,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    payload = load_training_checkpoint(path)
+    validate_checkpoint_signature(payload.get("signature", {}), signature)
+
+    model.load_state_dict(payload["model_state_dict"], strict=True)
+    optimizer.load_state_dict(payload["optimizer_state_dict"])
+    optimizer_state_to_device(optimizer, device)
+
+    saved_scheduler = payload.get("lr_scheduler_state_dict")
+    if (lr_scheduler is None) != (saved_scheduler is None):
+        raise ValueError("Checkpoint LR scheduler state does not match this run.")
+    if lr_scheduler is not None:
+        lr_scheduler.load_state_dict(saved_scheduler)
+
+    saved_scaler = payload.get("scaler_state_dict")
+    if (scaler is None) != (saved_scaler is None):
+        raise ValueError("Checkpoint AMP scaler state does not match this run.")
+    if scaler is not None:
+        scaler.load_state_dict(saved_scaler)
+
+    restore_rng_state(payload["rng_state"])
+    return payload["progress"], payload["initialization"]
+
+
+def _checkpoint_progress(
+    *,
+    epoch: int,
+    epoch_seed: int | None,
+    samples_consumed_in_epoch: int,
+    optimizer_steps: int,
+    completed: dict[str, Any],
+    partial_epoch: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "epoch": int(epoch),
+        "epoch_seed": epoch_seed,
+        "samples_consumed_in_epoch": int(samples_consumed_in_epoch),
+        "optimizer_steps": int(optimizer_steps),
+        "completed": completed,
+        "partial_epoch": partial_epoch,
+    }
+
+
 def train_model(
     model_cfg: ModelConfig,
     train_cfg: TrainConfig,
@@ -478,8 +637,23 @@ def train_model(
     train_dataset: Task3SumDataset,
     filler_val_dataset: Task3SumDataset,
     cot_val_dataset: Optional[Task3SumDataset] = None,
+    *,
+    checkpoint_dir: str | Path | None = None,
+    checkpoint_every_steps: int = 0,
+    resume_checkpoint: str | Path | None = None,
+    checkpoint_run_id: str | None = None,
 ) -> Tuple[nn.Module, Dict[str, Any]]:
-    """Train one Experiment 0 seed and evaluate fixed filler/CoT views."""
+    """Train one seed, optionally writing exact-resume checkpoints.
+
+    Periodic checkpoints are written after completed optimizer steps.  They
+    include partial-epoch metric accumulators and the explicit shuffled sample
+    offset, so a restart neither repeats nor skips an optimizer update.
+    Epoch checkpoints are written after validation/diagnostics and therefore
+    resume at the next epoch with a complete history.
+    """
+    if checkpoint_every_steps < 0:
+        raise ValueError("checkpoint_every_steps must be non-negative.")
+
     set_seed(train_cfg.seed)
     device = torch.device(model_cfg.device)
     _validate_precision(device, train_cfg.precision)
@@ -519,7 +693,30 @@ def train_model(
     grad_clip = 0.5 if is_immediate else train_cfg.grad_clip
     epochs = train_cfg.epochs * 5 if is_immediate else train_cfg.epochs
 
-    train_loader = _create_loader(train_dataset, train_cfg, device, shuffle=True)
+    checkpoint_path = Path(checkpoint_dir).expanduser().resolve() if checkpoint_dir else None
+    resume_path = (
+        Path(resume_checkpoint).expanduser().resolve()
+        if resume_checkpoint is not None
+        else None
+    )
+    if checkpoint_path is None and resume_path is not None:
+        checkpoint_path = resume_path.parent
+    checkpointing_enabled = checkpoint_path is not None
+
+    train_sampler = (
+        ResumableRandomSampler(train_dataset)
+        if checkpointing_enabled
+        else None
+    )
+    train_loader = _create_loader(
+        train_dataset,
+        train_cfg,
+        device,
+        shuffle=not checkpointing_enabled,
+        sampler=train_sampler,
+    )
+    steps_per_epoch = math.ceil(len(train_dataset) / train_cfg.batch_size)
+
     filler_val_loader = _create_loader(
         filler_val_dataset,
         train_cfg,
@@ -551,7 +748,7 @@ def train_model(
         weight_decay=weight_decay,
         **optimizer_kwargs,
     )
-    total_optimizer_steps = epochs * len(train_loader)
+    total_optimizer_steps = epochs * steps_per_epoch
     lr_scheduler = _make_lr_scheduler(
         optimizer,
         train_cfg,
@@ -559,41 +756,138 @@ def train_model(
     )
     criterion = nn.CrossEntropyLoss(ignore_index=-100)
     scaler = torch.amp.GradScaler("cuda") if train_cfg.precision == "fp16" else None
-
     non_blocking = _transfer_non_blocking(train_cfg, device)
-    epoch_train_losses: list[float] = []
-    epoch_online_train_answer_accuracies: list[float] = []
-    epoch_online_train_answer_accuracies_by_format: list[Dict[str, float | None]] = []
-    epoch_filler_accuracies: list[float] = []
-    epoch_filler_prediction_counts: list[Dict[str, int]] = []
-    epoch_cot_diagnostics: list[Dict[str, Any]] = []
-    epoch_end_learning_rates: list[float] = []
-    best_filler_acc = 0.0
-    best_filler_prediction_counts: Dict[str, int] = {}
-    best_online_train_answer_acc = 0.0
-    best_online_train_answer_by_format: Dict[str, float | None] = {
-        name: None for name in FORMAT_NAMES
-    }
 
-    epoch_times: list[float] = []
-    data_wait = 0.0
+    signature = _checkpoint_signature(
+        resolved_model_cfg,
+        train_cfg,
+        task_cfg,
+        train_dataset,
+        epochs=epochs,
+        steps_per_epoch=steps_per_epoch,
+        checkpoint_run_id=checkpoint_run_id,
+    )
+
+    completed = _empty_completed_state()
+    start_epoch = 0
+    resume_epoch_seed: int | None = None
+    resume_samples = 0
     optimizer_steps = 0
+    resume_partial: dict[str, Any] | None = None
+    resumed_from: str | None = None
+
+    if resume_path is not None:
+        progress, initialization = _load_training_checkpoint_into_state(
+            resume_path,
+            signature=signature,
+            model=model,
+            optimizer=optimizer,
+            lr_scheduler=lr_scheduler,
+            scaler=scaler,
+            device=device,
+        )
+        start_epoch = int(progress["epoch"])
+        resume_epoch_seed = progress.get("epoch_seed")
+        resume_samples = int(progress["samples_consumed_in_epoch"])
+        optimizer_steps = int(progress["optimizer_steps"])
+        completed = progress["completed"]
+        resume_partial = progress.get("partial_epoch")
+        resumed_from = str(resume_path)
+
+        if start_epoch < 0 or start_epoch > epochs:
+            raise ValueError(
+                f"Checkpoint epoch {start_epoch} is outside requested epochs={epochs}."
+            )
+        if resume_samples < 0 or resume_samples > len(train_dataset):
+            raise ValueError("Checkpoint sample offset is outside the training dataset.")
+        if resume_samples and resume_epoch_seed is None:
+            raise ValueError("Mid-epoch checkpoint is missing its epoch shuffle seed.")
+        if resume_samples and resume_partial is None:
+            raise ValueError("Mid-epoch checkpoint is missing partial epoch metrics.")
+        if start_epoch == epochs and resume_samples:
+            raise ValueError("Completed checkpoint must have zero in-epoch sample offset.")
+
+        print(
+            f"Resumed training checkpoint {resume_path} at epoch "
+            f"{start_epoch + 1 if start_epoch < epochs else epochs}/{epochs}, "
+            f"optimizer step {optimizer_steps}."
+        )
+
+    epoch_train_losses = completed["epoch_train_losses"]
+    epoch_online_train_answer_accuracies = completed[
+        "epoch_online_train_answer_accuracies"
+    ]
+    epoch_online_train_answer_accuracies_by_format = completed[
+        "epoch_online_train_answer_accuracies_by_format"
+    ]
+    epoch_filler_accuracies = completed["epoch_filler_accuracies"]
+    epoch_filler_prediction_counts = completed["epoch_filler_prediction_counts"]
+    epoch_cot_diagnostics = completed["epoch_cot_diagnostics"]
+    epoch_end_learning_rates = completed["epoch_end_learning_rates"]
+    best_filler_acc = float(completed["best_filler_acc"])
+    best_filler_prediction_counts = completed["best_filler_prediction_counts"]
+    best_online_train_answer_acc = float(completed["best_online_train_answer_acc"])
+    best_online_train_answer_by_format = completed[
+        "best_online_train_answer_by_format"
+    ]
+    epoch_times = completed["epoch_times"]
+    data_wait = float(completed["data_wait"])
+    prior_cuda_peak_allocated = completed.get("cuda_peak_memory_allocated_bytes")
+    prior_cuda_peak_reserved = completed.get("cuda_peak_memory_reserved_bytes")
 
     _sync_cuda(device)
-    for _epoch in range(epochs):
-        t_epoch = time.perf_counter()
+    for _epoch in range(start_epoch, epochs):
+        resuming_this_epoch = _epoch == start_epoch and resume_samples > 0
+        if checkpointing_enabled:
+            assert train_sampler is not None
+            current_epoch_seed = (
+                int(resume_epoch_seed)
+                if resuming_this_epoch
+                else epoch_shuffle_seed(train_cfg.seed, _epoch)
+            )
+            samples_consumed = resume_samples if resuming_this_epoch else 0
+            train_sampler.set_state(
+                epoch_seed=current_epoch_seed,
+                start_index=samples_consumed,
+            )
+        else:
+            current_epoch_seed = None
+            samples_consumed = 0
+
         model.train()
+        epoch_elapsed_base = 0.0
+        if resuming_this_epoch:
+            partial = resume_partial or {}
+            loss_sum = torch.tensor(
+                float(partial["loss_sum"]), device=device, dtype=torch.float64
+            )
+            loss_count = int(partial["loss_count"])
+            train_answer_correct = torch.tensor(
+                int(partial["train_answer_correct"]), device=device, dtype=torch.int64
+            )
+            train_answer_count = int(partial["train_answer_count"])
+            train_correct_by_format = torch.tensor(
+                partial["train_correct_by_format"], device=device, dtype=torch.int64
+            )
+            train_count_by_format = torch.tensor(
+                partial["train_count_by_format"], device=device, dtype=torch.int64
+            )
+            epoch_elapsed_base = float(partial["epoch_elapsed_seconds"])
+        else:
+            loss_sum = torch.zeros((), device=device, dtype=torch.float64)
+            loss_count = 0
+            train_answer_correct = torch.zeros((), device=device, dtype=torch.int64)
+            train_answer_count = 0
+            train_correct_by_format = torch.zeros(
+                len(FORMAT_NAMES), device=device, dtype=torch.int64
+            )
+            train_count_by_format = torch.zeros(
+                len(FORMAT_NAMES), device=device, dtype=torch.int64
+            )
+
+        segment_start = time.perf_counter()
+        checkpoint_overhead = 0.0
         t_last = time.perf_counter()
-        loss_sum = torch.zeros((), device=device, dtype=torch.float64)
-        loss_count = 0
-        train_answer_correct = torch.zeros((), device=device, dtype=torch.int64)
-        train_answer_count = 0
-        train_correct_by_format = torch.zeros(
-            len(FORMAT_NAMES), device=device, dtype=torch.int64
-        )
-        train_count_by_format = torch.zeros(
-            len(FORMAT_NAMES), device=device, dtype=torch.int64
-        )
 
         for batch in train_loader:
             data_wait += time.perf_counter() - t_last
@@ -650,10 +944,66 @@ def train_model(
             optimizer_steps += 1
             loss_sum.add_(loss.detach())
             loss_count += 1
+            samples_consumed += targets.shape[0]
             t_last = time.perf_counter()
 
+            periodic_due = (
+                checkpointing_enabled
+                and checkpoint_every_steps > 0
+                and optimizer_steps % checkpoint_every_steps == 0
+                and samples_consumed < len(train_dataset)
+            )
+            if periodic_due:
+                assert checkpoint_path is not None
+                _sync_cuda(device)
+                epoch_elapsed = epoch_elapsed_base + (
+                    time.perf_counter() - segment_start - checkpoint_overhead
+                )
+                partial_state = _partial_epoch_state(
+                    loss_sum=loss_sum,
+                    loss_count=loss_count,
+                    train_answer_correct=train_answer_correct,
+                    train_answer_count=train_answer_count,
+                    train_correct_by_format=train_correct_by_format,
+                    train_count_by_format=train_count_by_format,
+                    epoch_elapsed_seconds=epoch_elapsed,
+                )
+                if device.type == "cuda":
+                    completed["cuda_peak_memory_allocated_bytes"] = max(
+                        int(prior_cuda_peak_allocated or 0),
+                        torch.cuda.max_memory_allocated(device),
+                    )
+                    completed["cuda_peak_memory_reserved_bytes"] = max(
+                        int(prior_cuda_peak_reserved or 0),
+                        torch.cuda.max_memory_reserved(device),
+                    )
+                completed["data_wait"] = data_wait
+                save_start = time.perf_counter()
+                _save_training_checkpoint(
+                    checkpoint_path / "latest.pt",
+                    signature=signature,
+                    model=model,
+                    optimizer=optimizer,
+                    lr_scheduler=lr_scheduler,
+                    scaler=scaler,
+                    initialization=initialization,
+                    progress=_checkpoint_progress(
+                        epoch=_epoch,
+                        epoch_seed=current_epoch_seed,
+                        samples_consumed_in_epoch=samples_consumed,
+                        optimizer_steps=optimizer_steps,
+                        completed=completed,
+                        partial_epoch=partial_state,
+                    ),
+                )
+                checkpoint_overhead += time.perf_counter() - save_start
+                t_last = time.perf_counter()
+
         _sync_cuda(device)
-        epoch_times.append(time.perf_counter() - t_epoch)
+        epoch_elapsed = epoch_elapsed_base + (
+            time.perf_counter() - segment_start - checkpoint_overhead
+        )
+        epoch_times.append(epoch_elapsed)
         epoch_train_losses.append((loss_sum / loss_count).item() if loss_count else 0.0)
         train_answer_acc = (
             int(train_answer_correct.item()) / train_answer_count
@@ -714,11 +1064,67 @@ def train_model(
             )
             epoch_cot_diagnostics.append(diagnostics)
 
-    cuda_peak_allocated = None
-    cuda_peak_reserved = None
+        completed.update(
+            {
+                "best_filler_acc": best_filler_acc,
+                "best_filler_prediction_counts": best_filler_prediction_counts,
+                "best_online_train_answer_acc": best_online_train_answer_acc,
+                "best_online_train_answer_by_format": best_online_train_answer_by_format,
+                "data_wait": data_wait,
+            }
+        )
+        if device.type == "cuda":
+            completed["cuda_peak_memory_allocated_bytes"] = max(
+                int(prior_cuda_peak_allocated or 0),
+                torch.cuda.max_memory_allocated(device),
+            )
+            completed["cuda_peak_memory_reserved_bytes"] = max(
+                int(prior_cuda_peak_reserved or 0),
+                torch.cuda.max_memory_reserved(device),
+            )
+
+        if checkpointing_enabled:
+            assert checkpoint_path is not None
+            epoch_checkpoint = checkpoint_path / f"epoch_{_epoch + 1:03d}.pt"
+            _save_training_checkpoint(
+                epoch_checkpoint,
+                signature=signature,
+                model=model,
+                optimizer=optimizer,
+                lr_scheduler=lr_scheduler,
+                scaler=scaler,
+                initialization=initialization,
+                progress=_checkpoint_progress(
+                    epoch=_epoch + 1,
+                    epoch_seed=None,
+                    samples_consumed_in_epoch=0,
+                    optimizer_steps=optimizer_steps,
+                    completed=completed,
+                    partial_epoch=None,
+                ),
+            )
+            atomic_copy(epoch_checkpoint, checkpoint_path / "latest.pt")
+
+        resume_samples = 0
+        resume_epoch_seed = None
+        resume_partial = None
+
+    current_cuda_peak_allocated = None
+    current_cuda_peak_reserved = None
     if device.type == "cuda":
-        cuda_peak_allocated = torch.cuda.max_memory_allocated(device)
-        cuda_peak_reserved = torch.cuda.max_memory_reserved(device)
+        current_cuda_peak_allocated = torch.cuda.max_memory_allocated(device)
+        current_cuda_peak_reserved = torch.cuda.max_memory_reserved(device)
+
+    cuda_peak_allocated = (
+        max(int(prior_cuda_peak_allocated or 0), int(current_cuda_peak_allocated or 0))
+        if device.type == "cuda"
+        else None
+    )
+    cuda_peak_reserved = (
+        max(int(prior_cuda_peak_reserved or 0), int(current_cuda_peak_reserved or 0))
+        if device.type == "cuda"
+        else None
+    )
 
     total_train_seconds = sum(epoch_times)
     history: Dict[str, Any] = {
@@ -731,9 +1137,6 @@ def train_model(
         "best_online_train_answer_accuracy_by_format": (
             best_online_train_answer_by_format
         ),
-        # NOTE: validation is filler-format only. The former "epoch_val_accuracies"
-        # and "best_val_accuracy" keys were aliases of these two and are removed;
-        # two names for one number read as corroboration when they agree.
         "epoch_filler_accuracies": epoch_filler_accuracies,
         "epoch_filler_answer_prediction_counts": epoch_filler_prediction_counts,
         "best_filler_accuracy": best_filler_acc,
@@ -771,6 +1174,14 @@ def train_model(
         "cuda_peak_memory_allocated_bytes": cuda_peak_allocated,
         "cuda_peak_memory_reserved_bytes": cuda_peak_reserved,
         "initialization": initialization,
+        "checkpointing": {
+            "enabled": checkpointing_enabled,
+            "checkpoint_version": CHECKPOINT_VERSION,
+            "checkpoint_every_steps": checkpoint_every_steps,
+            "checkpoint_dir": str(checkpoint_path) if checkpoint_path else None,
+            "resumed_from": resumed_from,
+            "exact_mid_epoch_resume": checkpointing_enabled,
+        },
     }
 
     if epoch_cot_diagnostics:
