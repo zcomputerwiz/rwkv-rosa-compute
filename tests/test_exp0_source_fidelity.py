@@ -205,7 +205,7 @@ def test_source_match_policy_exposes_ordered_solution_once():
     assert continuation.count("C") == 1
 
 
-def test_reduced_tensor_hot_path_matches_formatter_exactly():
+def test_reduced_tensor_hot_path_matches_formatter_exactly_plus_eos():
     source_rng = random.Random(321)
     instances = [
         generate_instance(
@@ -232,8 +232,17 @@ def test_reduced_tensor_hot_path_matches_formatter_exactly():
             rng=random.Random(f"91_{idx}"),
         ).split()
         expected = expected[expected.index(":") :]
+        expected.append(vocab.pad_token)
         actual = vocab.decode(dataset[idx]["targets"].tolist())
         assert actual == expected
+        assert dataset[idx]["targets"][-1].item() == 0
+
+
+def test_eos_target_protocol_is_required():
+    with pytest.raises(ValueError, match="supervised EOS target"):
+        Task3SumConfig(include_eos_target=False)
+    with pytest.raises(ValueError, match="supervised EOS target"):
+        Task3SumDataset([], include_eos_target=False)
 
 
 def test_packed_generation_respects_generator_mode():
