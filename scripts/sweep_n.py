@@ -153,6 +153,23 @@ def canonical_sweep_config(args: argparse.Namespace) -> dict:
     return config
 
 
+def sweep_execution_protocol(args: argparse.Namespace) -> dict:
+    """Return non-identity execution metadata that must remain visible in reports."""
+    return {
+        "immediate_protocol_enabled": bool(args.immediate_protocol),
+        "n0_training_budget_relation": (
+            "published_immediate_protocol"
+            if args.immediate_protocol
+            else "same_requested_epochs_weight_decay_and_grad_clip"
+        ),
+        "compute_note": (
+            "Changing N changes sequence length and therefore actual model compute. "
+            "Disabling the immediate-answer protocol aligns requested epochs, "
+            "weight decay, and gradient clipping; it does not equalize FLOPs or runtime."
+        ),
+    }
+
+
 def compute_sweep_id(args: argparse.Namespace) -> str:
     config_json = json.dumps(
         canonical_sweep_config(args),
@@ -160,6 +177,51 @@ def compute_sweep_id(args: argparse.Namespace) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(config_json.encode("utf-8")).hexdigest()[:16]
+
+
+def summarize_run_report(n: int, summary_path: Path, report: dict) -> dict:
+    """Keep scientific metrics and execution provenance in the sweep summary."""
+    metrics = report.get("metrics", {})
+    immediate_protocol = metrics.get("immediate_protocol_per_seed") or []
+    early_stopping = metrics.get("early_stopping_per_seed") or []
+    return {
+        "n": n,
+        "report_path": str(summary_path),
+        "run_id": report.get("run_id"),
+        "filler_accuracy": metrics.get("filler_accuracy"),
+        "online_training_answer_accuracy": metrics.get(
+            "best_online_training_answer_accuracy"
+        ),
+        "online_training_answer_accuracy_by_format": metrics.get(
+            "best_online_training_answer_accuracy_by_format"
+        ),
+        "cot_answer_given_cot_accuracy": metrics.get(
+            "cot_answer_given_cot_accuracy"
+        ),
+        "cot_result_semantic_accuracy": metrics.get(
+            "cot_result_semantic_accuracy"
+        ),
+        "cot_match_index_accuracy": metrics.get("cot_match_index_accuracy"),
+        "cot_sum_semantic_accuracy": metrics.get("cot_sum_semantic_accuracy"),
+        "cot_result_nll": metrics.get("cot_result_nll"),
+        "cot_result_nll_floor": metrics.get("cot_result_nll_floor"),
+        "cot_chance_baselines": metrics.get("cot_chance_baselines"),
+        "fixed_budget_run": metrics.get("fixed_budget_run"),
+        "immediate_protocol_applied_any_seed": metrics.get(
+            "immediate_protocol_applied_any_seed"
+        ),
+        "immediate_protocol_per_seed": immediate_protocol,
+        "early_stopping_per_seed": early_stopping,
+        "epochs_requested_per_seed": [
+            item.get("epochs_requested") for item in immediate_protocol
+        ],
+        "epochs_effective_per_seed": [
+            item.get("epochs_effective") for item in immediate_protocol
+        ],
+        "epochs_trained_per_seed": [
+            item.get("epochs_trained") for item in early_stopping
+        ],
+    }
 
 
 def get_parser() -> argparse.ArgumentParser:
@@ -248,8 +310,9 @@ def get_parser() -> argparse.ArgumentParser:
         help=(
             "Apply the published immediate-answer protocol to the N=0 arm: five "
             "times the requested epochs, weight decay 0.1, grad clip 0.5. Pass "
-            "--no-immediate_protocol to hold every arm of the sweep at the same "
-            "epoch budget and optimizer settings."
+            "--no-immediate_protocol to align requested epochs and optimizer "
+            "settings across N. Sequence length still changes with N, so FLOPs "
+            "and runtime are not equalized."
         ),
     )
     parser.add_argument(
@@ -285,8 +348,9 @@ def main():
             "WARNING: N=0 runs under the immediate-answer protocol, which trains "
             f"{IMMEDIATE_PROTOCOL_EPOCH_MULTIPLIER}x the requested "
             "epochs under a different weight decay and gradient clip. The N=0 "
-            "point is therefore not compute-matched to the rest of this sweep. "
-            "Pass --no-immediate_protocol for a matched curve."
+            "point therefore does not share the same training budget/optimizer "
+            "settings as the rest of this sweep. Pass --no-immediate_protocol "
+            "to align those settings; changing N still changes sequence compute."
         )
 
     results = []
@@ -317,34 +381,7 @@ def main():
         with open(summary_path, encoding="utf-8") as f:
             report = json.load(f)
 
-        metrics = report.get("metrics", {})
-        results.append(
-            {
-                "n": n,
-                "report_path": str(summary_path),
-                "run_id": report.get("run_id"),
-                "filler_accuracy": metrics.get("filler_accuracy"),
-                "online_training_answer_accuracy": metrics.get(
-                    "best_online_training_answer_accuracy"
-                ),
-                "online_training_answer_accuracy_by_format": metrics.get(
-                    "best_online_training_answer_accuracy_by_format"
-                ),
-                "cot_answer_given_cot_accuracy": metrics.get(
-                    "cot_answer_given_cot_accuracy"
-                ),
-                "cot_result_semantic_accuracy": metrics.get(
-                    "cot_result_semantic_accuracy"
-                ),
-                "cot_match_index_accuracy": metrics.get("cot_match_index_accuracy"),
-                "cot_sum_semantic_accuracy": metrics.get(
-                    "cot_sum_semantic_accuracy"
-                ),
-                "cot_result_nll": metrics.get("cot_result_nll"),
-                "cot_result_nll_floor": metrics.get("cot_result_nll_floor"),
-                "cot_chance_baselines": metrics.get("cot_chance_baselines"),
-            }
-        )
+        results.append(summarize_run_report(n, summary_path, report))
 
     if [result["n"] for result in results] != N_VALUES:
         raise AssertionError("Sweep results are incomplete or out of order.")
@@ -355,6 +392,7 @@ def main():
             {
                 "sweep_id": sweep_id,
                 "configuration": canonical_sweep_config(args),
+                "execution_protocol": sweep_execution_protocol(args),
                 "results": results,
             },
             f,

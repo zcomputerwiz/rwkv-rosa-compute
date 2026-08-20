@@ -63,8 +63,13 @@ selection as the `CUDA Tests` workflow, with the same `EXP0_REQUIRE_RWKV_CUDA=1`
 .\scripts\run_cuda_tests.ps1 -k rwkv7_fused # extra args go to pytest
 ```
 
-It prints the resolved `cl.exe`, `nvcc`, `ninja`, and interpreter before
-running, and exits with pytest's exit code.
+It prints the selected Visual Studio installation plus the resolved `cl.exe`,
+`nvcc`, `ninja`, and interpreter before running, and exits with pytest's exit
+code. The Windows extension path has been validated with Visual Studio 2022
+(17.x). `vswhere` still selects the latest installed C++ toolchain; if that is a
+different Visual Studio family, the script emits a warning and continues rather
+than blocking a potentially compatible newer toolchain. Treat a compiler/build
+failure under that warning as a possible host-toolchain compatibility issue.
 
 This reproduces the workflow's *test* step, not its install step. Two
 differences are expected and are not failures:
