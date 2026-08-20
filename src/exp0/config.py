@@ -1,7 +1,7 @@
 """Configuration dataclasses for Experiment 0."""
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from exp0.task3sum import (
     DEFAULT_CORRUPTION_RATE,
@@ -105,6 +105,40 @@ class ModelConfig:
             )
 
 
+# Supported early-stopping targets, mapped to the direction of improvement.
+# "filler_accuracy" is validation answer accuracy; its theoretical target is 1.0.
+# "cot_result_nll" is the teacher-forced result-slot NLL; its theoretical target
+# is the measured cot_result_nll_floor, the irreducible uncertainty that
+# randomized coordinate selection imposes. A model at the floor is computing the
+# result, not guessing it, so the floor is the correct stop target rather than 0.
+EARLY_STOP_METRICS = {
+    "none": None,
+    "filler_accuracy": "max",
+    "cot_result_nll": "min",
+}
+
+EARLY_STOP_FIELDS = (
+    "early_stop_metric",
+    "early_stop_target",
+    "early_stop_tolerance",
+    "early_stop_patience",
+)
+
+
+def drop_disabled_early_stop_fields(train_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip early-stopping keys from a TrainConfig dict when the feature is off.
+
+    A disabled feature must not change the fingerprint of runs that do not use
+    it, otherwise adding the option invalidates every existing run_id and every
+    checkpoint written before it. With the feature off the run is fixed-budget
+    and its identity is the same as before these fields existed.
+    """
+    if train_dict.get("early_stop_metric", "none") == "none":
+        for key in EARLY_STOP_FIELDS:
+            train_dict.pop(key, None)
+    return train_dict
+
+
 @dataclass
 class TrainConfig:
     """Configuration for training, optimization, and data loading."""
@@ -131,6 +165,14 @@ class TrainConfig:
     serial_ratio: float = 0.0
     immediate_ratio: float = 0.0
     neutral_ratio: float = 0.0
+    # Early stopping. "none" keeps the fixed-budget protocol, in which `epochs`
+    # is exactly the number of epochs trained. Any other value makes `epochs` a
+    # ceiling instead, which is a different experimental protocol: see
+    # EARLY_STOP_METRICS for the supported targets.
+    early_stop_metric: str = "none"
+    early_stop_target: Optional[float] = None
+    early_stop_tolerance: float = 0.0
+    early_stop_patience: int = 1
 
     def __post_init__(self):
         format_ratios = {
@@ -143,6 +185,16 @@ class TrainConfig:
         for name, value in format_ratios.items():
             if value < 0.0:
                 raise ValueError(f"{name} must be non-negative; got {value!r}")
+        if self.early_stop_metric not in EARLY_STOP_METRICS:
+            raise ValueError(
+                "early_stop_metric must be one of: "
+                f"{', '.join(sorted(EARLY_STOP_METRICS))}; "
+                f"got {self.early_stop_metric!r}"
+            )
+        if self.early_stop_tolerance < 0.0:
+            raise ValueError("early_stop_tolerance must be non-negative.")
+        if self.early_stop_patience < 1:
+            raise ValueError("early_stop_patience must be at least one epoch.")
         if self.num_workers < 0 or self.val_num_workers < 0:
             raise ValueError("DataLoader worker counts must be non-negative.")
         if self.prefetch_factor <= 0:

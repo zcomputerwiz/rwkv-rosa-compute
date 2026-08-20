@@ -1,5 +1,6 @@
 """Micro tests for Experiment 0 checkpoint save and exact resume."""
 
+import dataclasses
 import random
 from pathlib import Path
 
@@ -260,3 +261,29 @@ def test_runner_checkpoint_defaults_and_resume_seed_guard(tmp_path, monkeypatch)
     monkeypatch.setattr("sys.argv", argv)
     with pytest.raises(ValueError, match="requires exactly one training seed"):
         run_experiment.main()
+
+
+def test_fixed_budget_checkpoint_signature_omits_early_stop_fields():
+    """Enabling the option must not invalidate checkpoints written without it."""
+    model_cfg, train_cfg, task_cfg, train_ds, _ = _tiny_training_fixture()
+
+    def signature_for(cfg):
+        return train_module._checkpoint_signature(
+            model_cfg,
+            cfg,
+            task_cfg,
+            train_ds,
+            epochs=cfg.epochs,
+            steps_per_epoch=4,
+            checkpoint_run_id="run",
+        )
+
+    fixed_budget = signature_for(train_cfg)
+    assert "early_stop_metric" not in fixed_budget["training"]
+
+    enabled = signature_for(
+        dataclasses.replace(train_cfg, early_stop_metric="filler_accuracy")
+    )
+    assert enabled["training"]["early_stop_metric"] == "filler_accuracy"
+    with pytest.raises(ValueError):
+        validate_checkpoint_signature(enabled, fixed_budget)
