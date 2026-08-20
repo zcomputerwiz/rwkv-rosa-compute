@@ -147,6 +147,34 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--out_dir", type=str, default="results/exp0")
     parser.add_argument(
+        "--checkpoint_every_steps",
+        type=int,
+        default=5000,
+        help=(
+            "Write rolling latest.pt checkpoints every N optimizer steps plus "
+            "a permanent checkpoint after each completed epoch. Use 0 to disable "
+            "automatic checkpoint creation."
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint_dir",
+        type=str,
+        default=None,
+        help=(
+            "Checkpoint root. Defaults to <out_dir>/checkpoints/<run_id>; each "
+            "training seed receives its own subdirectory."
+        ),
+    )
+    parser.add_argument(
+        "--resume_checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Resume one training seed from an Experiment 0 latest.pt or "
+            "epoch_NNN.pt checkpoint. Requires exactly one --seeds value."
+        ),
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default="cuda" if torch.cuda.is_available() else "cpu",
@@ -365,10 +393,22 @@ def main():
         raise ValueError("num_samples must be greater than zero.")
     if not args.seeds:
         raise ValueError("At least one training seed is required.")
+    if args.checkpoint_every_steps < 0:
+        raise ValueError("checkpoint_every_steps must be non-negative.")
+    if args.resume_checkpoint is not None and len(args.seeds) != 1:
+        raise ValueError("--resume_checkpoint requires exactly one training seed.")
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     report_path = get_report_path(args, task_cfg, model_cfg, train_cfg_base)
+    run_id = compute_run_id(
+        model_cfg,
+        train_cfg_base,
+        task_cfg,
+        args.eval_seed,
+        args.val_samples,
+        args.seeds,
+    )
     current_run_config = canonical_run_config(
         model_cfg,
         train_cfg_base,
@@ -379,6 +419,19 @@ def main():
     )
     if _check_existing_report(report_path, current_run_config):
         return
+
+    checkpointing_requested = (
+        args.checkpoint_every_steps > 0
+        or args.checkpoint_dir is not None
+        or args.resume_checkpoint is not None
+    )
+    checkpoint_root = None
+    if checkpointing_requested:
+        checkpoint_root = (
+            Path(args.checkpoint_dir).expanduser()
+            if args.checkpoint_dir is not None
+            else out_dir / "checkpoints" / run_id
+        )
 
     vocab = build_default_vocab(
         length=args.length,
@@ -474,6 +527,15 @@ def main():
             fused_adamw=args.fused_adamw,
         )
 
+        seed_checkpoint_dir = (
+            checkpoint_root / f"seed_{seed}"
+            if checkpoint_root is not None
+            else None
+        )
+        resume_checkpoint = (
+            args.resume_checkpoint if args.resume_checkpoint is not None else None
+        )
+
         trained_model, history = train_model(
             model_cfg,
             train_cfg,
@@ -481,6 +543,10 @@ def main():
             train_ds,
             filler_val_dataset=filler_val_ds,
             cot_val_dataset=cot_val_ds,
+            checkpoint_dir=seed_checkpoint_dir,
+            checkpoint_every_steps=args.checkpoint_every_steps,
+            resume_checkpoint=resume_checkpoint,
+            checkpoint_run_id=run_id,
         )
         history["seed"] = seed
         history["training_seed"] = seed
