@@ -236,6 +236,54 @@ def test_mid_epoch_checkpoint_resume_matches_uninterrupted_training(tmp_path, mo
     assert (interrupted_dir / "epoch_002.pt").is_file()
 
 
+def test_resume_from_qualifying_epoch_checkpoint_does_not_train_extra_epoch(tmp_path):
+    model_cfg, train_cfg, task_cfg, train_ds, val_ds = _tiny_training_fixture()
+    train_cfg = dataclasses.replace(
+        train_cfg,
+        epochs=3,
+        early_stop_metric="filler_accuracy",
+        early_stop_target=0.0,
+        early_stop_patience=1,
+    )
+    checkpoint_dir = tmp_path / "early-stop-resume"
+
+    _, stopped_history = train_model(
+        model_cfg,
+        train_cfg,
+        task_cfg,
+        train_ds,
+        filler_val_dataset=val_ds,
+        checkpoint_dir=checkpoint_dir,
+        checkpoint_run_id="early-stop-resume",
+    )
+    assert stopped_history["epochs_trained"] == 1
+    assert stopped_history["early_stopping"]["triggered"] is True
+
+    epoch_checkpoint = checkpoint_dir / "epoch_001.pt"
+    assert epoch_checkpoint.is_file()
+    saved_payload = load_training_checkpoint(epoch_checkpoint)
+    saved_steps = saved_payload["progress"]["optimizer_steps"]
+    assert not (checkpoint_dir / "epoch_002.pt").exists()
+
+    _, resumed_history = train_model(
+        model_cfg,
+        train_cfg,
+        task_cfg,
+        train_ds,
+        filler_val_dataset=val_ds,
+        checkpoint_dir=checkpoint_dir,
+        resume_checkpoint=epoch_checkpoint,
+        checkpoint_run_id="early-stop-resume",
+    )
+
+    assert resumed_history["optimizer_steps"] == saved_steps
+    assert resumed_history["epochs_trained"] == 1
+    assert resumed_history["early_stopping"]["criterion_reached"] is True
+    assert resumed_history["early_stopping"]["triggered"] is True
+    assert resumed_history["early_stopping"]["stopped_after_epoch"] == 1
+    assert not (checkpoint_dir / "epoch_002.pt").exists()
+
+
 def test_runner_checkpoint_defaults_and_resume_seed_guard(tmp_path, monkeypatch):
     args = run_experiment.get_parser().parse_args([])
     assert args.checkpoint_every_steps == 5000
