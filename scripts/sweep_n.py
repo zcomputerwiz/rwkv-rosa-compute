@@ -55,7 +55,7 @@ def build_runner_command(
             "--head_dim",
             str(args.head_dim),
             "--output_vocab_size",
-            str(args.output_vocab_size),
+            str(getattr(args, "output_vocab_size", 32000)),
             "--num_filler",
             str(n),
             "--length",
