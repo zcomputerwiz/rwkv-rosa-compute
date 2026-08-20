@@ -7,6 +7,7 @@ import pytest
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
 from exp0.dataset import Task3SumDataset, build_default_vocab, generate_packed_instances
 from exp0.evaluate import compute_run_id
+from exp0.generation import generate_protocol_packed_instances
 from exp0.sequences import format_a_parallel_cot
 from exp0.task3sum import (
     LEGACY_GENERATOR,
@@ -90,6 +91,25 @@ def test_source_generator_matches_independent_oracle(target):
             generator_mode=SOURCE_GENERATOR,
         )
         assert actual == expected
+
+
+def test_protocol_generation_samples_class_vector_before_tuple_contents():
+    seed = 4321
+    count = 40
+    true_rate = 0.3
+    expected_rng = random.Random(seed)
+    expected_labels = [expected_rng.random() < true_rate for _ in range(count)]
+
+    packed = generate_protocol_packed_instances(
+        count,
+        length=6,
+        dimension=3,
+        true_rate=true_rate,
+        rng=random.Random(seed),
+        generator_mode=SOURCE_GENERATOR,
+    )
+
+    assert packed.has_3sum.tolist() == expected_labels
 
 
 def test_legacy_generator_remains_explicitly_available():
@@ -199,3 +219,13 @@ def test_generator_protocol_changes_run_identity():
     source_id = compute_run_id(model, train, source, 9999, 2000, [42])
     legacy_id = compute_run_id(model, train, legacy, 9999, 2000, [42])
     assert source_id != legacy_id
+
+
+def test_true_rate_changes_run_identity():
+    model = ModelConfig()
+    train = TrainConfig()
+    balanced = Task3SumConfig(true_rate=0.5)
+    shifted = Task3SumConfig(true_rate=0.4)
+    assert compute_run_id(model, train, balanced, 9999, 2000, [42]) != compute_run_id(
+        model, train, shifted, 9999, 2000, [42]
+    )
