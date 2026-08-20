@@ -78,7 +78,7 @@ def load_rwkv7_cuda_kernel() -> None:
         f"-D_CHUNK_LEN_={CHUNK_LEN}",
         "--use_fast_math",
         "-O3",
-        "-Xptxas -O3",
+        "-Xptxas=-O3",
         "--extra-device-vectorization",
     ]
     try:
