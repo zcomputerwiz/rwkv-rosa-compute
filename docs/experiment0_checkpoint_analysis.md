@@ -98,4 +98,3 @@ selection rule.
 Diagnostic artifacts and checkpoints are generated results. Keep them outside
 committed source trees unless a separate archival decision explicitly says
 otherwise.
-
