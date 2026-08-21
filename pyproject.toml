@@ -25,6 +25,12 @@ dev = [
 ]
 cuda = [
     "ninja",
+    # torch.compile needs Triton for GPU codegen. Upstream publishes no Windows
+    # wheel under the "triton" name, so Windows uses the triton-lang Windows
+    # distribution instead. Without it torch.compile silently falls back and
+    # reports no speedup.
+    "triton-windows>=3.7; sys_platform == 'win32'",
+    "triton>=3.7; sys_platform == 'linux'",
 ]
 
 [tool.setuptools.packages.find]

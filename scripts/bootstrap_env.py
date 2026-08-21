@@ -248,6 +248,15 @@ if platform.system() == "Windows":
         shutil.which("cl")
         or "not on PATH - use a Developer Command Prompt to build extensions",
     )
+try:
+    from torch.utils._triton import has_triton
+    print(
+        "triton        :",
+        "OK - torch.compile can generate GPU kernels" if has_triton()
+        else "NOT USABLE - torch.compile falls back and shows no speedup",
+    )
+except ImportError:
+    print("triton        : could not be queried on this torch build")
 
 for mod in ("rosa_compute", "exp0"):
     importlib.import_module(mod)

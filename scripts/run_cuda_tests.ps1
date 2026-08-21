@@ -116,10 +116,28 @@ if (-not (Test-Path -LiteralPath $vcvars)) {
     throw "Expected vcvars64.bat at $vcvars but it is missing."
 }
 
+# vcvars64.bat activates the installation's *default* toolset, which is not
+# necessarily the newest installed one. That matters beyond style: MSVC 14.38
+# cannot compile the C that Triton generates ("error C2059: syntax error: '}'"
+# in cuda_utils.c), so torch.compile fails on a box where 14.44 is present but
+# is not the default. Select the newest toolset unless EXP0_MSVC_TOOLSET
+# overrides it.
+$toolsetRoot = Join-Path $vsPath "VC\Tools\MSVC"
+$toolset = $env:EXP0_MSVC_TOOLSET
+if (-not $toolset -and (Test-Path -LiteralPath $toolsetRoot)) {
+    $newest = Get-ChildItem -Path $toolsetRoot -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            $parsed = $null
+            if ([version]::TryParse($_.Name, [ref]$parsed)) { $parsed }
+        } | Sort-Object -Descending | Select-Object -First 1
+    if ($newest) { $toolset = "$($newest.Major).$($newest.Minor)" }
+}
+$vcvarsArgs = if ($toolset) { "-vcvars_ver=$toolset" } else { "" }
+
 # Run vcvars in cmd and copy the resulting environment into this session; a
 # child process cannot modify its parent, so this is the only way to get the
 # compiler onto PATH for the pytest process below.
-cmd /c "`"$vcvars`" >nul 2>&1 && set" | ForEach-Object {
+cmd /c "`"$vcvars`" $vcvarsArgs >nul 2>&1 && set" | ForEach-Object {
     if ($_ -match '^([^=]+)=(.*)$') {
         Set-Item -Path "env:$($Matches[1])" -Value $Matches[2] -ErrorAction SilentlyContinue
     }
@@ -141,6 +159,7 @@ function Show-Tool {
 
 Write-Host "Toolchain:"
 Write-Host ("  {0,-9}: {1}" -f "VS", "$vsVersion  $vsPath")
+Write-Host ("  {0,-9}: {1}" -f "toolset", $(if ($toolset) { $toolset } else { "default" }))
 Show-Tool "cl.exe" "cl"
 Show-Tool "nvcc" "nvcc"
 Show-Tool "ninja" "ninja"
