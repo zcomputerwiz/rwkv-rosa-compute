@@ -93,6 +93,10 @@ def build_batches(vocab, task_cfg, batch_size: int, num_filler: int, count: int)
         collate_fn=pad_collate_fn,
         generator=torch.Generator().manual_seed(7),
         drop_last=True,
+        # Matches train_cfg.pin_memory, which defaults True on CUDA. Without it
+        # every host-to-device copy is synchronous regardless of non_blocking,
+        # so an unpinned benchmark measures a transfer path training never uses.
+        pin_memory=True,
     )
     return list(loader)
 

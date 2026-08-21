@@ -109,13 +109,25 @@ def grouped_loss_backward(
     supervised_head_positions = 0
     group_records: List[Dict[str, int]] = []
 
+    # Transfer once, then gather on the device. Indexing on the host first would
+    # allocate a fresh unpinned tensor, and a host-to-device copy out of pageable
+    # memory is synchronous however non_blocking is set - so per-subgroup host
+    # indexing silently discards the DataLoader's pin_memory work and puts the
+    # gather in the critical path. The full rectangle is cheap to move; it is
+    # computing over it that grouping avoids.
+    resident = {
+        key: batch[key].to(device, non_blocking=True)
+        for key in ("input_tuples", "targets", "loss_mask")
+    }
+
     for length, index in group_by_length(batch):
         if length < 2:
             # A single target position yields no next-token prediction.
             continue
-        sub_tuples = batch["input_tuples"][index].to(device, non_blocking=True)
-        sub_targets = batch["targets"][index, :length].to(device, non_blocking=True)
-        sub_mask = batch["loss_mask"][index, :length].to(device, non_blocking=True)
+        rows = index.to(device, non_blocking=True)
+        sub_tuples = resident["input_tuples"][rows]
+        sub_targets = resident["targets"][rows, :length]
+        sub_mask = resident["loss_mask"][rows, :length]
 
         context = autocast() if autocast is not None else _null_context()
         with context:

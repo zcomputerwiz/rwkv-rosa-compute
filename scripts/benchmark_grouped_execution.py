@@ -95,6 +95,8 @@ def build_batches(
         collate_fn=pad_collate_fn,
         generator=torch.Generator().manual_seed(seed),
         drop_last=True,
+        # Matches train_cfg.pin_memory, which defaults True on CUDA.
+        pin_memory=True,
     )
     return list(loader)
 
