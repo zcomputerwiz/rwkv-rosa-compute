@@ -6,11 +6,14 @@ import os
 import random
 import shutil
 import uuid
+import warnings
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import torch
 from torch.utils.data import Sampler
+
+from exp0.config import DATALOADER_NEUTRAL_FIELDS
 
 CHECKPOINT_VERSION = 1
 
@@ -158,16 +161,78 @@ def load_training_checkpoint(path: str | Path) -> dict[str, Any]:
     return payload
 
 
+# Fields inside the "training" section that describe how work is scheduled
+# rather than what is computed. A checkpoint whose only disagreement is here
+# describes the same experiment, so it is accepted with a warning instead of
+# being rejected.
+CHECKPOINT_TOLERATED_FIELDS = frozenset(DATALOADER_NEUTRAL_FIELDS)
+
+
+def _training_disagreements(
+    saved: Mapping[str, Any],
+    expected: Mapping[str, Any],
+) -> list[str]:
+    """Field names differing inside the training section, tolerated or not."""
+    saved_training = saved.get("training") or {}
+    expected_training = expected.get("training") or {}
+    if not isinstance(saved_training, Mapping) or not isinstance(
+        expected_training, Mapping
+    ):
+        return ["training"]
+    keys = set(saved_training) | set(expected_training)
+    return [
+        key
+        for key in sorted(keys)
+        if saved_training.get(key) != expected_training.get(key)
+    ]
+
+
 def validate_checkpoint_signature(
     saved: Mapping[str, Any],
     expected: Mapping[str, Any],
 ) -> None:
-    """Reject resumes whose scientific/training configuration changed."""
+    """Reject resumes whose scientific/training configuration changed.
+
+    DataLoader settings are exempt. They cannot change what a run computes, so
+    refusing to resume a run because it now wants more workers would be an
+    obstacle with no scientific content. Such a checkpoint is accepted with a
+    warning.
+
+    ``run_id`` is exempt only as a consequence of that, and only when every
+    other section already matches. The run_id is a hash of exactly the model,
+    task, evaluation, and training inputs recorded here; if all of those agree
+    and the only training disagreements are DataLoader fields, the differing
+    hash can only come from those fields. That makes the exemption a deduction
+    rather than an override - it is how checkpoints written before DataLoader
+    settings became identity-neutral remain resumable.
+    """
     if dict(saved) == dict(expected):
         return
 
     keys = sorted(set(saved) | set(expected))
     differing = [key for key in keys if saved.get(key) != expected.get(key)]
+
+    training_diffs = (
+        _training_disagreements(saved, expected) if "training" in differing else []
+    )
+    tolerated_training = set(training_diffs) <= CHECKPOINT_TOLERATED_FIELDS
+    # run_id may differ only as a downstream effect of the tolerated fields, and
+    # only when nothing else disagrees.
+    substantive = [
+        key for key in differing if key not in ("training", "run_id")
+    ]
+    if tolerated_training and not substantive:
+        detail = ", ".join(training_diffs) or "run_id only"
+        warnings.warn(
+            "Resuming a checkpoint whose DataLoader settings differ from the "
+            f"requested run ({detail}). These do not change what the run "
+            "computes, so the resume is allowed and the signature is repaired. "
+            "Every scientific field matched exactly.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return
+
     raise ValueError(
         "Training checkpoint does not match the requested run. "
         "Differing signature sections: " + ", ".join(differing)

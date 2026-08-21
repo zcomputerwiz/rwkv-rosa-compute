@@ -102,3 +102,55 @@ Epoch snapshots are saved once and then atomically copied to `latest.pt`. The pe
 - incompatible-checkpoint rejection;
 - simulated mid-epoch process loss followed by exact resume;
 - continuation schedule construction, optimizer state restoration, and non-canonical metadata enforcement.
+
+## DataLoader settings are not part of run identity
+
+Worker count, prefetch depth, and memory pinning change how batches are
+produced, never what they contain. `Task3SumDataset.__getitem__` derives every
+item from `(seed, idx)` alone — the format code is precomputed per index and the
+per-item RNG is `random.Random(f"{seed}_{idx}")` — so an index yields the same
+example whichever worker builds it, and `DataLoader` preserves batch order for a
+fixed sampler.
+
+They were nonetheless fingerprinted into the `run_id`, which meant giving a run
+more workers made it, by convention, a different experiment. That is now fixed:
+
+```text
+num_workers, val_num_workers, pin_memory, prefetch_factor
+  -> normalized to their defaults in drop_identity_neutral_fields
+```
+
+Normalized rather than removed, so the canonical config keeps the same shape.
+
+### Resuming across a change
+
+`validate_checkpoint_signature` accepts a checkpoint whose only disagreements
+are these fields, emits a `RuntimeWarning`, and proceeds.
+
+`run_id` is exempt too, but **only as a consequence** and only when every other
+section already matches. The `run_id` is a hash of exactly the model, task,
+evaluation, and training inputs in the signature; if all of those agree and the
+only training disagreements are DataLoader fields, the differing hash can only
+have come from those fields. The exemption is a deduction, not an override — a
+`run_id` mismatch alongside any substantive difference is still rejected, and so
+is a mixture of loader drift and a real protocol change.
+
+### Runs whose identity shifted
+
+Three completed runs used `num_workers=2` and therefore hash differently now:
+
+```text
+74e021c82a17c377  ->  b8d95a7a...
+9e81911f97b19e87  ->  44eb57e0...
+ef1125605d565142  ->  951e3d23...
+```
+
+Their checkpoints remain resumable — that is what the tolerance above is for —
+but recomputing the identity of those configs no longer reproduces the recorded
+directory or filename. Runs with the default `num_workers=0` are unaffected;
+verified against every result file in `results/`.
+
+The practical consequence worth knowing: a run and its more-parallel rerun now
+share a `run_id`, and therefore an output filename. That is the intended
+semantics — they are the same experiment — but the later run overwrites the
+earlier report rather than sitting beside it.
