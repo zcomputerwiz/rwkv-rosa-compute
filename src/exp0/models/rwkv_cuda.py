@@ -18,6 +18,8 @@ SUPPORTED_HEAD_DIM = 64
 PAD_RAW_W = -30.0
 _KERNEL_LOADED = False
 _KERNEL_LOAD_ERROR: Exception | None = None
+_STEP_KERNEL_LOADED = False
+_STEP_KERNEL_LOAD_ERROR: Exception | None = None
 
 
 def _source_dir() -> Path:
@@ -35,6 +37,13 @@ def _operator_registered() -> bool:
             torch.ops.rwkv7_clampw,
             "backward",
         )
+    except Exception:
+        return False
+
+
+def _step_operator_registered() -> bool:
+    try:
+        return hasattr(torch.ops.rwkv7_step_exp0, "forward")
     except Exception:
         return False
 
@@ -95,6 +104,120 @@ def load_rwkv7_cuda_kernel() -> None:
     except Exception as exc:
         _KERNEL_LOAD_ERROR = exc
         raise RuntimeError("Failed to compile/load the RWKV-7 CUDA kernel") from exc
+
+
+def load_rwkv7_step_cuda_kernel() -> None:
+    """Compile/load the forward-only persistent-state step kernel once."""
+    global _STEP_KERNEL_LOADED, _STEP_KERNEL_LOAD_ERROR
+
+    if _STEP_KERNEL_LOADED:
+        return
+    if _step_operator_registered():
+        _STEP_KERNEL_LOADED = True
+        return
+    if _STEP_KERNEL_LOAD_ERROR is not None:
+        raise RuntimeError(
+            "RWKV-7 CUDA step kernel previously failed to load"
+        ) from _STEP_KERNEL_LOAD_ERROR
+    if not torch.cuda.is_available():
+        raise RuntimeError("RWKV-7 CUDA step requires CUDA")
+    if not torch.cuda.is_bf16_supported():
+        raise RuntimeError("RWKV-7 CUDA step requires CUDA BF16 support")
+
+    source_dir = Path(__file__).resolve().parent / "cuda"
+    cpp = source_dir / "rwkv7_step.cpp"
+    cu = source_dir / "rwkv7_step.cu"
+    missing = [str(path) for path in (cpp, cu) if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "RWKV-7 CUDA step sources are unavailable: " + ", ".join(missing)
+        )
+
+    from torch.utils.cpp_extension import load
+
+    flags = [
+        "-res-usage",
+        f"-D_N_={SUPPORTED_HEAD_DIM}",
+        "--use_fast_math",
+        "-O3",
+        "-lineinfo",
+        "-Xptxas=-O3",
+    ]
+    try:
+        load(
+            name="rwkv7_step_exp0_extension",
+            sources=[str(cu), str(cpp)],
+            is_python_module=False,
+            verbose=False,
+            extra_cuda_cflags=flags,
+        )
+        if not _step_operator_registered():
+            raise RuntimeError(
+                "CUDA extension loaded without registering rwkv7_step_exp0"
+            )
+        _STEP_KERNEL_LOADED = True
+    except Exception as exc:
+        _STEP_KERNEL_LOAD_ERROR = exc
+        raise RuntimeError("Failed to compile/load RWKV-7 CUDA step kernel") from exc
+
+
+@torch.no_grad()
+def rwkv7_cuda_step(
+    r: torch.Tensor,
+    raw_w: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    state: torch.Tensor,
+    *,
+    head_dim: int = SUPPORTED_HEAD_DIM,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run one forward-only B=1 RWKV-7 transition, mutating FP32 state.
+
+    Recurrence inputs must be contiguous BF16 CUDA tensors with shape
+    ``[1, 768]``. ``state`` must be contiguous FP32 with shape
+    ``[1, 12, 64, 64]``. The kernel updates ``state`` in place and returns that
+    same tensor as ``new_state`` so repeated calls do not allocate recurrent
+    state. The BF16 output tensor has shape ``[1, 768]``.
+
+    This is a strict prototype interface: unsupported shapes and dtypes fail
+    rather than falling back to the padded training recurrence.
+    """
+    if head_dim != SUPPORTED_HEAD_DIM:
+        raise ValueError(
+            f"RWKV-7 CUDA step supports head_dim={SUPPORTED_HEAD_DIM}, "
+            f"got {head_dim}"
+        )
+    inputs = (r, raw_w, k, v, a, b)
+    expected_input = (1, 768)
+    if any(tensor.shape != expected_input for tensor in inputs):
+        raise ValueError("RWKV-7 CUDA step inputs must all have shape [1, 768]")
+    if any(tensor.dtype != torch.bfloat16 for tensor in inputs):
+        raise TypeError("RWKV-7 CUDA step inputs must use torch.bfloat16")
+    if any(not tensor.is_cuda for tensor in (*inputs, state)):
+        raise ValueError("RWKV-7 CUDA step requires CUDA tensors")
+    if any(not tensor.is_contiguous() for tensor in (*inputs, state)):
+        raise ValueError("RWKV-7 CUDA step inputs and state must be contiguous")
+    expected_state = (1, 12, SUPPORTED_HEAD_DIM, SUPPORTED_HEAD_DIM)
+    if state.shape != expected_state:
+        raise ValueError(
+            f"RWKV-7 CUDA step state must have shape {expected_state}, "
+            f"got {tuple(state.shape)}"
+        )
+    if state.dtype != torch.float32:
+        raise TypeError("RWKV-7 CUDA step state must use torch.float32")
+    if any(tensor.device != r.device for tensor in (*inputs[1:], state)):
+        raise ValueError("RWKV-7 CUDA step inputs and state must share a device")
+
+    load_rwkv7_step_cuda_kernel()
+    out = torch.empty_like(r)
+    torch.ops.rwkv7_step_exp0.forward(
+        *(tensor.view(1, 12, SUPPORTED_HEAD_DIM) for tensor in inputs),
+        state,
+        out.view(1, 12, SUPPORTED_HEAD_DIM),
+    )
+    return out, state
 
 
 class _RWKV7ClampW(torch.autograd.Function):

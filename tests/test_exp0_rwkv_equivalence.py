@@ -5,7 +5,14 @@ import pytest
 import torch
 import torch.nn as nn
 
-from exp0.models.rwkv import RWKV7_OP, RWKV7_OP_step, RWKV7Backbone, RWKV7TimeMix
+from exp0.config import ModelConfig
+from exp0.models.rwkv import (
+    RWKV7_OP,
+    RWKV7Backbone,
+    RWKV7TimeMix,
+    rwkv7_reference_step,
+)
+from exp0.train import create_model
 
 
 def numpy_time_mix_step(x, v_first, last_x, S, params, n_head=1, head_size=64):
@@ -190,29 +197,40 @@ def test_rwkv7_time_mix_initialization_and_gradients():
 
 
 @pytest.mark.exp0
-def test_rwkv7_op_chunked_vs_step_recurrent():
-    """F3.2: Assert chunked forward pass matches step-wise recurrent forward pass."""
-    B, T, C = 2, 6, 128
+@pytest.mark.parametrize("timesteps", [1, 2, 4, 16, 17, 32, 128])
+def test_rwkv7_op_sequence_vs_step_recurrent(timesteps):
+    """The explicit raw-w step API matches sequence outputs and final state."""
+    B, C = 2, 128
     N = 64
     H = C // N
 
     torch.manual_seed(42)
-    r = torch.randn(B, T, C)
-    w = torch.randn(B, T, C)
-    k = torch.randn(B, T, C)
-    v = torch.randn(B, T, C)
-    a = torch.randn(B, T, C)
-    b = torch.randn(B, T, C)
+    r = torch.randn(B, timesteps, C)
+    raw_w = torch.randn(B, timesteps, C)
+    k = torch.randn(B, timesteps, C) * 0.1
+    v = torch.randn(B, timesteps, C) * 0.1
+    a = torch.randn(B, timesteps, C) * 0.1
+    b = torch.randn(B, timesteps, C) * 0.1
+    w = -torch.nn.functional.softplus(-raw_w) - 0.5
 
-    out_chunked = RWKV7_OP(r, w, k, v, a, b, head_dim=N)
+    out_sequence, final_state = RWKV7_OP(
+        r,
+        w,
+        k,
+        v,
+        a,
+        b,
+        head_dim=N,
+        return_state=True,
+    )
 
     out_step_list = []
     state = torch.zeros((B, H, N, N), dtype=torch.float32)
 
-    for t in range(T):
-        out_t, state = RWKV7_OP_step(
+    for t in range(timesteps):
+        out_t, state = rwkv7_reference_step(
             r[:, t, :],
-            w[:, t, :],
+            raw_w[:, t, :],
             k[:, t, :],
             v[:, t, :],
             a[:, t, :],
@@ -223,7 +241,8 @@ def test_rwkv7_op_chunked_vs_step_recurrent():
         out_step_list.append(out_t)
 
     out_step = torch.stack(out_step_list, dim=1)
-    assert torch.allclose(out_chunked, out_step, atol=1e-5), f"Max diff: {(out_chunked - out_step).abs().max()}"
+    torch.testing.assert_close(out_sequence, out_step, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(final_state, state, atol=1e-5, rtol=1e-5)
 
 
 @pytest.mark.exp0
@@ -241,6 +260,45 @@ def test_rwkv7_state_reset_clean_isolation():
     out_b_after_a = backbone(seq_b)
 
     assert torch.allclose(out_b_alone, out_b_after_a, atol=1e-6), "State must reset cleanly between separate forward passes"
+
+
+@pytest.mark.exp0
+@pytest.mark.parametrize("timesteps", [1, 2, 4, 16, 17, 32])
+def test_rwkv7_full_model_sequence_matches_persistent_steps(timesteps):
+    """Embedding, layers, normalization, and head match chained steps."""
+    torch.manual_seed(1701)
+    model = create_model(
+        ModelConfig(
+            architecture="rwkv",
+            rwkv_kernel="reference",
+            hidden_size=128,
+            num_hidden_layers=2,
+            intermediate_size=256,
+            head_dim=64,
+            vocab_size=64,
+        ),
+        d_input=32,
+    )
+    for layer in model.backbone.layers:
+        nn.init.normal_(layer.time_mix.output.weight, std=0.02)
+        nn.init.normal_(layer.channel_mix.value.weight, std=0.02)
+
+    targets = torch.randint(0, 64, (1, timesteps))
+    tuples = torch.empty((1, 0, 32))
+    sequence_logits = model(tuples, targets)
+
+    state = model.init_rwkv_step_state()
+    step_logits = []
+    for timestep in range(timesteps):
+        logits, state = model.rwkv_step(targets[:, timestep], state)
+        step_logits.append(logits)
+
+    torch.testing.assert_close(
+        sequence_logits,
+        torch.stack(step_logits, dim=1),
+        rtol=2e-5,
+        atol=2e-5,
+    )
 
 
 @pytest.mark.exp0

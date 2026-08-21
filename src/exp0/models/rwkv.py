@@ -1,12 +1,22 @@
 """0B Backbone: RWKV-7 model adapter supporting inputs_embeds."""
 
 import math
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from exp0.models.rwkv_cuda import rwkv7_cuda_recurrence
+from exp0.models.rwkv_cuda import rwkv7_cuda_recurrence, rwkv7_cuda_step
+
+
+@dataclass
+class RWKV7LayerState:
+    """Caller-owned persistent state for one RWKV-7 layer."""
+
+    time_mix_previous: torch.Tensor
+    channel_mix_previous: torch.Tensor
+    recurrence: torch.Tensor
 
 
 def RWKV7_OP(
@@ -17,7 +27,10 @@ def RWKV7_OP(
     a: torch.Tensor,
     b: torch.Tensor,
     head_dim: int = 64,
-) -> torch.Tensor:
+    *,
+    initial_state: torch.Tensor | None = None,
+    return_state: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Reference FP32 RWKV-7 sequence recurrence.
 
     ``w`` is the already transformed log-decay used by the historical
@@ -40,11 +53,24 @@ def RWKV7_OP(
         device=r.device,
         dtype=torch.float32,
     )
-    state = torch.zeros(
-        (batch, heads, head_size, head_size),
-        device=r.device,
-        dtype=torch.float32,
-    )
+    if initial_state is None:
+        state = torch.zeros(
+            (batch, heads, head_size, head_size),
+            device=r.device,
+            dtype=torch.float32,
+        )
+    else:
+        expected = (batch, heads, head_size, head_size)
+        if initial_state.shape != expected:
+            raise ValueError(
+                f"RWKV-7 state must have shape {expected}, "
+                f"got {tuple(initial_state.shape)}"
+            )
+        if initial_state.dtype != torch.float32:
+            raise TypeError("RWKV-7 state must use torch.float32")
+        if initial_state.device != r.device:
+            raise ValueError("RWKV-7 state and recurrence inputs must share a device")
+        state = initial_state
 
     for timestep in range(timesteps):
         kk = k[:, timestep, :].view(batch, heads, 1, head_size)
@@ -59,7 +85,67 @@ def RWKV7_OP(
         )
         out[:, timestep, :] = (state @ rr).view(batch, heads, head_size)
 
-    return out.view(batch, timesteps, channels)
+    result = out.view(batch, timesteps, channels)
+    if return_state:
+        return result, state
+    return result
+
+
+def rwkv7_reference_step(
+    r: torch.Tensor,
+    raw_w: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    state: torch.Tensor,
+    head_dim: int = 64,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run one logical RWKV-7 transition with explicit recurrent state.
+
+    The six recurrence inputs have shape ``[B, C]`` and may use any floating
+    dtype. ``raw_w`` is the pre-softplus decay parameter used by the CUDA
+    training kernel. The state has shape ``[B, H, N, N]`` where ``N`` is
+    ``head_dim`` and ``H = C / N``. It must be contiguous FP32 on the input
+    device; rows and columns are the value and key/receptance dimensions,
+    respectively.
+
+    This reference function does not mutate ``state``. It returns an FP32
+    output of shape ``[B, C]`` and a newly allocated FP32 next state. Callers
+    own both the input and returned state tensors.
+    """
+    batch, channels = r.shape
+    heads = channels // head_dim
+    expected_input = (batch, channels)
+    tensors = (raw_w, k, v, a, b)
+    if channels % head_dim:
+        raise ValueError("RWKV channels must be divisible by head_dim")
+    if any(tensor.shape != expected_input for tensor in tensors):
+        raise ValueError("RWKV-7 step inputs must all have shape [B, C]")
+    expected_state = (batch, heads, head_dim, head_dim)
+    if state.shape != expected_state:
+        raise ValueError(
+            f"RWKV-7 state must have shape {expected_state}, "
+            f"got {tuple(state.shape)}"
+        )
+    if state.dtype != torch.float32:
+        raise TypeError("RWKV-7 state must use torch.float32")
+    if not state.is_contiguous():
+        raise ValueError("RWKV-7 state must be contiguous")
+    if any(tensor.device != r.device for tensor in (*tensors, state)):
+        raise ValueError("RWKV-7 state and recurrence inputs must share a device")
+
+    transformed_w = -F.softplus(-raw_w.float()) - 0.5
+    return RWKV7_OP_step(
+        r,
+        transformed_w,
+        k,
+        v,
+        a,
+        b,
+        state,
+        head_dim=head_dim,
+    )
 
 
 def RWKV7_OP_step(
@@ -72,7 +158,7 @@ def RWKV7_OP_step(
     state: torch.Tensor,
     head_dim: int = 64,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Single-step reference recurrent forward pass for RWKV7_OP."""
+    """Legacy one-step helper accepting RWKV7_OP's transformed ``w``."""
     batch, channels = r_t.size()
     head_size = head_dim
     heads = channels // head_size
@@ -306,6 +392,94 @@ class RWKV7TimeMix(nn.Module):
 
         return out, v_first
 
+    def forward_step(
+        self,
+        x: torch.Tensor,
+        v_first: torch.Tensor | None,
+        previous_x: torch.Tensor,
+        recurrence_state: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run one token with caller-owned shift and recurrent state."""
+        batch, channels = x.shape
+        heads = self.num_heads
+        if channels != self.hidden_size:
+            raise ValueError(
+                f"RWKV-7 step expected hidden size {self.hidden_size}, "
+                f"got {channels}"
+            )
+        if previous_x.shape != x.shape:
+            raise ValueError("RWKV-7 TimeMix previous state must match x")
+
+        xx = previous_x - x
+        xr = x + xx * self.x_r.view(1, channels)
+        xw = x + xx * self.x_w.view(1, channels)
+        xk = x + xx * self.x_k.view(1, channels)
+        xv = x + xx * self.x_v.view(1, channels)
+        xa = x + xx * self.x_a.view(1, channels)
+        xg = x + xx * self.x_g.view(1, channels)
+
+        r = self.receptance(xr)
+        raw_w = self.w0.view(1, channels) + torch.tanh(xw @ self.w1) @ self.w2
+        k = self.key(xk)
+        v = self.value(xv)
+
+        if self.layer_id == 0 or v_first is None:
+            v_first = v
+        else:
+            v = v + (v_first - v) * torch.sigmoid(
+                self.v0.view(1, channels) + (xv @ self.v1) @ self.v2
+            )
+
+        a = torch.sigmoid(
+            self.a0.view(1, channels) + (xa @ self.a1) @ self.a2
+        )
+        g = torch.sigmoid(xg @ self.g1) @ self.g2
+
+        kk = k * self.k_k.view(1, channels)
+        kk = F.normalize(
+            kk.view(batch, heads, self.head_dim),
+            dim=-1,
+            p=2.0,
+        ).view(batch, channels)
+        k = k * (1 + (a - 1) * self.k_a.view(1, channels))
+
+        if self.rwkv_kernel == "cuda":
+            out, next_recurrence = rwkv7_cuda_step(
+                r,
+                raw_w,
+                k,
+                v,
+                -kk,
+                kk * a,
+                recurrence_state,
+                head_dim=self.head_dim,
+            )
+        else:
+            out, next_recurrence = rwkv7_reference_step(
+                r,
+                raw_w,
+                k,
+                v,
+                -kk,
+                kk * a,
+                recurrence_state,
+                head_dim=self.head_dim,
+            )
+
+        out = self.ln_x(out)
+        rkv = (
+            r.view(batch, heads, self.head_dim)
+            * k.view(batch, heads, self.head_dim)
+            * self.r_k
+        ).sum(dim=-1, keepdim=True)
+        out = out + (rkv * v.view(batch, heads, self.head_dim)).view(
+            batch,
+            channels,
+        )
+        out = self.output(out * g)
+        previous_x.copy_(x)
+        return out, v_first, next_recurrence
+
 
 class RWKV7ChannelMix(nn.Module):
     """Complete RWKV-7 Channel-Mixing (FFN) block with token shift."""
@@ -339,6 +513,21 @@ class RWKV7ChannelMix(nn.Module):
         k = x + xx * self.x_k
         k = torch.relu(self.key(k)).pow(2)
         return self.value(k)
+
+    def forward_step(
+        self,
+        x: torch.Tensor,
+        previous_x: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run one token and update the caller-owned token-shift state."""
+        if previous_x.shape != x.shape:
+            raise ValueError("RWKV-7 ChannelMix previous state must match x")
+        xx = previous_x - x
+        k = x + xx * self.x_k.view(1, x.shape[-1])
+        k = torch.relu(self.key(k)).pow(2)
+        out = self.value(k)
+        previous_x.copy_(x)
+        return out
 
 
 class RWKV7Layer(nn.Module):
@@ -387,6 +576,30 @@ class RWKV7Layer(nn.Module):
         x = x + self.channel_mix(self.ln2(x))
         return x, v_first
 
+    def forward_step(
+        self,
+        x: torch.Tensor,
+        v_first: torch.Tensor | None,
+        state: RWKV7LayerState,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run one forward-only token and mutate this layer's state."""
+        if self.layer_id == 0 and self.ln0 is not None:
+            x = self.ln0(x)
+
+        tm_out, v_first, next_recurrence = self.time_mix.forward_step(
+            self.ln1(x),
+            v_first,
+            state.time_mix_previous,
+            state.recurrence,
+        )
+        state.recurrence = next_recurrence
+        x = x + tm_out
+        x = x + self.channel_mix.forward_step(
+            self.ln2(x),
+            state.channel_mix_previous,
+        )
+        return x, v_first
+
 
 class RWKV7Backbone(nn.Module):
     """RWKV-7 backbone accepting inputs_embeds and threading v_first."""
@@ -423,3 +636,68 @@ class RWKV7Backbone(nn.Module):
             x, v_first = layer(x, v_first)
 
         return self.ln_out(x)
+
+    def init_step_state(
+        self,
+        batch_size: int,
+        *,
+        device: torch.device | str | None = None,
+        activation_dtype: torch.dtype | None = None,
+    ) -> list[RWKV7LayerState]:
+        """Allocate zeroed caller-owned state for forward-only stepping."""
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        parameter = next(self.parameters())
+        state_device = parameter.device if device is None else torch.device(device)
+        state_dtype = parameter.dtype if activation_dtype is None else activation_dtype
+        hidden_size = self.layers[0].time_mix.hidden_size
+        head_dim = self.layers[0].time_mix.head_dim
+        heads = hidden_size // head_dim
+        if self.layers[0].time_mix.rwkv_kernel == "cuda" and (
+            batch_size != 1
+            or hidden_size != 768
+            or heads != 12
+            or head_dim != 64
+            or state_dtype != torch.bfloat16
+        ):
+            raise ValueError(
+                "CUDA step state requires B=1, hidden=768, heads=12, "
+                "head_dim=64, and BF16 activations"
+            )
+        return [
+            RWKV7LayerState(
+                time_mix_previous=torch.zeros(
+                    (batch_size, hidden_size),
+                    device=state_device,
+                    dtype=state_dtype,
+                ),
+                channel_mix_previous=torch.zeros(
+                    (batch_size, hidden_size),
+                    device=state_device,
+                    dtype=state_dtype,
+                ),
+                recurrence=torch.zeros(
+                    (batch_size, heads, head_dim, head_dim),
+                    device=state_device,
+                    dtype=torch.float32,
+                ),
+            )
+            for _ in self.layers
+        ]
+
+    @torch.no_grad()
+    def forward_step(
+        self,
+        inputs_embeds: torch.Tensor,
+        state: list[RWKV7LayerState],
+    ) -> tuple[torch.Tensor, list[RWKV7LayerState]]:
+        """Run one token through all layers with persistent state."""
+        if inputs_embeds.ndim != 2:
+            raise ValueError("RWKV-7 step inputs_embeds must have shape [B, C]")
+        if len(state) != len(self.layers):
+            raise ValueError("RWKV-7 step state must contain one entry per layer")
+        x = inputs_embeds
+        v_first = None
+        for layer, layer_state in zip(self.layers, state):
+            x, v_first = layer.forward_step(x, v_first, layer_state)
+        return self.ln_out(x), state

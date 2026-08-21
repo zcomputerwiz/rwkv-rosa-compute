@@ -137,3 +137,29 @@ class InputEmbedWrapper(nn.Module):
     ) -> torch.Tensor:
         """Return full target-position logits for compatibility/debugging."""
         return self.head(self.target_hidden_states(input_tuples, target_ids))
+
+    def init_rwkv_step_state(
+        self,
+        batch_size: int = 1,
+        *,
+        activation_dtype: torch.dtype | None = None,
+    ):
+        """Allocate explicit per-layer state for the RWKV step API."""
+        if not hasattr(self.backbone, "init_step_state"):
+            raise TypeError("Incremental state is available only for RWKV backbones")
+        return self.backbone.init_step_state(
+            batch_size,
+            device=self.input_proj.weight.device,
+            activation_dtype=activation_dtype,
+        )
+
+    @torch.no_grad()
+    def rwkv_step(self, target_ids: torch.Tensor, state):
+        """Embed one token, run one persistent RWKV step, and project logits."""
+        if not hasattr(self.backbone, "forward_step"):
+            raise TypeError("Incremental stepping is available only for RWKV backbones")
+        if target_ids.ndim != 1:
+            raise ValueError("RWKV step target_ids must have shape [B]")
+        hidden = self._target_hidden(target_ids)
+        hidden, state = self.backbone.forward_step(hidden, state)
+        return self.head(hidden), state

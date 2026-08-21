@@ -30,6 +30,9 @@ cuda = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"exp0.models" = ["cuda/*.cpp", "cuda/*.cu"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
