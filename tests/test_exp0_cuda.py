@@ -10,8 +10,8 @@ import torch.nn.functional as F
 
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
 from exp0.dataset import Task3SumDataset, build_default_vocab, generate_packed_instances
-from exp0.models.rwkv import RWKV7_OP
-from exp0.models.rwkv_cuda import rwkv7_cuda_recurrence
+from exp0.models.rwkv import RWKV7_OP, rwkv7_reference_step
+from exp0.models.rwkv_cuda import rwkv7_cuda_recurrence, rwkv7_cuda_step
 from exp0.train import create_model, train_model
 
 pytestmark = [pytest.mark.exp0, pytest.mark.cuda]
@@ -214,6 +214,136 @@ def _require_cuda_toolkit():
             "CUDA toolkit/nvcc is unavailable; set EXP0_REQUIRE_RWKV_CUDA=1 "
             "to make this a hard failure"
         )
+
+
+def _step_inputs(timesteps):
+    shape = (timesteps, 1, 768)
+    r = torch.randn(shape, device="cuda", dtype=torch.bfloat16) * 0.1
+    raw_w = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(shape, device="cuda", dtype=torch.bfloat16) * 0.1
+    v = torch.randn(shape, device="cuda", dtype=torch.bfloat16) * 0.1
+    a = torch.randn(shape, device="cuda", dtype=torch.bfloat16) * 0.1
+    b = torch.randn(shape, device="cuda", dtype=torch.bfloat16) * 0.1
+    return r, raw_w, k, v, a, b
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("timesteps", [1, 2, 4, 16, 32, 128, 512])
+def test_rwkv7_cuda_step_chain_matches_reference(timesteps):
+    _require_cuda_toolkit()
+    if not torch.cuda.is_bf16_supported():
+        pytest.skip("CUDA device does not support BF16")
+
+    torch.manual_seed(741)
+    inputs = _step_inputs(timesteps)
+    reference_state = torch.zeros((1, 12, 64, 64), device="cuda")
+    cuda_state = reference_state.clone()
+
+    for timestep in range(timesteps):
+        step_inputs = tuple(tensor[timestep] for tensor in inputs)
+        reference_out, reference_state = rwkv7_reference_step(
+            *step_inputs,
+            reference_state,
+        )
+        cuda_out, returned_state = rwkv7_cuda_step(*step_inputs, cuda_state)
+        assert returned_state.data_ptr() == cuda_state.data_ptr()
+        torch.testing.assert_close(
+            cuda_out.float(),
+            reference_out,
+            rtol=3e-2,
+            atol=3e-2,
+        )
+
+    torch.testing.assert_close(
+        cuda_state,
+        reference_state,
+        rtol=3e-2,
+        atol=3e-2,
+    )
+
+
+@pytest.mark.slow
+def test_rwkv7_cuda_step_cudagraph_matches_eager_reference():
+    _require_cuda_toolkit()
+    if not torch.cuda.is_bf16_supported():
+        pytest.skip("CUDA device does not support BF16")
+
+    torch.manual_seed(742)
+    inputs = tuple(tensor[0] for tensor in _step_inputs(1))
+    state = torch.zeros((1, 12, 64, 64), device="cuda")
+
+    rwkv7_cuda_step(*inputs, state)
+    torch.cuda.synchronize()
+    state.zero_()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        graph_out, graph_state = rwkv7_cuda_step(*inputs, state)
+
+    state.zero_()
+    graph.replay()
+    torch.cuda.synchronize()
+    reference_out, reference_state = rwkv7_reference_step(
+        *inputs,
+        torch.zeros_like(state),
+    )
+
+    assert graph_state.data_ptr() == state.data_ptr()
+    torch.testing.assert_close(
+        graph_out.float(),
+        reference_out,
+        rtol=3e-2,
+        atol=3e-2,
+    )
+    torch.testing.assert_close(
+        state,
+        reference_state,
+        rtol=3e-2,
+        atol=3e-2,
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("timesteps", [1, 2, 4, 16, 17, 32])
+def test_rwkv7_cuda_full_model_sequence_matches_persistent_steps(timesteps):
+    _require_cuda_toolkit()
+    if not torch.cuda.is_bf16_supported():
+        pytest.skip("CUDA device does not support BF16")
+
+    torch.manual_seed(1702)
+    model = create_model(
+        ModelConfig(
+            architecture="rwkv",
+            rwkv_kernel="cuda",
+            hidden_size=768,
+            num_hidden_layers=2,
+            intermediate_size=3072,
+            head_dim=64,
+            vocab_size=256,
+            device="cuda",
+        ),
+        d_input=64,
+    ).cuda().bfloat16()
+    for layer in model.backbone.layers:
+        torch.nn.init.normal_(layer.time_mix.output.weight, std=0.01)
+        torch.nn.init.normal_(layer.channel_mix.value.weight, std=0.01)
+
+    targets = torch.randint(0, 256, (1, timesteps), device="cuda")
+    tuples = torch.empty((1, 0, 64), device="cuda", dtype=torch.bfloat16)
+    with torch.no_grad():
+        sequence_logits = model(tuples, targets)
+        state = model.init_rwkv_step_state(activation_dtype=torch.bfloat16)
+        step_logits = []
+        for timestep in range(timesteps):
+            logits, state = model.rwkv_step(targets[:, timestep], state)
+            step_logits.append(logits)
+
+    torch.testing.assert_close(
+        sequence_logits.float(),
+        torch.stack(step_logits, dim=1).float(),
+        rtol=5e-2,
+        atol=5e-2,
+    )
 
 
 @pytest.mark.slow
