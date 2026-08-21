@@ -41,13 +41,13 @@ from torch._dynamo.utils import counters
 
 from exp0.config import ModelConfig, Task3SumConfig
 from exp0.dataset import Task3SumDataset, build_default_vocab, pad_collate_fn
+from exp0.generation import generate_protocol_packed_instances
 from exp0.grouped_execution import (
     IGNORE_INDEX,
     group_by_length,
     grouped_loss_backward,
     supervised_token_count,
 )
-from exp0.generation import generate_protocol_packed_instances
 from exp0.train import create_model
 
 # Experiment 0 0B shape.
