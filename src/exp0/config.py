@@ -126,14 +126,38 @@ EARLY_STOP_FIELDS = (
 )
 
 
+# DataLoader plumbing is execution, not protocol: it cannot change what a run
+# computes, so it must not change run identity.
+#
+# Task3SumDataset.__getitem__ derives every item from (seed, idx) alone - the
+# format code is precomputed per index and the per-item RNG is seeded
+# random.Random(f"{seed}_{idx}") - so an index yields the same example whichever
+# worker builds it, and DataLoader preserves batch order for a fixed sampler.
+#
+# Normalized to a canonical value rather than popped: popping would change the
+# key set of the canonical config, whereas substituting a fixed value keeps the
+# shape identical. Either way the run_id of a run that TUNED these fields does
+# change - see CHECKPOINT_TOLERATED_FIELDS in exp0.checkpointing for how
+# checkpoints written before this became neutral are still accepted.
+DATALOADER_NEUTRAL_FIELDS: Dict[str, Any] = {
+    "num_workers": 0,
+    "val_num_workers": 0,
+    "pin_memory": True,
+    "prefetch_factor": 2,
+}
+
+
 def drop_identity_neutral_fields(train_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """Strip protocol options from a TrainConfig dict when they are at default.
+    """Strip or normalize options that do not change what a run computes.
 
     A feature left at its default must not change the fingerprint of runs that
     do not use it, otherwise adding the option invalidates every existing run_id
     and every checkpoint written before it. A run with early stopping off and
     the immediate-answer protocol enabled behaves exactly as it did before
     either option existed, so its identity must match too.
+
+    DataLoader settings are normalized for the same reason: see
+    DATALOADER_NEUTRAL_FIELDS.
     """
     if train_dict.get("early_stop_metric", "none") == "none":
         for key in EARLY_STOP_FIELDS:
@@ -143,6 +167,9 @@ def drop_identity_neutral_fields(train_dict: Dict[str, Any]) -> Dict[str, Any]:
     for key in ("tf32_matmul", "torch_compile", "grouped_execution"):
         if not train_dict.get(key, False):
             train_dict.pop(key, None)
+    for key, canonical in DATALOADER_NEUTRAL_FIELDS.items():
+        if key in train_dict:
+            train_dict[key] = canonical
     return train_dict
 
 
