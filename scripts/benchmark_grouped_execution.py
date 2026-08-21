@@ -65,24 +65,38 @@ def build_batches(
 ) -> List[Dict[str, Any]]:
     """Real mixed 50/50 parallel-CoT / filler batches, left on the host.
 
+    Drawn from ONE dataset through a shuffled DataLoader, the way training does.
+    Building each batch as its own dataset instead gives every batch an exact
+    50/50 split and therefore one constant pair of subgroup shapes, which makes
+    any recompilation test pass trivially. Real batches are binomial around 50%
+    and produce ~18 distinct subgroup shape-sets per 100 batches.
+
     grouped_loss_backward moves each subgroup itself, so batches stay on CPU and
     both paths pay the same transfer cost.
     """
+    from torch.utils.data import DataLoader
+
     rng = random.Random(seed)
-    batches = []
-    for _ in range(count):
-        packed = generate_protocol_packed_instances(
-            batch_size, length=task_cfg.length, dimension=task_cfg.dimension, rng=rng
-        )
-        dataset = Task3SumDataset(
-            packed,
-            num_filler=num_filler,
-            vocab=vocab,
-            parallel_ratio=0.5,
-            filler_ratio=0.5,
-        )
-        batches.append(pad_collate_fn([dataset[i] for i in range(len(dataset))]))
-    return batches
+    packed = generate_protocol_packed_instances(
+        batch_size * count, length=task_cfg.length,
+        dimension=task_cfg.dimension, rng=rng,
+    )
+    dataset = Task3SumDataset(
+        packed,
+        num_filler=num_filler,
+        vocab=vocab,
+        parallel_ratio=0.5,
+        filler_ratio=0.5,
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=pad_collate_fn,
+        generator=torch.Generator().manual_seed(seed),
+        drop_last=True,
+    )
+    return list(loader)
 
 
 def make_model(arch: str, vocab, task_cfg: Task3SumConfig, device: torch.device):

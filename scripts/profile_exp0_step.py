@@ -69,18 +69,32 @@ def bucket_for(name: str) -> str:
 
 
 def build_batches(vocab, task_cfg, batch_size: int, num_filler: int, count: int):
+    """Batches drawn from ONE dataset through a shuffled DataLoader.
+
+    Building each batch as its own dataset gives every batch an exact 50/50
+    split and therefore one constant pair of subgroup shapes. Real training
+    shuffles a single dataset, so splits are binomial and produce ~18 distinct
+    subgroup shape-sets per 100 batches - which is the condition CUDA graphs
+    actually have to survive, since each distinct shape needs its own capture.
+    """
+    from torch.utils.data import DataLoader
+
     rng = random.Random(7)
-    batches = []
-    for _ in range(count):
-        packed = generate_protocol_packed_instances(
-            batch_size, length=task_cfg.length, dimension=task_cfg.dimension, rng=rng
-        )
-        dataset = Task3SumDataset(
-            packed, num_filler=num_filler, vocab=vocab,
-            parallel_ratio=0.5, filler_ratio=0.5,
-        )
-        batches.append(pad_collate_fn([dataset[i] for i in range(len(dataset))]))
-    return batches
+    packed = generate_protocol_packed_instances(
+        batch_size * count, length=task_cfg.length,
+        dimension=task_cfg.dimension, rng=rng,
+    )
+    dataset = Task3SumDataset(
+        packed, num_filler=num_filler, vocab=vocab,
+        parallel_ratio=0.5, filler_ratio=0.5,
+    )
+    loader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=True,
+        collate_fn=pad_collate_fn,
+        generator=torch.Generator().manual_seed(7),
+        drop_last=True,
+    )
+    return list(loader)
 
 
 def make_model(vocab, task_cfg, device):

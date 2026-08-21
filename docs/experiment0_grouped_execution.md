@@ -89,15 +89,35 @@ recompiles after warmup : False   (both paths)
 frames compiled         : 9       (both paths)
 ```
 
-Real batches produce few distinct shapes — at fixed N there are exactly two
-formats, so exactly two subgroups — which is why recompilation converges:
+This was initially verified against batches that were **not** representative.
+The benchmark built each batch as its own dataset with exact 50/50 ratios, so
+every batch split 24/24 and produced one constant pair of subgroup shapes — the
+one condition under which a recompilation test cannot fail. Real training draws
+from a single shuffled dataset, where splits are binomial:
 
 ```text
-  B     T   count
- 24   136       6
- 24     4       6
-  padded rectangle: B=48 T=136
+per-batch subgroup sizes, shuffled DataLoader
+  CoT group   16 to 30
+  filler      18 to 32
+  18 distinct subgroup shape-sets per 100 batches
 ```
+
+Re-run against that distribution, the conclusion holds: dynamo marks the batch
+dimension dynamic during warmup, after which varying subgroup sizes cost
+nothing. Both generators are now fixed to draw from one shuffled dataset.
+
+```text
+                     padded    grouped
+steady-state ms      292.42     213.55    1.369x
+recompiles           False      False
+frames compiled          9          9
+peak memory        9.76 GiB   6.13 GiB
+loss             10.691746  10.691745
+```
+
+The speedup is 1.369x on realistic batches against 1.335x on the uniform ones,
+so the artifact was if anything understating it. Peak grouped memory is higher
+(6.13 GiB, not 5.03) because some batches split as far as 30/18.
 
 ## A pre-existing compile defect, found while benchmarking
 
