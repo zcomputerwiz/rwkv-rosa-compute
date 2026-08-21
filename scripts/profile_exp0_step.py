@@ -106,8 +106,9 @@ def make_model(vocab, task_cfg, device):
     return model.to(device)
 
 
-def padded_step(forward_fn, model, optimizer, batch, device) -> None:
-    optimizer.zero_grad(set_to_none=True)
+def padded_step(forward_fn, model, optimizer, batch, device,
+                set_to_none: bool = True) -> None:
+    optimizer.zero_grad(set_to_none=set_to_none)
     input_tuples = batch["input_tuples"].to(device, non_blocking=True)
     targets = batch["targets"].to(device, non_blocking=True)
     loss_mask = batch["loss_mask"].to(device, non_blocking=True)
@@ -122,8 +123,9 @@ def padded_step(forward_fn, model, optimizer, batch, device) -> None:
     optimizer.step()
 
 
-def grouped_step(forward_fn, model, optimizer, batch, device) -> None:
-    optimizer.zero_grad(set_to_none=True)
+def grouped_step(forward_fn, model, optimizer, batch, device,
+                 set_to_none: bool = True) -> None:
+    optimizer.zero_grad(set_to_none=set_to_none)
     grouped_loss_backward(
         forward_fn, batch, device,
         autocast=lambda: torch.autocast("cuda", dtype=torch.bfloat16),
@@ -146,21 +148,35 @@ def profile_path(label: str, step_fn, batches, vocab, task_cfg, device,
         **({"fused": True} if fused_adamw else {}),
     )
 
+    # CUDA graphs own the tensors they produce. Grouped execution runs one
+    # backward per subgroup and accumulates into .grad, so freeing those buffers
+    # each step (set_to_none=True) lets the second subgroup's backward overwrite
+    # a graph-owned tensor from the first. Stable preallocated buffers, zeroed
+    # rather than freed, are what the runtime asks for.
+    graphed = compile_mode == "reduce-overhead"
+    if graphed:
+        for parameter in model.parameters():
+            if parameter.requires_grad:
+                parameter.grad = torch.zeros_like(parameter)
+
     for i in range(warmup):
-        step_fn(forward_fn, model, optimizer, batches[i % len(batches)], device)
+        step_fn(forward_fn, model, optimizer, batches[i % len(batches)], device,
+                set_to_none=not graphed)
     torch.cuda.synchronize()
 
     wall: List[float] = []
     for i in range(steps):
         start = time.perf_counter()
-        step_fn(forward_fn, model, optimizer, batches[i % len(batches)], device)
+        step_fn(forward_fn, model, optimizer, batches[i % len(batches)], device,
+                set_to_none=not graphed)
         torch.cuda.synchronize()
         wall.append(time.perf_counter() - start)
 
     with profile(activities=[ProfilerActivity.CUDA],
                  record_shapes=record_shapes) as prof:
         for i in range(steps):
-            step_fn(forward_fn, model, optimizer, batches[i % len(batches)], device)
+            step_fn(forward_fn, model, optimizer, batches[i % len(batches)], device,
+                    set_to_none=not graphed)
         torch.cuda.synchronize()
 
     per_kernel: Dict[str, float] = defaultdict(float)
