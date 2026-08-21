@@ -16,7 +16,9 @@ from __future__ import annotations
 import argparse
 import os
 import random
+import statistics
 import sys
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -131,14 +133,29 @@ def grouped_step(forward_fn, model, optimizer, batch, device) -> None:
 
 def profile_path(label: str, step_fn, batches, vocab, task_cfg, device,
                  warmup: int, steps: int,
-                 record_shapes: bool = False) -> Dict[str, Any]:
+                 record_shapes: bool = False,
+                 fused_adamw: bool = False,
+                 compile_mode: str = "default") -> Dict[str, Any]:
     model = make_model(vocab, task_cfg, device)
-    forward_fn = torch.compile(model.loss_logits)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    forward_fn = torch.compile(
+        model.loss_logits,
+        **({} if compile_mode == "default" else {"mode": compile_mode}),
+    )
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=1e-4,
+        **({"fused": True} if fused_adamw else {}),
+    )
 
     for i in range(warmup):
         step_fn(forward_fn, model, optimizer, batches[i % len(batches)], device)
     torch.cuda.synchronize()
+
+    wall: List[float] = []
+    for i in range(steps):
+        start = time.perf_counter()
+        step_fn(forward_fn, model, optimizer, batches[i % len(batches)], device)
+        torch.cuda.synchronize()
+        wall.append(time.perf_counter() - start)
 
     with profile(activities=[ProfilerActivity.CUDA],
                  record_shapes=record_shapes) as prof:
@@ -173,6 +190,7 @@ def profile_path(label: str, step_fn, batches, vocab, task_cfg, device,
     torch.cuda.empty_cache()
     return {
         "label": label,
+        "wall_median_ms": statistics.median(wall) * 1e3,
         "head_gemm_us": head_us,
         "gemm_us_by_shape": gemm_us,
         "total_us": total_us,
@@ -187,8 +205,13 @@ def report(result: Dict[str, Any], top: int) -> None:
     total = result["total_us"]
     steps = result["steps"]
     print(f"=== {result['label']} ===")
-    print(f"  total GPU time {total / 1e3:.1f} ms over {steps} steps "
-          f"= {total / 1e3 / steps:.2f} ms/step")
+    gpu_ms = total / 1e3 / steps
+    wall_ms = result.get("wall_median_ms", 0.0)
+    print(f"  GPU time  {gpu_ms:.2f} ms/step")
+    print(f"  wall time {wall_ms:.2f} ms/step"
+          + (f"   gap {wall_ms - gpu_ms:+.2f} ms "
+             f"({(wall_ms - gpu_ms) / wall_ms:.1%} not on the GPU)"
+             if wall_ms else ""))
     print()
     print(f"  {'bucket':22} {'ms/step':>9} {'share':>8}")
     for name, value in sorted(result["buckets"].items(), key=lambda kv: -kv[1]):
@@ -221,6 +244,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--steps", type=int, default=10)
     parser.add_argument("--top", type=int, default=15)
+    parser.add_argument("--compile_mode",
+                        choices=("default", "reduce-overhead", "max-autotune"),
+                        default="default",
+                        help="reduce-overhead uses CUDA graphs, which target "
+                             "launch overhead rather than kernel time.")
+    parser.add_argument("--fused_adamw", action="store_true",
+                        help="Use fused AdamW. A numerical protocol change, "
+                             "not a free speedup - see the grouped-execution doc.")
     parser.add_argument("--path", choices=("padded", "grouped", "both"),
                         default="both")
     args = parser.parse_args(argv)
@@ -239,7 +270,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     print(f"device     : {torch.cuda.get_device_name(0)}")
     print(f"config     : 0B RWKV-7, N={args.num_filler}, batch {args.batch_size}, "
-          f"bf16 + compile")
+          f"bf16 + compile"
+          + (", fused AdamW" if args.fused_adamw else ", foreach AdamW"))
     print(f"padded     : B={batches[0]['targets'].shape[0]} "
           f"T={batches[0]['targets'].shape[1]}")
     print()
@@ -252,7 +284,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     for label, step_fn in paths:
         result = profile_path(label, step_fn, batches, vocab, task_cfg,
-                              device, args.warmup, args.steps)
+                              device, args.warmup, args.steps,
+                              fused_adamw=args.fused_adamw,
+                              compile_mode=args.compile_mode)
         report(result, args.top)
     return 0
 
