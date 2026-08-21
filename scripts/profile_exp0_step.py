@@ -182,6 +182,7 @@ def profile_path(label: str, step_fn, batches, vocab, task_cfg, device,
                 set_to_none=not graphed)
     torch.cuda.synchronize()
 
+    torch.cuda.reset_peak_memory_stats()
     wall: List[float] = []
     for i in range(steps):
         start = time.perf_counter()
@@ -225,6 +226,8 @@ def profile_path(label: str, step_fn, batches, vocab, task_cfg, device,
     return {
         "label": label,
         "wall_median_ms": statistics.median(wall) * 1e3,
+        "peak_gib": torch.cuda.max_memory_allocated() / (1024 ** 3),
+        "batch_size": int(batches[0]["targets"].shape[0]),
         "head_gemm_us": head_us,
         "gemm_us_by_shape": gemm_us,
         "total_us": total_us,
@@ -241,11 +244,19 @@ def report(result: Dict[str, Any], top: int) -> None:
     print(f"=== {result['label']} ===")
     gpu_ms = total / 1e3 / steps
     wall_ms = result.get("wall_median_ms", 0.0)
+    batch = result.get("batch_size", 0)
+    peak = result.get("peak_gib", 0.0)
+    total_gib = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
     print(f"  GPU time  {gpu_ms:.2f} ms/step")
     print(f"  wall time {wall_ms:.2f} ms/step"
           + (f"   gap {wall_ms - gpu_ms:+.2f} ms "
              f"({(wall_ms - gpu_ms) / wall_ms:.1%} not on the GPU)"
              if wall_ms else ""))
+    if wall_ms and batch:
+        print(f"  throughput {batch / (wall_ms / 1e3):.1f} samples/s")
+    if peak:
+        print(f"  peak memory {peak:.2f} GiB of {total_gib:.1f} GiB "
+              f"({peak / total_gib:.0%})")
     print()
     print(f"  {'bucket':22} {'ms/step':>9} {'share':>8}")
     for name, value in sorted(result["buckets"].items(), key=lambda kv: -kv[1]):
