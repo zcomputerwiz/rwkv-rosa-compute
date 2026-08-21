@@ -86,6 +86,10 @@ python scripts/run_experiment.py ... --construction_diagnostics
 python scripts/analyze_exp0_errors.py <report>.json --errors --compare
 ```
 
+For deterministic reconstruction from completed training checkpoints and
+cross-seed hard-instance overlap, see
+[`experiment0_checkpoint_analysis.md`](experiment0_checkpoint_analysis.md).
+
 `--construction_diagnostics` reuses the run's existing final validation pass, so
 it adds no forward pass. It records per-stratum counts, errors, accuracy, and
 confusion cells, plus a per-instance record for every error including the True
@@ -169,3 +173,4 @@ Per-run JSON is emitted in a stable shape with every known stratum present even
 when empty, so a sweep-level aggregation can align columns across N without
 parsing console output. Aggregation itself is deliberately left to a later
 change.
+
