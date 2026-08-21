@@ -190,6 +190,12 @@ class RWKV7TimeMix(nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         self.layer_id = layer_id
+        # torch.compile treats integer nn.Module attributes as static, so
+        # branching on layer_id specializes this frame once per layer. With
+        # 12 layers that exceeds dynamo's recompile limit of 8 and the rest
+        # fall back to eager silently. A bool has two values, so the guard
+        # collapses to two specializations with identical semantics.
+        self.is_first_layer = layer_id == 0
         self.num_layers = num_layers
         self.head_dim = head_dim
         self.num_heads = hidden_size // head_dim
@@ -333,7 +339,7 @@ class RWKV7TimeMix(nn.Module):
         k = self.key(xk)
         v = self.value(xv)
 
-        if self.layer_id == 0 or v_first is None:
+        if self.is_first_layer or v_first is None:
             v_first = v
         else:
             v = v + (v_first - v) * torch.sigmoid(
@@ -423,7 +429,7 @@ class RWKV7TimeMix(nn.Module):
         k = self.key(xk)
         v = self.value(xv)
 
-        if self.layer_id == 0 or v_first is None:
+        if self.is_first_layer or v_first is None:
             v_first = v
         else:
             v = v + (v_first - v) * torch.sigmoid(
@@ -568,7 +574,13 @@ class RWKV7Layer(nn.Module):
         x: torch.Tensor,
         v_first: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.layer_id == 0 and self.ln0 is not None:
+        # Guard on ln0 alone, not layer_id: ln0 is constructed if and only
+        # if layer_id == 0, so the comparison is redundant - but torch.compile
+        # treats integer nn.Module attributes as static, so branching on
+        # layer_id specializes this frame once per layer. With 12 layers that
+        # exceeds dynamo's recompile limit of 8 and the remaining layers fall
+        # back to eager silently.
+        if self.ln0 is not None:
             x = self.ln0(x)
 
         tm_out, v_first = self.time_mix(self.ln1(x), v_first)
@@ -583,7 +595,13 @@ class RWKV7Layer(nn.Module):
         state: RWKV7LayerState,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run one forward-only token and mutate this layer's state."""
-        if self.layer_id == 0 and self.ln0 is not None:
+        # Guard on ln0 alone, not layer_id: ln0 is constructed if and only
+        # if layer_id == 0, so the comparison is redundant - but torch.compile
+        # treats integer nn.Module attributes as static, so branching on
+        # layer_id specializes this frame once per layer. With 12 layers that
+        # exceeds dynamo's recompile limit of 8 and the remaining layers fall
+        # back to eager silently.
+        if self.ln0 is not None:
             x = self.ln0(x)
 
         tm_out, v_first, next_recurrence = self.time_mix.forward_step(

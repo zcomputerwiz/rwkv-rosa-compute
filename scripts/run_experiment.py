@@ -264,6 +264,20 @@ def get_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--grouped_execution",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Run each optimizer batch as length-homogeneous subgroups so filler "
+            "examples are not carried through a CoT-sized rectangle. One "
+            "optimizer update, one scheduler step, and one global gradient clip "
+            "are preserved and the loss stays token-weighted, so the objective "
+            "is unchanged. This is implementation efficiency, NOT compute "
+            "matching: the scientific budget is still the requested N. Recorded "
+            "in the report and part of the run_id."
+        ),
+    )
+    parser.add_argument(
         "--construction_diagnostics",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -448,6 +462,7 @@ def build_configs(
         immediate_protocol=args.immediate_protocol,
         tf32_matmul=args.tf32,
         torch_compile=args.torch_compile,
+        grouped_execution=args.grouped_execution,
         num_workers=args.num_workers,
         val_num_workers=args.val_num_workers,
         pin_memory=args.pin_memory,
@@ -738,6 +753,7 @@ def main():
             immediate_protocol=args.immediate_protocol,
             tf32_matmul=args.tf32,
             torch_compile=args.torch_compile,
+            grouped_execution=args.grouped_execution,
             num_workers=args.num_workers,
             val_num_workers=args.val_num_workers,
             pin_memory=args.pin_memory,

@@ -35,8 +35,8 @@ are listed under [Verification history](#verification-history).
 
 | Operation | Current repo | Upstream candidate | Directly compatible? | Expected benefit | Verdict |
 |---|---|---|---|---|---|
-| Recurrence fwd/bwd | `rwkv7_clampw` | `rwkv7_clampw_v3_for_h100` | Yes — same `template<int N>`, same bf16 binding surface; backward adds a `TILE` parameter | Shared-memory preload removes repeated global reads; targets the traffic Nsight already flagged | **BENCHMARK** |
-| Recurrence fwd/bwd, variant | `rwkv7_clampw` | `rwkv7_clampw_v3_for_h100_alt` | Same port cost as v3 | Same, minus the `v` preload: 20 KiB forward instead of 24 KiB | **BENCHMARK** (second arm) |
+| Recurrence fwd/bwd | `rwkv7_clampw` | `rwkv7_clampw_v3_for_h100` | Yes — same `template<int N>`, same bf16 binding surface; backward adds a `TILE` parameter | **None measured on Ada**: 0.951-1.000x, i.e. a tie or slightly slower | **REJECT** (measured) |
+| Recurrence fwd/bwd, variant | `rwkv7_clampw` | `rwkv7_clampw_v3_for_h100_alt` | Same port cost as v3 | **Slower on Ada**: 0.693-0.922x | **REJECT** (measured) |
 | Recurrence, wide head | `rwkv7_clampw` | `rwkv7_clampw128_v2` | No — `static_assert(_N_ == 128)` | None at our head size | **REJECT** |
 | Recurrence, plain | `rwkv7_clampw` | `wkv7_cuda` / `wkv7_cuda_fp32` | Different op surface | Older than what we vendor | **REJECT** |
 | TimeMix 6-way mixing | PyTorch | `rwkv7_tmix_mix6_bf16_v5` | bf16; channel-generic; fwd+bwd present | Fuses six mixes we express separately | **BENCHMARK** |
@@ -48,7 +48,55 @@ are listed under [Verification history](#verification-history).
 | Head + CE | `nn.Linear` + `F.cross_entropy` | `rwkv7_head_l2wrap_ce_bf16_v4` | **No** — see below | Would fuse a 32k projection | **REJECT as-is, ADAPT the idea** |
 | CE only | `F.cross_entropy` | `rwkv7_l2wrap_ce_bf16_v2` | **No** — L2Wrap | — | **REJECT** |
 
-## The recurrence: `clampw_v3` is the headline candidate
+## Measured outcome: both v3 variants rejected
+
+The audit below reasoned that v3's shared-memory preload should win because it
+targets the memory traffic profiling had flagged. **It does not.** Measured on
+Ada (RTX 4060 Ti, sm_89) against the PyTorch oracle at the tolerances in
+`tests/test_exp0_cuda.py`, forward, at real Experiment 0 subgroup shapes:
+
+```text
+                        current       v3      v3_alt
+CoT group  B24 T144      0.387    1.000x      0.875x
+filler     B24 T16       0.066    0.955x      0.693x
+padded     B48 T144      0.665    0.951x      0.922x
+```
+
+All three are numerically correct — max absolute deviation 0.0002 against a
+0.08 tolerance, so the rejection is on speed alone, and no tolerance was
+loosened to reach it. Reproduce with
+`scripts/benchmark_rwkv7_recurrence_variants.py`.
+
+### Why the prediction failed, and the more useful finding
+
+Shared-memory preloading trades global reads for `__syncthreads` barriers and a
+lower block-per-SM ceiling. On Ada the reads it eliminates were already being
+served by cache, so it pays the barriers and the occupancy cost for nothing.
+`_alt` is worse still: it drops the `v` preload to save 4 KiB and then pays a
+global load per timestep, which is the trade going the wrong way.
+
+The larger point is that the recurrence is **not where Experiment 0 spends its
+time**:
+
+```text
+recurrence forward, 12 layers      7.98 ms
+full padded training step        292.68 ms
+forward share                       2.7%
+forward + backward share            8.2%   (backward estimated at 2x forward,
+                                            not measured)
+```
+
+Even a hypothetical kernel twice as fast as the one we have would return about
+4% of step time. That caps Track E regardless of which variant wins, and it
+means the remaining ~92% is in the surrounding TimeMix / ChannelMix / head work
+that Track F and Track I cover. Profiling that surface is worth more than any
+further recurrence-kernel comparison.
+
+## Source-level analysis of `clampw_v3` (superseded by the measurement above)
+
+Kept because its compatibility findings still stand and are what let the A/B be
+run at all — but its performance expectation was wrong, and the verdict is now
+REJECT on measurement.
 
 The filename says `_for_h100`, which reads as a hard Hopper requirement. It is
 not. Inspecting the source finds **no Hopper-specific machinery at all**:
@@ -245,23 +293,37 @@ than eager PyTorch" but "is it faster than compiled PyTorch", and that has not
 been measured. Track I re-profiles the compiled path first, so these are
 prioritized by measured share of step time rather than by expectation.
 
-## What this does not yet establish
+## What is settled and what is not
 
-Nothing here has been run. This is a source-level audit: it establishes
-compatibility, assumptions, and exclusions, and it rules out three candidates on
-concrete grounds. Every remaining verdict is contingent on:
+Settled by measurement:
 
 ```text
-correctness A/B against the existing PyTorch recurrence oracle
-existing CUDA tolerances, not loosened to make a kernel pass
-timing at Experiment 0 shapes, after length grouping
-comparison against compiled PyTorch, not eager
+v3 and v3_alt        REJECT   forward A/B on Ada at real shapes, correctness PASS
+recurrence share     ~8% of step time (backward estimated), so Track E is capped
 ```
 
-Source inspection specifically cannot settle whether v3's tiling pays off on
-Ada, whether `_alt`'s lower footprint beats its extra global load, or whether
-the backward's 36.25 KiB constrains occupancy in practice. Those need
-measurement.
+Settled by source inspection alone:
+
+```text
+clampw128_v2         REJECT   static_assert(_N_ == 128), we use 64
+head/CE kernels      REJECT   L2Wrap changes the objective; vocab hardcoded 65536
+wkv7_cuda            REJECT   older op surface than what we build
+```
+
+Still open — the six fused TimeMix/ChannelMix kernels. They cover the ~92% of
+step time the recurrence does not, which is now the only part of this audit with
+real headroom. Their verdicts remain contingent on:
+
+```text
+correctness A/B against the existing PyTorch oracle
+existing CUDA tolerances, not loosened to make a kernel pass
+timing at Experiment 0 shapes, after length grouping
+comparison against COMPILED PyTorch, not eager
+```
+
+That last line is the one that changed most since the first revision: with the
+dynamo specialization fixed, compiled 0B is 1.76x rather than 1.40x, so the bar
+a fused kernel has to clear is higher than the original audit assumed.
 
 Any adopted upstream source must be pinned by exact commit SHA, and the commit
 inspected here is recorded at the top of this document.
