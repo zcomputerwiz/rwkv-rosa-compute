@@ -137,4 +137,3 @@ def test_mismatched_challenge_id_is_rejected():
         artifact["diagnostic_challenge_validation"] = challenge
     with pytest.raises(ValueError, match="challenge_id mismatch"):
         compare_diagnostic_artifacts([first, second])
-
