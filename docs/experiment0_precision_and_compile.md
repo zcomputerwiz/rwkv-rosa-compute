@@ -50,9 +50,15 @@ exactly.
 
 ## Interpretation
 
-**TF32 is the cheapest lever.** 1.23x for a deviation roughly 7x smaller than
-BF16's, at identical memory, from one line. It applies only to FP32 matmuls, so
-it is inert under BF16 autocast — combining them is pointless, not additive.
+**TF32 is the cheapest lever, and is opt-in.** 1.23x for a deviation roughly 7x
+smaller than BF16's, at identical memory. It applies only to FP32 matmuls, so it
+is inert under BF16 autocast — combining them is pointless, not additive.
+
+`--precision fp32` deliberately still means *strict* FP32. TF32 lowers the
+internal precision of FP32 matmuls, so silently redefining the existing protocol
+would retroactively change what every completed FP32 run claims to be. It is
+exposed as `--tf32` / `--no-tf32`, defaults off, and changes the `run_id`.
+`--compile` / `--no-compile` is recorded the same way.
 
 **BF16 is a protocol change, not a free speedup.** Its 1.61x comes with a
 deviation ~7x larger than TF32 and 1.8 GiB less memory. The repository already
@@ -104,6 +110,48 @@ misleading:
 A compile that is genuinely happening takes 20-50s of warmup. A sub-2s warmup
 means one of the two conditions above.
 
+## Adoption sequence
+
+Speedups are not adopted on the strength of a per-step deviation. The protocol
+to validate is the one intended for production use, and it is validated by
+reproducing a completed result.
+
+**0B RWKV: `BF16 + compile` first.** RWKV is already constrained to BF16 by the
+fused kernel, so precision does not change relative to the intended CUDA
+protocol, and compile measured bitwise-identical on a single pass. This is the
+lowest-risk optimized candidate available.
+
+**0A Llama: validate `BF16 + compile` directly**, rather than spending one run
+validating BF16 and a second validating compile. BF16 is the numerically
+dominant intervention by roughly 25x, so the stack is what matters.
+
+The controlled replication is the completed N=0 arm, unchanged in every other
+respect — same seed 42, length 6, dimension 3, 10M examples, 5 epochs, same
+validation set — compared against its FP32 trajectory:
+
+```text
+0.8895  0.9665  0.9740  0.9830  0.9930
+```
+
+The comparison must not demand identical trajectories. Tiny numerical
+differences diverge optimizer paths, and this document already shows that
+repeated identical multi-step runs diverge on their own. The question is whether
+the *scientific result* reproduces:
+
+```text
+same qualitative learning curve
+final accuracy in the same regime (roughly 0.99-0.995)
+no new degenerate predictor
+CoT diagnostics unchanged
+construction strata qualitatively normal
+```
+
+If it reproduces, the optimized protocol is validated for the whole 0A sweep. If
+it does not, fall back to `FP32 + TF32` and validate that instead.
+
+At 8.9h per arm an eight-point sweep costs about 71 GPU-hours; at 4.2h it costs
+about 34.
+
 ## Scientific handling
 
 Each lever changes the deterministic `run_id`, which is correct: they are
@@ -118,7 +166,6 @@ describes for stopping rules.
 Do not treat a speedup as free because its deviation is small. The deviations
 above are measured at initialization on one batch. They bound the per-step
 numerical difference; they do not bound how a full training trajectory diverges,
-and the multi-step drift figures above show that divergence is real. If a
-precision change is adopted for a headline result, the defensible path is to
-re-run one existing arm under the new setting and confirm the accuracy is
-unchanged, rather than to reason from the per-step deviation alone.
+and the multi-step drift figures above show that divergence is real. That is
+precisely why adoption runs through the anchor replication described above
+rather than through the per-step deviation alone.

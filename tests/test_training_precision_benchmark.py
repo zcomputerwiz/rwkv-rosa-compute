@@ -66,3 +66,50 @@ def test_shapes_match_the_documented_experiment_runs():
 def test_llama_variants_start_from_the_protocol_baseline():
     label, precision, tf32, compiled = VARIANTS["llama"][0]
     assert (label, precision, tf32, compiled) == ("fp32", "fp32", False, False)
+
+
+# --- execution protocols are recorded, not silent -----------------------------
+
+def test_strict_fp32_remains_the_default():
+    """--precision fp32 must keep meaning strict FP32, not TF32."""
+    from exp0.config import TrainConfig
+
+    config = TrainConfig()
+    assert config.tf32_matmul is False
+    assert config.torch_compile is False
+
+
+def test_execution_protocols_are_identity_neutral_at_default():
+    from dataclasses import replace
+
+    from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
+    from exp0.evaluate import canonical_run_config
+
+    model_cfg, task_cfg = ModelConfig(), Task3SumConfig()
+    base = TrainConfig()
+    baseline = canonical_run_config(model_cfg, base, task_cfg, 9999, 100, [42])
+    assert "tf32_matmul" not in baseline["training_protocol"]
+    assert "torch_compile" not in baseline["training_protocol"]
+
+    for field in ("tf32_matmul", "torch_compile"):
+        enabled = canonical_run_config(
+            model_cfg, replace(base, **{field: True}), task_cfg, 9999, 100, [42])
+        assert enabled["training_protocol"][field] is True
+        assert enabled != baseline, f"{field} must change run identity"
+
+
+def test_enabling_tf32_and_compile_are_distinct_identities():
+    from dataclasses import replace
+
+    from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
+    from exp0.evaluate import compute_run_id
+
+    model_cfg, task_cfg, base = ModelConfig(), Task3SumConfig(), TrainConfig()
+    ids = {
+        compute_run_id(model_cfg, cfg, task_cfg, 9999, 100, [42])
+        for cfg in (base,
+                    replace(base, tf32_matmul=True),
+                    replace(base, torch_compile=True),
+                    replace(base, tf32_matmul=True, torch_compile=True))
+    }
+    assert len(ids) == 4, "each protocol combination must be its own experiment"

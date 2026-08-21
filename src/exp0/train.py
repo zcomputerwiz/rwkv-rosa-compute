@@ -812,6 +812,22 @@ def train_model(
         if train_cfg.mixture == "immediate"
         else None
     )
+    # Set explicitly rather than only when enabled: leaving ambient process
+    # state in place would make a run's numerics depend on whatever ran before
+    # it in the same interpreter.
+    torch.backends.cuda.matmul.allow_tf32 = train_cfg.tf32_matmul
+    torch.backends.cudnn.allow_tf32 = train_cfg.tf32_matmul
+    torch.set_float32_matmul_precision("high" if train_cfg.tf32_matmul else "highest")
+
+    # torch.compile wraps forward only, and OptimizedModule forwards every other
+    # attribute to the original module, so compiling the module would leave
+    # loss_logits running eager. Compile the bound method the loop calls.
+    training_forward = (
+        torch.compile(model.loss_logits)
+        if train_cfg.torch_compile
+        else model.loss_logits
+    )
+
     is_immediate = train_cfg.immediate_protocol and immediate_trigger is not None
     weight_decay = (
         IMMEDIATE_PROTOCOL_WEIGHT_DECAY if is_immediate else train_cfg.weight_decay
@@ -1062,7 +1078,7 @@ def train_model(
 
             optimizer.zero_grad(set_to_none=True)
             with _autocast_context(device, train_cfg.precision):
-                loss_logits = model.loss_logits(input_tuples, targets)
+                loss_logits = training_forward(input_tuples, targets)
                 shift_targets = loss_mask[:, 1:].reshape(-1)
                 loss = criterion(
                     loss_logits.reshape(-1, loss_logits.size(-1)), shift_targets
@@ -1372,6 +1388,11 @@ def train_model(
             "epochs_requested": train_cfg.epochs,
             "epochs_effective": epochs,
             "epochs_trained": epochs_completed,
+        },
+        "execution_protocol": {
+            "tf32_matmul": train_cfg.tf32_matmul,
+            "torch_compile": train_cfg.torch_compile,
+            "precision": train_cfg.precision,
         },
         "weight_decay": weight_decay,
         "grad_clip": grad_clip,

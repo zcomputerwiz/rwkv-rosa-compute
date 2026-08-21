@@ -242,6 +242,28 @@ def get_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--tf32",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Allow TF32 for FP32 matmuls. Off by default so --precision fp32 "
+            "keeps meaning strict FP32. This is a distinct numerical protocol, "
+            "not a free speedup: it is recorded in the report and changes the "
+            "run_id. Do not enable it partway through a sweep."
+        ),
+    )
+    parser.add_argument(
+        "--compile",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        dest="torch_compile",
+        help=(
+            "Compile the training forward with torch.compile. An execution "
+            "protocol, recorded in the report and part of the run_id. Requires "
+            "a working Triton; see docs/experiment0_precision_and_compile.md."
+        ),
+    )
+    parser.add_argument(
         "--construction_diagnostics",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -424,6 +446,8 @@ def build_configs(
         early_stop_tolerance=args.early_stop_tolerance,
         early_stop_patience=args.early_stop_patience,
         immediate_protocol=args.immediate_protocol,
+        tf32_matmul=args.tf32,
+        torch_compile=args.torch_compile,
         num_workers=args.num_workers,
         val_num_workers=args.val_num_workers,
         pin_memory=args.pin_memory,
@@ -712,6 +736,8 @@ def main():
             early_stop_tolerance=args.early_stop_tolerance,
             early_stop_patience=args.early_stop_patience,
             immediate_protocol=args.immediate_protocol,
+            tf32_matmul=args.tf32,
+            torch_compile=args.torch_compile,
             num_workers=args.num_workers,
             val_num_workers=args.val_num_workers,
             pin_memory=args.pin_memory,
