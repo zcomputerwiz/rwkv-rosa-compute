@@ -35,8 +35,8 @@ are listed under [Verification history](#verification-history).
 
 | Operation | Current repo | Upstream candidate | Directly compatible? | Expected benefit | Verdict |
 |---|---|---|---|---|---|
-| Recurrence fwd/bwd | `rwkv7_clampw` | `rwkv7_clampw_v3_for_h100` | Yes — same `template<int N>`, same bf16 binding surface; backward adds a `TILE` parameter | Shared-memory preload removes repeated global reads; targets the traffic Nsight already flagged | **BENCHMARK** |
-| Recurrence fwd/bwd, variant | `rwkv7_clampw` | `rwkv7_clampw_v3_for_h100_alt` | Same port cost as v3 | Same, minus the `v` preload: 20 KiB forward instead of 24 KiB | **BENCHMARK** (second arm) |
+| Recurrence fwd/bwd | `rwkv7_clampw` | `rwkv7_clampw_v3_for_h100` | Yes — same `template<int N>`, same bf16 binding surface; backward adds a `TILE` parameter | **None measured on Ada**: 0.951-1.000x, i.e. a tie or slightly slower | **REJECT** (measured) |
+| Recurrence fwd/bwd, variant | `rwkv7_clampw` | `rwkv7_clampw_v3_for_h100_alt` | Same port cost as v3 | **Slower on Ada**: 0.693-0.922x | **REJECT** (measured) |
 | Recurrence, wide head | `rwkv7_clampw` | `rwkv7_clampw128_v2` | No — `static_assert(_N_ == 128)` | None at our head size | **REJECT** |
 | Recurrence, plain | `rwkv7_clampw` | `wkv7_cuda` / `wkv7_cuda_fp32` | Different op surface | Older than what we vendor | **REJECT** |
 | TimeMix 6-way mixing | PyTorch | `rwkv7_tmix_mix6_bf16_v5` | bf16; channel-generic; fwd+bwd present | Fuses six mixes we express separately | **BENCHMARK** |
@@ -47,6 +47,50 @@ are listed under [Verification history](#verification-history).
 | ChannelMix | PyTorch | `rwkv7_cmix_bf16_v5` | bf16; channel-generic | Fuses the whole ChannelMix | **BENCHMARK** |
 | Head + CE | `nn.Linear` + `F.cross_entropy` | `rwkv7_head_l2wrap_ce_bf16_v4` | **No** — see below | Would fuse a 32k projection | **REJECT as-is, ADAPT the idea** |
 | CE only | `F.cross_entropy` | `rwkv7_l2wrap_ce_bf16_v2` | **No** — L2Wrap | — | **REJECT** |
+
+## Measured outcome: both v3 variants rejected
+
+The audit below reasoned that v3's shared-memory preload should win because it
+targets the memory traffic profiling had flagged. **It does not.** Measured on
+Ada (RTX 4060 Ti, sm_89) against the PyTorch oracle at the tolerances in
+`tests/test_exp0_cuda.py`, forward, at real Experiment 0 subgroup shapes:
+
+```text
+                        current       v3      v3_alt
+CoT group  B24 T144      0.387    1.000x      0.875x
+filler     B24 T16       0.066    0.955x      0.693x
+padded     B48 T144      0.665    0.951x      0.922x
+```
+
+All three are numerically correct — max absolute deviation 0.0002 against a
+0.08 tolerance, so the rejection is on speed alone, and no tolerance was
+loosened to reach it. Reproduce with
+`scripts/benchmark_rwkv7_recurrence_variants.py`.
+
+### Why the prediction failed, and the more useful finding
+
+Shared-memory preloading trades global reads for `__syncthreads` barriers and a
+lower block-per-SM ceiling. On Ada the reads it eliminates were already being
+served by cache, so it pays the barriers and the occupancy cost for nothing.
+`_alt` is worse still: it drops the `v` preload to save 4 KiB and then pays a
+global load per timestep, which is the trade going the wrong way.
+
+The larger point is that the recurrence is **not where Experiment 0 spends its
+time**:
+
+```text
+recurrence forward, 12 layers      7.98 ms
+full padded training step        292.68 ms
+forward share                       2.7%
+forward + backward share            8.2%   (backward estimated at 2x forward,
+                                            not measured)
+```
+
+Even a hypothetical kernel twice as fast as the one we have would return about
+4% of step time. That caps Track E regardless of which variant wins, and it
+means the remaining ~92% is in the surrounding TimeMix / ChannelMix / head work
+that Track F and Track I cover. Profiling that surface is worth more than any
+further recurrence-kernel comparison.
 
 ## The recurrence: `clampw_v3` is the headline candidate
 
