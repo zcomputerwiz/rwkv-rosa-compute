@@ -323,12 +323,29 @@ overwritten by a subsequent run
 Preallocated, zeroed-not-freed `.grad` buffers are required. If the two are ever
 enabled together, that is a correctness requirement rather than a tuning choice.
 
+PyTorch's own warning names the same two remedies — pad inputs to a few fixed
+shapes, or set `cudagraph_skip_dynamic_graphs=True`. Bucketing subgroup batch
+sizes was quantified rather than guessed:
+
+```text
+  bucket  shapes  padded work  overhead
+       1      36       1.000x     0.0%
+       4      12       1.064x     6.4%
+       8       8       1.135x    13.5%
+      16       6       1.346x    34.6%
+```
+
+It does not clear. Bucket-8 still leaves 8 distinct shapes — at dynamo's
+recompile limit — while adding 13.5% GPU work. The entire prize is the 25.2%
+launch gap, and GPU work is roughly 75% of wall time, so bucket-8 spends about
+10% of wall to chase 25%, before graph capture overhead is counted. Bucket-4
+keeps the cost low but leaves 12 shapes, which is worse than the 9 that already
+triggered the collapse.
+
 **Conclusion.** Grouping and CUDA graphs are structurally incompatible:
 grouping produces variable shapes by construction and graphs require static
-ones. The launch-overhead half of the 25% gap is therefore not reachable while
-grouping is on. Bucketing subgroup batch sizes to a small set of fixed sizes
-would make graphs viable again, at the cost of reintroducing some of the padding
-grouping exists to remove — untested, and not obviously worth it.
+ones. The launch-overhead half of the 25% gap is not reachable while grouping is
+on, and padding shapes to recover it costs more than it returns.
 
 The remaining addressable share is the GPU-time half: the 27% `triton fused`
 plus 14% `elementwise / copy` that Track F's fused TimeMix/ChannelMix kernels
