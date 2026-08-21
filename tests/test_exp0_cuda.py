@@ -1,5 +1,6 @@
 """CUDA-only validation for Experiment 0 training and recurrent kernels."""
 
+import copy
 import os
 import random
 
@@ -325,3 +326,64 @@ def test_rwkv7_fused_cuda_full_model_forward_backward():
     grads = [parameter.grad for parameter in model.parameters() if parameter.grad is not None]
     assert grads
     assert all(torch.isfinite(grad).all() for grad in grads)
+
+
+@pytest.mark.slow
+def test_rwkv7_cudagraph_full_model_matches_eager():
+    """Keep the opt-in benchmark execution path behind the fused oracle."""
+    _require_cuda_toolkit()
+    if not torch.cuda.is_bf16_supported():
+        pytest.skip("CUDA device does not support BF16")
+
+    torch.manual_seed(2026)
+    eager_model = create_model(
+        ModelConfig(
+            architecture="rwkv",
+            init_mode="random",
+            rwkv_kernel="cuda",
+            hidden_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=1,
+            intermediate_size=128,
+            head_dim=64,
+            vocab_size=64,
+            device="cuda",
+        ),
+        d_input=12,
+    ).cuda()
+    compiled_model = torch.compile(
+        copy.deepcopy(eager_model),
+        backend="cudagraphs",
+        fullgraph=False,
+        dynamic=False,
+    )
+    input_tuples = torch.randn(2, 6, 12, device="cuda")
+    targets = torch.randint(0, 64, (2, 11), device="cuda")
+
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        eager_logits = eager_model(input_tuples, targets)
+        eager_logits.float().square().mean().backward()
+        compiled_logits = compiled_model(input_tuples, targets)
+        compiled_logits.float().square().mean().backward()
+
+    torch.testing.assert_close(
+        compiled_logits.float(),
+        eager_logits.float(),
+        rtol=3e-2,
+        atol=3e-2,
+    )
+    compared_gradients = 0
+    for eager_parameter, compiled_parameter in zip(
+        eager_model.parameters(), compiled_model.parameters()
+    ):
+        assert (compiled_parameter.grad is None) == (eager_parameter.grad is None)
+        if eager_parameter.grad is None:
+            continue
+        torch.testing.assert_close(
+            compiled_parameter.grad.float(),
+            eager_parameter.grad.float(),
+            rtol=8e-2,
+            atol=8e-2,
+        )
+        compared_gradients += 1
+    assert compared_gradients > 0

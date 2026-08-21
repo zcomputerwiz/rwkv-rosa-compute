@@ -271,8 +271,15 @@ def check_supported(workload: Workload) -> None:
 class CudaExecutor:
     """Only component that allocates, launches, or synchronizes CUDA work."""
 
-    def __init__(self, warmups: int, iterations: int, layers: int = 4):
+    def __init__(
+        self,
+        warmups: int,
+        iterations: int,
+        layers: int = 4,
+        full_model_compile_backend: str | None = None,
+    ):
         self.warmups, self.iterations, self.layers = warmups, iterations, layers
+        self.full_model_compile_backend = full_model_compile_backend
 
     def _operation(self, spec: Workload) -> Callable[[], None]:
         shape = (spec.batch, spec.timesteps, spec.hidden_size)
@@ -307,6 +314,17 @@ class CudaExecutor:
             d_input=spec.hidden_size,
         ).cuda()
         model.train(backward)
+        if self.full_model_compile_backend is not None:
+            # Each matrix row owns a fresh model and fixed input shape. Clear
+            # Dynamo's process-global cache so independent rows do not exhaust
+            # its recompile limit and silently fall back to eager execution.
+            torch.compiler.reset()
+            model = torch.compile(
+                model,
+                backend=self.full_model_compile_backend,
+                fullgraph=False,
+                dynamic=False,
+            )
         # A zero-length tuple prefix plus T synthetic continuation tokens drives
         # the same InputEmbedWrapper/create_model path used by Experiment 0.
         inputs = torch.empty((spec.batch, 0, spec.hidden_size), device="cuda",
@@ -363,6 +381,8 @@ class CudaExecutor:
             "full_rwkv_forward_backward": "full_model_forward_backward",
         }
         label = labels[spec.mode]
+        if self.full_model_compile_backend is not None and spec.mode.startswith("full_"):
+            label += f"_{self.full_model_compile_backend}"
         with torch.cuda.nvtx.range(label):
             for _ in range(iterations):
                 operation()
@@ -395,6 +415,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--profile-iterations", type=int, default=100)
+    parser.add_argument(
+        "--full-model-compile-backend",
+        choices=("cudagraphs",),
+        help="opt-in compiler backend applied only to full-model workloads",
+    )
     parser.add_argument("--output", type=Path)
     return parser
 
@@ -407,6 +432,12 @@ def plan_from_args(args: argparse.Namespace) -> tuple[list[Workload], dict[str, 
     if args.batch is not None and (args.batches or args.timesteps_list):
         raise ValueError("single-workload and matrix dimension options cannot be mixed")
     modes = tuple(args.mode or ("fused_forward",))
+    if args.full_model_compile_backend and not any(
+        mode.startswith("full_") for mode in modes
+    ):
+        raise ValueError(
+            "--full-model-compile-backend requires at least one full-model mode"
+        )
     if args.batch is not None:
         batches, timesteps = (args.batch,), (args.timesteps,)
     elif args.smoke:
@@ -423,7 +454,9 @@ def plan_from_args(args: argparse.Namespace) -> tuple[list[Workload], dict[str, 
               "chunk_len": CHUNK_LEN, "precision": "bf16", "warmups": args.warmups,
               "iterations": args.iterations, "layers": args.layers,
               "recurrence_backend": "mode-dependent", "profile": args.profile,
-              "profile_iterations": args.profile_iterations, "dry_run": args.dry_run}
+              "profile_iterations": args.profile_iterations,
+              "full_model_compile_backend": args.full_model_compile_backend,
+              "dry_run": args.dry_run}
     return matrix, config
 
 
@@ -458,7 +491,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if not torch.cuda.is_available():
         parser.error("CUDA is unavailable. Use --dry-run to validate the benchmark plan.")
-    executor = CudaExecutor(args.warmups, args.iterations, args.layers)
+    executor = CudaExecutor(
+        args.warmups,
+        args.iterations,
+        args.layers,
+        full_model_compile_backend=args.full_model_compile_backend,
+    )
     if args.profile:
         executor.profile(matrix[0], args.profile_iterations)
         return 0

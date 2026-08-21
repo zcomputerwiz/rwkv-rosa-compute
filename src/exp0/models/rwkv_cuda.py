@@ -169,6 +169,7 @@ def _pad_time(
     return F.pad(tensor, (0, 0, 0, pad), value=value)
 
 
+@torch.compiler.disable
 def rwkv7_cuda_recurrence(
     r: torch.Tensor,
     raw_w: torch.Tensor,
