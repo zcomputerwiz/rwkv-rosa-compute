@@ -545,4 +545,3 @@ def write_comparison_artifact(
         json.dump(comparison, handle, indent=2, sort_keys=True)
         handle.write("\n")
     return target
-
