@@ -523,4 +523,3 @@ def write_diagnostic_artifact(artifact: Mapping[str, Any], path: str | Path) -> 
         json.dump(artifact, handle, indent=2, sort_keys=True)
         handle.write("\n")
     return target
-
