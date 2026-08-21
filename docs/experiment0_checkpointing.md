@@ -62,6 +62,30 @@ python scripts/run_experiment.py `
 
 `--resume_checkpoint` requires exactly one `--seeds` value. The trainer refuses a checkpoint if the saved compatibility signature differs from the requested model, optimizer/training protocol, task configuration, dataset size, realized format assignment, epoch count, or run ID. The checkpoint cadence itself may be changed on resume because it does not affect the optimization trajectory.
 
+## Continuing Completed Runs (`continue_training.py`)
+
+A run that has already completed its planned epoch budget cannot simply be resumed with `--resume_checkpoint`. The `epochs` count is part of the checkpoint compatibility signature (so asking for more is rejected), and `linear_warmup_decay` has reached `0.0` (so training at the stored learning rate would perform no parameter updates).
+
+Extending a completed run requires a **new learning rate schedule**, which is an intervention. To answer exploratory questions ("does the metric move further if training continues?"), use `scripts/continue_training.py`:
+
+```powershell
+python scripts/continue_training.py results/exp0/checkpoints/<run_id>/seed_42/epoch_005.pt `
+  --additional-epochs 2 `
+  --device cuda `
+  --out results/continuations/seed_42_extended.json
+```
+
+### Safety and Provenance Rules for Continuations
+
+1. **Reconstructed Configuration**: All model, dataset, task, and optimizer settings are reconstructed directly from the checkpoint's internal `signature` rather than re-specified via CLI flags. A continuation cannot accidentally train on a different data distribution or model than the run it extends.
+2. **Restored Optimizer State**: Both model weights and AdamW optimizer momentum (`exp_avg`, `exp_avg_sq`) are restored to device memory; only the learning rate schedule is new. The peak LR defaults to the source run's last nonzero learning rate.
+3. **Supervised Loss Target**: Cross entropy is computed strictly against `loss_mask` (with `-100` ignore index) rather than `targets` (which contains padding tokens), ensuring the model is not penalized on padded positions.
+4. **Non-Canonical Output**: The resulting report is explicitly marked:
+   ```json
+   "is_canonical_experiment_result": false
+   ```
+   Continuations are exploratory artifacts and **must not** be placed on an accuracy-vs-N curve alongside fixed-budget runs.
+
 ## Atomicity and recovery behavior
 
 `latest.pt` is written to a temporary file in the same directory, flushed, fsynced and atomically replaced. A process or machine failure during a new save therefore leaves either the previous valid `latest.pt` or the newly completed one rather than a deliberately half-written target file.
@@ -70,10 +94,11 @@ Epoch snapshots are saved once and then atomically copied to `latest.pt`. The pe
 
 ## Testing
 
-`tests/test_exp0_checkpointing.py` includes micro-tests for:
+`tests/test_exp0_checkpointing.py` and `tests/test_continue_training.py` include tests for:
 
 - atomic replacement;
 - RNG capture/restore;
 - exact sampler suffix replay;
 - incompatible-checkpoint rejection;
-- a simulated mid-epoch process loss followed by resume, comparing final model weights and scientific history against an uninterrupted tiny run.
+- simulated mid-epoch process loss followed by exact resume;
+- continuation schedule construction, optimizer state restoration, and non-canonical metadata enforcement.
