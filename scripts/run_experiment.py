@@ -8,8 +8,19 @@ from pathlib import Path
 
 import torch
 
+from exp0.challenge_set import (
+    ChallengeSpec,
+    challenge_set_report,
+    generate_challenge_set,
+)
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
-from exp0.dataset import Task3SumDataset, build_default_vocab
+from exp0.construction_strata import (
+    build_records,
+    diagnose_packed,
+    error_records,
+    summarize_strata,
+)
+from exp0.dataset import Task3SumDataset, build_default_vocab, pad_collate_fn
 from exp0.evaluate import (
     canonical_run_config,
     compile_experiment_report,
@@ -22,7 +33,7 @@ from exp0.task3sum import (
     GENERATOR_MODES,
     SOURCE_GENERATOR,
 )
-from exp0.train import train_model
+from exp0.train import evaluate_accuracy, train_model
 
 
 def get_parser() -> argparse.ArgumentParser:
@@ -229,6 +240,34 @@ def get_parser() -> argparse.ArgumentParser:
             "Training/evaluation autocast precision. fp32 preserves the prior "
             "protocol; bf16 is recommended for supported CUDA GPUs."
         ),
+    )
+    parser.add_argument(
+        "--construction_diagnostics",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Emit supplementary construction-stratum diagnostics for the "
+            "canonical validation pass: per-stratum accuracy plus per-instance "
+            "error records. Adds no forward pass and does not change "
+            "filler_accuracy, the validation distribution, or the run_id."
+        ),
+    )
+    parser.add_argument(
+        "--challenge_per_class",
+        type=int,
+        default=0,
+        help=(
+            "Also evaluate a deliberately rebalanced diagnostic challenge set "
+            "with this many instances per construction stratum (0 disables). "
+            "Reported separately from canonical validation and never averaged "
+            "with it."
+        ),
+    )
+    parser.add_argument(
+        "--challenge_seed",
+        type=int,
+        default=20260820,
+        help="Deterministic seed for the diagnostic challenge set.",
     )
     parser.add_argument(
         "--immediate_protocol",
@@ -442,6 +481,93 @@ def _check_existing_report(
     )
 
 
+def _predicted_labels(predicted_ids, vocab):
+    """Map answer-position token ids to booleans; None for anything else."""
+    true_id = vocab.token2id["True"]
+    false_id = vocab.token2id["False"]
+    return [
+        True if token == true_id else False if token == false_id else None
+        for token in predicted_ids
+    ]
+
+
+def _canonical_diagnostics(details, val_instances, vocab, task_cfg):
+    """Construction strata for the canonical validation pass.
+
+    Uses per-example data captured during the run's existing final validation
+    pass, so no additional forward pass is performed. Supplementary only:
+    filler_accuracy remains the canonical metric.
+    """
+    if not details:
+        return None
+    diagnostics = diagnose_packed(val_instances, mod=task_cfg.mod)
+    records = build_records(
+        diagnostics,
+        _predicted_labels(details["predicted_ids"], vocab),
+        details.get("true_logits"),
+        details.get("false_logits"),
+    )
+    return {
+        "distribution": "canonical_source_faithful",
+        "distribution_note": (
+            "Source-faithful validation distribution. This is the same pass "
+            "that produced filler_accuracy; the strata below partition it and "
+            "do not replace it."
+        ),
+        "stratified": summarize_strata(records),
+        "errors": error_records(records),
+    }
+
+
+def _challenge_diagnostics(args, task_cfg, vocab, model, train_cfg, model_cfg):
+    """Evaluate a rebalanced diagnostic challenge set, reported separately."""
+    spec = ChallengeSpec(
+        seed=args.challenge_seed,
+        per_stratum=args.challenge_per_class,
+        length=args.length,
+        dimension=args.dimension,
+        mod=task_cfg.mod,
+        generator_mode=task_cfg.generator_mode,
+        corruption_rate=task_cfg.corruption_rate,
+    )
+    challenge = generate_challenge_set(spec)
+    dataset = Task3SumDataset(
+        challenge.instances,
+        format_type="filler",
+        num_filler=task_cfg.num_filler,
+        vocab=vocab,
+        seed=args.challenge_seed,
+        vocab_reduction=args.vocab_reduction,
+    )
+    device = torch.device(model_cfg.device)
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=train_cfg.batch_size,
+        shuffle=False,
+        collate_fn=pad_collate_fn,
+    )
+    sink = {}
+    evaluate_accuracy(
+        model,
+        loader,
+        device,
+        vocab.token2id["ANS"],
+        vocab.token2id["True"],
+        vocab.token2id["False"],
+        precision=train_cfg.precision,
+        detail_sink=sink,
+    )
+    records = build_records(
+        diagnose_packed(challenge.instances, mod=task_cfg.mod),
+        _predicted_labels(sink["predicted_ids"], vocab),
+        sink.get("true_logits"),
+        sink.get("false_logits"),
+    )
+    report = challenge_set_report(challenge, summarize_strata(records))
+    report["errors"] = error_records(records)
+    return report
+
+
 def main():
     args = get_parser().parse_args()
     task_cfg, model_cfg, train_cfg_base = build_configs(args)
@@ -512,6 +638,9 @@ def main():
         rng=random.Random(args.eval_seed),
         generator_mode=task_cfg.generator_mode,
         corruption_rate=task_cfg.corruption_rate,
+        # Recording provenance does not touch RNG ordering or instance
+        # contents, so the canonical validation set is bit-identical either way.
+        collect_provenance=args.construction_diagnostics,
     )
     filler_val_ds = Task3SumDataset(
         val_instances,
@@ -611,11 +740,24 @@ def main():
             checkpoint_every_steps=args.checkpoint_every_steps,
             resume_checkpoint=resume_checkpoint,
             checkpoint_run_id=run_id,
+            collect_validation_details=args.construction_diagnostics,
         )
         history["seed"] = seed
         history["training_seed"] = seed
         history["task_seed"] = seed
         per_seed_results.append(history)
+
+        if args.construction_diagnostics:
+            history["construction_diagnostics"] = _canonical_diagnostics(
+                history.pop("final_validation_details", None),
+                val_instances,
+                vocab,
+                task_cfg,
+            )
+        if args.challenge_per_class > 0:
+            history["challenge_diagnostics"] = _challenge_diagnostics(
+                args, task_cfg, vocab, trained_model, train_cfg, model_cfg
+            )
 
         del trained_model, train_ds, train_instances
         if model_cfg.device.startswith("cuda") and torch.cuda.is_available():

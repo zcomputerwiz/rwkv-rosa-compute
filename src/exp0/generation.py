@@ -24,6 +24,7 @@ def generate_protocol_packed_instances(
     *,
     generator_mode: str = SOURCE_GENERATOR,
     corruption_rate: float = DEFAULT_CORRUPTION_RATE,
+    collect_provenance: bool = False,
 ) -> PackedInstances:
     """Generate an Experiment-0 split using independent protocol RNG streams.
 
@@ -52,6 +53,8 @@ def generate_protocol_packed_instances(
     tuple_array = np.empty((num_samples, length, dimension), dtype=np.uint8)
     label_array = np.empty(num_samples, dtype=np.bool_)
     match_array = np.full((num_samples, 3), -1, dtype=np.int16)
+    arm_array = np.full(num_samples, -1, dtype=np.int8)
+    corruption_array = np.full(num_samples, -1, dtype=np.int8)
 
     for idx, construction_positive in enumerate(requested_arms):
         instance = generate_instance(
@@ -67,9 +70,20 @@ def generate_protocol_packed_instances(
         label_array[idx] = instance.has_3sum
         if instance.matching_indices is not None:
             match_array[idx] = instance.matching_indices
+        if collect_provenance:
+            if instance.construction_arm is not None:
+                arm_array[idx] = int(instance.construction_arm)
+            if instance.corruption_count is not None:
+                corruption_array[idx] = int(instance.corruption_count)
 
     return PackedInstances(
         tuples=torch.from_numpy(tuple_array),
         has_3sum=torch.from_numpy(label_array),
         matching_indices=torch.from_numpy(match_array),
+        construction_arm=(
+            torch.from_numpy(arm_array) if collect_provenance else None
+        ),
+        corruption_count=(
+            torch.from_numpy(corruption_array) if collect_provenance else None
+        ),
     )

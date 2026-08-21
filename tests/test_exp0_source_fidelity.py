@@ -46,7 +46,9 @@ def _oracle_source_instance(
         rng.shuffle(values)
         solved, indices = check_3sum(values)
         assert solved and indices is not None
-        return Instance3Sum(values, True, indices)
+        return Instance3Sum(
+            values, True, indices, construction_arm=True, corruption_count=None
+        )
 
     corruptions = 1
     p = 1 / corruption_rate
@@ -64,7 +66,11 @@ def _oracle_source_instance(
     tuples.extend(rand_tuple() for _ in range(length - 3))
     rng.shuffle(tuples)
     solved, indices = check_3sum(tuples)
-    return Instance3Sum(tuples, solved, indices)
+    # The oracle knows the arm and corruption count independently, so the
+    # comparison also verifies the recorded generation provenance.
+    return Instance3Sum(
+        tuples, solved, indices, construction_arm=False, corruption_count=corruptions
+    )
 
 
 @pytest.mark.parametrize("construction_positive", [False, True])

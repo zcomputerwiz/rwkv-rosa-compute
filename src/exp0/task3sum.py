@@ -17,6 +17,13 @@ class Instance3Sum:
     tuples: List[Tuple[int, ...]]
     has_3sum: bool
     matching_indices: Optional[Tuple[int, int, int]] = None
+    # Generation provenance, recorded for diagnostics only. The construction arm
+    # is which branch the generator took, NOT the realized label: source-mode
+    # corruption can fail to destroy the planted solution, leaving a corrupted
+    # instance that is still mathematically positive. Both default to None so
+    # nothing about generation behaviour or RNG ordering changes.
+    construction_arm: Optional[bool] = None
+    corruption_count: Optional[int] = None
 
 
 def check_3sum(
@@ -196,6 +203,8 @@ def generate_source_instance(
             tuples=tuples,
             has_3sum=True,
             matching_indices=indices,
+            construction_arm=True,
+            corruption_count=None,
         )
 
     # Match source RNG order: planted core -> geometric corruption -> columns /
@@ -222,6 +231,8 @@ def generate_source_instance(
         tuples=tuples,
         has_3sum=has_sol,
         matching_indices=indices,
+        construction_arm=False,
+        corruption_count=corruptions,
     )
 
 
@@ -263,6 +274,7 @@ def generate_uniform_conditioned_instance(
                     tuples=tuples,
                     has_3sum=True,
                     matching_indices=indices,
+                    construction_arm=True,
                 )
         raise RuntimeError(
             "Failed to generate a positive 3SUM instance within max attempts"
@@ -276,6 +288,7 @@ def generate_uniform_conditioned_instance(
                 tuples=tuples,
                 has_3sum=False,
                 matching_indices=None,
+                construction_arm=False,
             )
 
         assert indices is not None
@@ -290,6 +303,7 @@ def generate_uniform_conditioned_instance(
                 tuples=tuples,
                 has_3sum=False,
                 matching_indices=None,
+                construction_arm=False,
             )
 
     raise RuntimeError(

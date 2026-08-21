@@ -375,7 +375,25 @@ def compile_experiment_report(
         **cot_diagnostics,
     }
 
-    return {
+    # Supplementary diagnostics, present only when explicitly requested. The two
+    # distributions are kept under separate keys and are never combined: one
+    # estimates performance under the source-faithful distribution, the other is
+    # a deliberately rebalanced probe.
+    diagnostics: Dict[str, Any] = {}
+    canonical_diagnostics = [
+        res.get("construction_diagnostics") for res in per_seed_results
+    ]
+    canonical_diagnostics = [item for item in canonical_diagnostics if item]
+    if canonical_diagnostics:
+        diagnostics["canonical_validation"] = canonical_diagnostics
+    challenge_diagnostics = [
+        res.get("challenge_diagnostics") for res in per_seed_results
+    ]
+    challenge_diagnostics = [item for item in challenge_diagnostics if item]
+    if challenge_diagnostics:
+        diagnostics["diagnostic_challenge_validation"] = challenge_diagnostics
+
+    report = {
         "run_id": run_id,
         "run_config": run_config,
         "model": model_dict,
@@ -520,3 +538,6 @@ def compile_experiment_report(
         "seeds_run": seeds_run,
         "per_seed_details": per_seed_results,
     }
+    if diagnostics:
+        report["construction_diagnostics"] = diagnostics
+    return report
