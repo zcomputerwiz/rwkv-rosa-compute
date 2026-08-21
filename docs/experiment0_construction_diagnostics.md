@@ -173,4 +173,3 @@ Per-run JSON is emitted in a stable shape with every known stratum present even
 when empty, so a sweep-level aggregation can align columns across N without
 parsing console output. Aggregation itself is deliberately left to a later
 change.
-
