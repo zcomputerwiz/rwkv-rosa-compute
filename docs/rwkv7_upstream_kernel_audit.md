@@ -92,7 +92,11 @@ means the remaining ~92% is in the surrounding TimeMix / ChannelMix / head work
 that Track F and Track I cover. Profiling that surface is worth more than any
 further recurrence-kernel comparison.
 
-## The recurrence: `clampw_v3` is the headline candidate
+## Source-level analysis of `clampw_v3` (superseded by the measurement above)
+
+Kept because its compatibility findings still stand and are what let the A/B be
+run at all — but its performance expectation was wrong, and the verdict is now
+REJECT on measurement.
 
 The filename says `_for_h100`, which reads as a hard Hopper requirement. It is
 not. Inspecting the source finds **no Hopper-specific machinery at all**:
@@ -289,23 +293,37 @@ than eager PyTorch" but "is it faster than compiled PyTorch", and that has not
 been measured. Track I re-profiles the compiled path first, so these are
 prioritized by measured share of step time rather than by expectation.
 
-## What this does not yet establish
+## What is settled and what is not
 
-Nothing here has been run. This is a source-level audit: it establishes
-compatibility, assumptions, and exclusions, and it rules out three candidates on
-concrete grounds. Every remaining verdict is contingent on:
+Settled by measurement:
 
 ```text
-correctness A/B against the existing PyTorch recurrence oracle
-existing CUDA tolerances, not loosened to make a kernel pass
-timing at Experiment 0 shapes, after length grouping
-comparison against compiled PyTorch, not eager
+v3 and v3_alt        REJECT   forward A/B on Ada at real shapes, correctness PASS
+recurrence share     ~8% of step time (backward estimated), so Track E is capped
 ```
 
-Source inspection specifically cannot settle whether v3's tiling pays off on
-Ada, whether `_alt`'s lower footprint beats its extra global load, or whether
-the backward's 36.25 KiB constrains occupancy in practice. Those need
-measurement.
+Settled by source inspection alone:
+
+```text
+clampw128_v2         REJECT   static_assert(_N_ == 128), we use 64
+head/CE kernels      REJECT   L2Wrap changes the objective; vocab hardcoded 65536
+wkv7_cuda            REJECT   older op surface than what we build
+```
+
+Still open — the six fused TimeMix/ChannelMix kernels. They cover the ~92% of
+step time the recurrence does not, which is now the only part of this audit with
+real headroom. Their verdicts remain contingent on:
+
+```text
+correctness A/B against the existing PyTorch oracle
+existing CUDA tolerances, not loosened to make a kernel pass
+timing at Experiment 0 shapes, after length grouping
+comparison against COMPILED PyTorch, not eager
+```
+
+That last line is the one that changed most since the first revision: with the
+dynamo specialization fixed, compiled 0B is 1.76x rather than 1.40x, so the bar
+a fused kernel has to clear is higher than the original audit assumed.
 
 Any adopted upstream source must be pinned by exact commit SHA, and the commit
 inspected here is recorded at the top of this document.
