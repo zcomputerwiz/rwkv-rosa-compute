@@ -122,8 +122,12 @@ def grouped_loss_backward(
             logits = forward_fn(sub_tuples, sub_targets)
             # reduction="sum" then a single global divide: this is what keeps
             # the objective token-weighted instead of group-weighted.
+            # No explicit .float(): the padded path in train_model does not cast
+            # either, and autocast's fp32 policy already promotes cross_entropy,
+            # so casting here would only make the two paths differ in memory
+            # behaviour while producing the same numbers.
             loss_sum = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)).float(),
+                logits.reshape(-1, logits.size(-1)),
                 sub_mask[:, 1:].reshape(-1),
                 ignore_index=IGNORE_INDEX,
                 reduction="sum",
