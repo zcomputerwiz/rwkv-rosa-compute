@@ -109,6 +109,7 @@ def call_variant(ops, r, raw_w, k, v, a, b):
 
 def reference(r, raw_w, k, v, a, b):
     import torch.nn.functional as F
+
     from exp0.models.rwkv import RWKV7_OP
 
     transformed_w = -F.softplus(-raw_w) - 0.5
@@ -129,7 +130,6 @@ def make_inputs(batch: int, timesteps: int, hidden: int, seed: int = 11):
 
 def run_variant(name: str, shapes: List[Dict[str, int]], steps: int) -> Dict[str, Any]:
     import torch
-    import torch.nn.functional as F
 
     ops = load_variant(name)
     result: Dict[str, Any] = {"variant": name, "shapes": []}

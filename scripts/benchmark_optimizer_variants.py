@@ -26,11 +26,11 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-import torch
+import torch  # noqa: E402
 
-from exp0.config import ModelConfig, Task3SumConfig
-from exp0.dataset import build_default_vocab
-from exp0.train import create_model
+from exp0.config import ModelConfig, Task3SumConfig  # noqa: E402
+from exp0.dataset import build_default_vocab  # noqa: E402
+from exp0.train import create_model  # noqa: E402
 
 SHAPE = {"hidden": 768, "layers": 12, "heads": 12}
 

@@ -21,7 +21,7 @@ import sys
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
@@ -30,16 +30,20 @@ if str(SRC_ROOT) not in sys.path:
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-import torch
-import torch._inductor.config as inductor_config
-import torch.nn.functional as F
-from torch.profiler import ProfilerActivity, profile
+import torch  # noqa: E402
+import torch._inductor.config as inductor_config  # noqa: E402
+import torch.nn.functional as F  # noqa: E402
+from torch.profiler import ProfilerActivity, profile  # noqa: E402
 
-from exp0.config import ModelConfig, Task3SumConfig
-from exp0.dataset import Task3SumDataset, build_default_vocab, pad_collate_fn
-from exp0.generation import generate_protocol_packed_instances
-from exp0.grouped_execution import IGNORE_INDEX, grouped_loss_backward
-from exp0.train import create_model
+from exp0.config import ModelConfig, Task3SumConfig  # noqa: E402
+from exp0.dataset import (  # noqa: E402
+    Task3SumDataset,
+    build_default_vocab,
+    pad_collate_fn,
+)
+from exp0.generation import generate_protocol_packed_instances  # noqa: E402
+from exp0.grouped_execution import IGNORE_INDEX, grouped_loss_backward  # noqa: E402
+from exp0.train import create_model  # noqa: E402
 
 SHAPE = {"hidden": 768, "layers": 12, "heads": 12}
 
@@ -266,7 +270,7 @@ def report(result: Dict[str, Any], top: int) -> None:
     if result.get("gemm_us_by_shape"):
         head = result["head_gemm_us"]
         gemm = result["gemm_us_by_shape"]
-        print(f"  GEMM split by operand shape")
+        print("  GEMM split by operand shape")
         print(f"    output head (32000)  {head / 1e3 / steps:>8.2f} ms/step "
               f"{head / total:>6.1%} of step")
         print(f"    backbone linears     {(gemm - head) / 1e3 / steps:>8.2f} ms/step "
