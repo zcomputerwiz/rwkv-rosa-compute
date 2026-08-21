@@ -93,8 +93,11 @@ def forward_backward(forward_fn: Callable, model, batch, precision: str) -> floa
                else torch.autocast("cuda", enabled=False))
     with context:
         logits = forward_fn(batch["input_tuples"], batch["targets"])
+        # loss_mask, not targets: targets is padded with the PAD id because it
+        # is fed to the model, while loss_mask is padded with -100 so padded
+        # positions are ignored by cross entropy.
         loss = CRITERION(logits.reshape(-1, logits.size(-1)).float(),
-                         batch["targets"][:, 1:].reshape(-1))
+                         batch["loss_mask"][:, 1:].reshape(-1))
     loss.backward()
     return float(loss.detach())
 
