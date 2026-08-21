@@ -78,6 +78,7 @@ def grouped_loss_backward(
     *,
     autocast: Optional[Callable[[], Any]] = None,
     backward: bool = True,
+    on_group: Optional[Callable[[torch.Tensor, torch.Tensor, torch.Tensor], None]] = None,
 ) -> Dict[str, Any]:
     """Run one optimizer batch as length groups, accumulating gradients.
 
@@ -86,8 +87,17 @@ def grouped_loss_backward(
     optimizer or scheduler, and nothing clips: the caller does that once, over
     the complete accumulated gradient, exactly as the unrouped path does.
 
+    ``on_group`` is called as ``on_group(logits, index, sub_targets)`` once per
+    group, after the backward for that group. The padded path derives per-format
+    training accuracy from the batch logits; grouping never materializes a full
+    batch of logits, so that telemetry has to be accumulated per group instead of
+    dropped. ``index`` maps rows back to positions in the original batch so the
+    caller can align its own per-sample tensors.
+
     Returns the global token-weighted loss plus per-group execution counts, so
-    the padding actually avoided is reportable rather than assumed.
+    the padding actually avoided is reportable rather than assumed. The counts
+    include the head-projection positions that grouping still leaves
+    unsupervised, which is what decides whether a masked head is worth building.
     """
     denominator = supervised_token_count(batch)
     if denominator == 0:
@@ -95,6 +105,8 @@ def grouped_loss_backward(
 
     total_loss = 0.0
     executed_positions = 0
+    head_positions = 0
+    supervised_head_positions = 0
     group_records: List[Dict[str, int]] = []
 
     for length, index in group_by_length(batch):
@@ -120,12 +132,25 @@ def grouped_loss_backward(
         if backward:
             scaled.backward()
 
+        if on_group is not None:
+            on_group(logits.detach(), index, sub_targets)
+
+        group_supervised = int((sub_mask[:, 1:] != IGNORE_INDEX).sum())
+        # The head projects every shifted position in the group, supervised or
+        # not. Grouping removes cross-format padding but not the positions a
+        # sequence pads to its own end, so this is the waste a masked head would
+        # still be able to recover.
+        group_head_positions = int(index.numel()) * (length - 1)
+
         total_loss += float(loss_sum.detach())
         executed_positions += int(index.numel()) * length
+        head_positions += group_head_positions
+        supervised_head_positions += group_supervised
         group_records.append({
             "target_length": length,
             "samples": int(index.numel()),
-            "supervised_tokens": int((sub_mask[:, 1:] != IGNORE_INDEX).sum()),
+            "supervised_tokens": group_supervised,
+            "head_positions": group_head_positions,
         })
 
     padded_positions = int(batch["targets"].shape[0] * batch["targets"].shape[1])
@@ -136,6 +161,9 @@ def grouped_loss_backward(
         "executed_target_positions": executed_positions,
         "padded_target_positions": padded_positions,
         "positions_saved": padded_positions - executed_positions,
+        "head_positions": head_positions,
+        "supervised_head_positions": supervised_head_positions,
+        "unsupervised_head_positions": head_positions - supervised_head_positions,
     }
 
 

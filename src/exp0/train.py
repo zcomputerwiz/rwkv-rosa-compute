@@ -34,6 +34,7 @@ from exp0.config import (
 )
 from exp0.dataset import FORMAT_NAMES, Task3SumDataset, pad_collate_fn
 from exp0.diagnostics import evaluate_cot_diagnostics
+from exp0.grouped_execution import grouped_loss_backward
 from exp0.models.base import InputEmbedWrapper
 from exp0.models.llama import LlamaBackbone
 from exp0.models.rwkv import RWKV7Backbone
@@ -266,6 +267,24 @@ def _validate_cuda_backend(
         raise ValueError(
             "The pinned RWKV-7 CUDA recurrence is BF16-only. "
             "Use --precision bf16 with --rwkv_kernel cuda."
+        )
+
+
+def _validate_grouped_execution(train_cfg: TrainConfig) -> None:
+    """Grouped execution runs its own backward, so it cannot use a GradScaler.
+
+    FP16 needs the scaler's scale/unscale around every backward. The grouped
+    path calls backward once per subgroup inside grouped_loss_backward, which
+    would silently skip scaling and produce underflowed gradients rather than an
+    error. Refuse the combination instead.
+    """
+    if not train_cfg.grouped_execution:
+        return
+    if train_cfg.precision == "fp16":
+        raise ValueError(
+            "grouped_execution is not supported with precision='fp16': the "
+            "GradScaler must wrap every backward, and grouped execution runs "
+            "one backward per length subgroup. Use bf16 or fp32."
         )
 
 
@@ -768,6 +787,7 @@ def train_model(
     device = torch.device(model_cfg.device)
     _validate_precision(device, train_cfg.precision)
     _validate_cuda_backend(model_cfg, train_cfg, device)
+    _validate_grouped_execution(train_cfg)
 
     vocab = train_dataset.vocab
     ans_token_id = vocab.token2id.get("ANS", -1)
@@ -1012,6 +1032,14 @@ def train_model(
 
     loop_start_epoch = epochs if resume_stops_before_loop else start_epoch
 
+    # Grouped-execution telemetry, accumulated across the whole run so the
+    # padding actually avoided is measured rather than assumed, and so the head
+    # projections grouping still leaves unsupervised are visible without a
+    # separate experiment. Zero when grouped execution is off.
+    grouped_positions_saved = 0
+    grouped_head_positions = 0
+    grouped_unsupervised_head = 0
+
     _sync_cuda(device)
     for _epoch in range(loop_start_epoch, epochs):
         resuming_this_epoch = _epoch == start_epoch and resume_samples > 0
@@ -1076,50 +1104,87 @@ def train_model(
                 device, dtype=torch.long, non_blocking=non_blocking
             )
 
-            optimizer.zero_grad(set_to_none=True)
-            with _autocast_context(device, train_cfg.precision):
-                loss_logits = training_forward(input_tuples, targets)
-                shift_targets = loss_mask[:, 1:].reshape(-1)
-                loss = criterion(
-                    loss_logits.reshape(-1, loss_logits.size(-1)), shift_targets
-                )
+            def _accumulate_answer_stats(logits, targets_for_answer, rows):
+                """Per-format training accuracy, identical in both paths.
 
-            with torch.no_grad():
+                ``rows`` selects the samples these logits came from, so the
+                grouped path can accumulate group by group without ever holding
+                a full batch of logits.
+                """
                 answer_predictions = _answer_predictions_from_loss_logits(
-                    loss_logits, targets, ans_token_id
+                    logits, targets_for_answer, ans_token_id
                 )
                 expected_answers = torch.where(
-                    has_3sum,
+                    has_3sum[rows],
                     torch.full_like(answer_predictions, ans_true_id),
                     torch.full_like(answer_predictions, ans_false_id),
                 )
                 answer_correct = answer_predictions.eq(expected_answers)
                 train_answer_correct.add_(answer_correct.sum())
-                train_answer_count += targets.shape[0]
+                group_formats = format_codes[rows]
                 train_count_by_format.scatter_add_(
                     0,
-                    format_codes,
-                    torch.ones_like(format_codes, dtype=torch.int64),
+                    group_formats,
+                    torch.ones_like(group_formats, dtype=torch.int64),
                 )
                 train_correct_by_format.scatter_add_(
-                    0, format_codes, answer_correct.to(torch.int64)
+                    0, group_formats, answer_correct.to(torch.int64)
                 )
 
-            if scaler is not None:
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
+            optimizer.zero_grad(set_to_none=True)
+
+            if train_cfg.grouped_execution:
+                # grouped_loss_backward runs the backward per group, so the
+                # gradient is already complete here. The clip and the optimizer
+                # step below are unchanged and still happen exactly once.
+                group_result = grouped_loss_backward(
+                    training_forward,
+                    batch,
+                    device,
+                    autocast=lambda: _autocast_context(device, train_cfg.precision),
+                    on_group=lambda logits, index, sub_targets: _accumulate_answer_stats(
+                        logits, sub_targets, index.to(device)
+                    ),
+                )
+                loss_value = group_result["loss"]
+                train_answer_count += targets.shape[0]
+                grouped_positions_saved += group_result["positions_saved"]
+                grouped_head_positions += group_result["head_positions"]
+                grouped_unsupervised_head += group_result["unsupervised_head_positions"]
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
                 optimizer.step()
+            else:
+                with _autocast_context(device, train_cfg.precision):
+                    loss_logits = training_forward(input_tuples, targets)
+                    shift_targets = loss_mask[:, 1:].reshape(-1)
+                    loss = criterion(
+                        loss_logits.reshape(-1, loss_logits.size(-1)), shift_targets
+                    )
+
+                with torch.no_grad():
+                    _accumulate_answer_stats(
+                        loss_logits,
+                        targets,
+                        torch.arange(targets.shape[0], device=device),
+                    )
+                    train_answer_count += targets.shape[0]
+
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                    optimizer.step()
+                loss_value = loss.detach()
 
             if lr_scheduler is not None:
                 lr_scheduler.step()
             optimizer_steps += 1
-            loss_sum.add_(loss.detach())
+            loss_sum.add_(loss_value)
             loss_count += 1
             samples_consumed += targets.shape[0]
             t_last = time.perf_counter()
@@ -1392,8 +1457,27 @@ def train_model(
         "execution_protocol": {
             "tf32_matmul": train_cfg.tf32_matmul,
             "torch_compile": train_cfg.torch_compile,
+            "grouped_execution": train_cfg.grouped_execution,
             "precision": train_cfg.precision,
         },
+        # Populated only when grouped_execution is on. unsupervised_head_positions
+        # is what a masked head could still recover after grouping has removed
+        # the cross-format padding.
+        "grouped_execution_stats": (
+            {
+                "target_positions_saved": grouped_positions_saved,
+                "head_positions": grouped_head_positions,
+                "unsupervised_head_positions": grouped_unsupervised_head,
+                "supervised_head_fraction": (
+                    (grouped_head_positions - grouped_unsupervised_head)
+                    / grouped_head_positions
+                    if grouped_head_positions
+                    else None
+                ),
+            }
+            if train_cfg.grouped_execution
+            else None
+        ),
         "weight_decay": weight_decay,
         "grad_clip": grad_clip,
         "adam_betas": [train_cfg.adam_beta1, train_cfg.adam_beta2],

@@ -140,7 +140,7 @@ def drop_identity_neutral_fields(train_dict: Dict[str, Any]) -> Dict[str, Any]:
             train_dict.pop(key, None)
     if train_dict.get("immediate_protocol", True):
         train_dict.pop("immediate_protocol", None)
-    for key in ("tf32_matmul", "torch_compile"):
+    for key in ("tf32_matmul", "torch_compile", "grouped_execution"):
         if not train_dict.get(key, False):
             train_dict.pop(key, None)
     return train_dict
@@ -194,6 +194,16 @@ class TrainConfig:
     # reorders operations. Neither may be switched on partway through a sweep.
     tf32_matmul: bool = False
     torch_compile: bool = False
+    # Length-aware execution: run one optimizer batch as length-homogeneous
+    # subgroups so filler examples are not carried through a CoT-sized
+    # rectangle. One optimizer update, one scheduler step, and one global
+    # gradient clip are preserved, and the loss stays token-weighted, so the
+    # objective is unchanged. It is opt-in and changes the run_id because
+    # summation order differs, which moves logits by float32 epsilon.
+    #
+    # This is an implementation-efficiency option. It is NOT compute matching:
+    # the scientific budget is still the requested filler transition count N.
+    grouped_execution: bool = False
 
     def __post_init__(self):
         format_ratios = {
