@@ -26,12 +26,20 @@ batch; `floor` is the spread across identical repeats.
   bf16 + compile      132.59    2.12x    10.30806160   -1.662e-03   0.0e+00
 
 0B RWKV-7 (batch 128, 12 layers, hidden 768)
-  bf16                479.53    1.00x     9.79593754            -   0.0e+00
-  bf16 + compile      342.21    1.40x     9.79593754   +0.000e+00   0.0e+00
+  bf16                479.23    1.00x     9.79593754            -   0.0e+00
+  bf16 + compile      272.78    1.76x     9.79593754   +0.000e+00   0.0e+00
 ```
 
+**These 0B compile figures were re-measured.** The original run recorded
+342.21 ms and 1.40x, taken while `torch.compile` was silently falling back to
+eager for RWKV layers 8-11: dynamo specialized the block frame on the integer
+`self.layer_id`, and 12 layers exceeded its recompile limit of 8. With that
+fixed the same benchmark gives 272.78 ms and **1.76x**. The Llama figures are
+unaffected - it has 4 layers, under the limit. See
+`docs/experiment0_grouped_execution.md` for the diagnosis and the fix.
+
 Projected against the completed runs: the 8.9h 0A N=0 run becomes about 4.2h at
-`bf16 + compile`, and the projected 49.6h 0B run becomes about 35.4h.
+`bf16 + compile`, and the projected 49.6h 0B run becomes about 28.2h.
 
 ### Why numerics are measured on one pass
 
@@ -65,7 +73,7 @@ deviation ~7x larger than TF32 and 1.8 GiB less memory. The repository already
 treats precision this way.
 
 **`torch.compile` is nearly free numerically.** On RWKV it is bitwise identical
-to eager while delivering 1.40x. On Llama it adds only -6.5e-05 on top of BF16's
+to eager while delivering 1.76x. On Llama it adds only -6.5e-05 on top of BF16's
 -1.597e-03, about 4% of a deviation already accepted.
 
 **Fused AdamW is not worth a protocol note.** It measured ~2-4% and sits inside
