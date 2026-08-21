@@ -199,4 +199,3 @@ def test_mismatched_run_report_config_is_rejected_before_evaluation(tmp_path):
             val_samples=2,
             expected_run_config=expected,
         )
-
