@@ -284,3 +284,63 @@ So it belongs with TF32 and bf16: a deliberate protocol choice, recorded in the
 4  recurrence kernels                CLOSED - 8.5%, both v3 variants rejected
 5  masked head projection            CLOSED - grouping already reaches 100%
 ```
+
+## CUDA graphs: rejected, and structurally so
+
+The wall-vs-GPU gap showed 25.2% of the grouped step is not on the GPU — launch
+and Python overhead, which grouping itself creates by running two subgroups per
+step where the padded path runs one. The padded path's gap is only 1.8%.
+
+`torch.compile(mode="reduce-overhead")` targets exactly that. It does not work
+here.
+
+```text
+                  GPU ms    wall ms    gap
+default           168.09     224.73    25.2%
+reduce-overhead   234.11     811.70    71.2%
+```
+
+**3.6x slower on wall clock.** CUDA graphs capture per shape, and grouping
+produces ~18 distinct subgroup shape-sets per 100 batches, so the run spends
+most of its time capturing and re-capturing rather than replaying. GPU time
+rises too, because capture adds copies into graph-owned static buffers.
+
+Measured under the uniform-shape generator this looked like a 1.089x win. That
+was an artifact of the same unrepresentative batches described above — one
+shape, one capture, pure replay. The reversal is total, and it is the clearest
+argument for fixing that generator.
+
+There is also a correctness constraint on the pairing, independent of speed.
+Grouping accumulates gradients across subgroups, and CUDA graphs own the tensors
+they produce, so `zero_grad(set_to_none=True)` lets the second subgroup's
+backward overwrite a graph-owned tensor from the first:
+
+```text
+RuntimeError: accessing gradient tensor output of CUDAGraphs that has been
+overwritten by a subsequent run
+```
+
+Preallocated, zeroed-not-freed `.grad` buffers are required. If the two are ever
+enabled together, that is a correctness requirement rather than a tuning choice.
+
+**Conclusion.** Grouping and CUDA graphs are structurally incompatible:
+grouping produces variable shapes by construction and graphs require static
+ones. The launch-overhead half of the 25% gap is therefore not reachable while
+grouping is on. Bucketing subgroup batch sizes to a small set of fixed sizes
+would make graphs viable again, at the cost of reintroducing some of the padding
+grouping exists to remove — untested, and not obviously worth it.
+
+The remaining addressable share is the GPU-time half: the 27% `triton fused`
+plus 14% `elementwise / copy` that Track F's fused TimeMix/ChannelMix kernels
+target.
+
+## Cumulative result
+
+```text
+padded  + foreach AdamW + compile    322.53 ms wall    1.000x
+grouped + fused AdamW   + compile    224.73 ms wall    1.435x
+```
+
+Both at N=0, batch 48, bf16, on realistic shuffled batches. The padded figure is
+shape-invariant — it always pads to B=48 T=136 — so the generator fix does not
+move it.
