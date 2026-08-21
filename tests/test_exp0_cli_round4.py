@@ -40,10 +40,20 @@ def _sweep_args(**overrides) -> argparse.Namespace:
         "batch_size": 64,
         "learning_rate": 1e-4,
         "epochs": 3,
+        "early_stop_metric": "none",
+        "early_stop_target": None,
+        "early_stop_tolerance": 0.0,
+        "early_stop_patience": 1,
+        "checkpoint_every_steps": 5000,
         "num_workers": 2,
         "val_num_workers": 0,
         "prefetch_factor": 1,
         "precision": "fp32",
+        "tf32": False,
+        "torch_compile": False,
+        "construction_diagnostics": False,
+        "challenge_per_class": 0,
+        "challenge_seed": 20260820,
         "fused_adamw": False,
         "pin_memory": True,
         "immediate_protocol": True,
@@ -339,3 +349,83 @@ def test_sweep_summary_preserves_child_execution_provenance():
     assert summary["epochs_effective_per_seed"] == [25]
     assert summary["epochs_trained_per_seed"] == [10]
     assert summary["immediate_protocol_per_seed"][0]["weight_decay_effective"] == 0.1
+
+
+def test_build_runner_command_forwards_compilation_and_tf32():
+    args = _sweep_args(torch_compile=True, tf32=True)
+    cmd = build_runner_command(args, 0, Path("out"))
+    assert "--compile" in cmd
+    assert "--tf32" in cmd
+
+    args_off = _sweep_args(torch_compile=False, tf32=False)
+    cmd_off = build_runner_command(args_off, 0, Path("out"))
+    assert "--no-compile" in cmd_off
+    assert "--no-tf32" in cmd_off
+
+
+def test_build_runner_command_forwards_early_stopping_and_checkpointing():
+    args = _sweep_args(
+        early_stop_metric="filler_accuracy",
+        early_stop_target=0.99,
+        early_stop_tolerance=0.005,
+        early_stop_patience=2,
+        checkpoint_every_steps=1000,
+    )
+    cmd = build_runner_command(args, 0, Path("out"))
+    assert cmd[cmd.index("--early_stop_metric") + 1] == "filler_accuracy"
+    assert cmd[cmd.index("--early_stop_target") + 1] == "0.99"
+    assert cmd[cmd.index("--early_stop_tolerance") + 1] == "0.005"
+    assert cmd[cmd.index("--early_stop_patience") + 1] == "2"
+    assert cmd[cmd.index("--checkpoint_every_steps") + 1] == "1000"
+
+
+def test_build_runner_command_forwards_construction_diagnostics_and_challenge():
+    args = _sweep_args(
+        construction_diagnostics=True,
+        challenge_per_class=500,
+        challenge_seed=12345,
+    )
+    cmd = build_runner_command(args, 0, Path("out"))
+    assert "--construction_diagnostics" in cmd
+    assert cmd[cmd.index("--challenge_per_class") + 1] == "500"
+    assert cmd[cmd.index("--challenge_seed") + 1] == "12345"
+
+
+def test_sweep_id_changes_with_compile_and_diagnostics():
+    base = _sweep_args()
+    compiled = _sweep_args(torch_compile=True)
+    tf32_on = _sweep_args(tf32=True)
+    early_stop = _sweep_args(early_stop_metric="filler_accuracy")
+    challenge_on = _sweep_args(challenge_per_class=100)
+
+    assert compute_sweep_id(base) != compute_sweep_id(compiled)
+    assert compute_sweep_id(base) != compute_sweep_id(tf32_on)
+    assert compute_sweep_id(base) != compute_sweep_id(early_stop)
+    assert compute_sweep_id(base) != compute_sweep_id(challenge_on)
+
+
+def test_sweep_defaults_preserve_identity_for_new_options():
+    base = _sweep_args()
+    canonical = canonical_sweep_config(base)
+    assert "early_stop_metric" not in canonical
+    assert "torch_compile" not in canonical
+    assert "tf32" not in canonical
+    assert "construction_diagnostics" not in canonical
+    assert "challenge_per_class" not in canonical
+    assert "checkpoint_every_steps" not in canonical
+
+
+def test_sweep_summary_preserves_construction_diagnostics():
+    report = {
+        "run_id": "run-cd",
+        "metrics": {
+            "filler_accuracy": 0.99,
+        },
+        "construction_diagnostics": {
+            "canonical_validation": [{"strata": {"positive_arm_positive": 100}}],
+        },
+    }
+    summary = summarize_run_report(0, Path("n0/report.json"), report)
+    assert "construction_diagnostics" in summary
+    assert "canonical_validation" in summary["construction_diagnostics"]
+
