@@ -405,3 +405,75 @@ bandwidth is not.
 **Batch size is a protocol change, not a throughput knob.** It alters gradient
 noise and the optimization trajectory, so it changes the `run_id` and must not
 be varied within a sweep.
+
+## Answers to the CUDA research brief
+
+External analysis proposed three optimizations. Two are refuted by measurement,
+one targets a gap that batch sizing already closed.
+
+### Elementwise: already at 83% of DRAM peak
+
+The proposal was a hand-fused 6-lerp + activation + normalization kernel,
+projected at -15 to -22 ms/step. Measured with Nsight Compute on the isolated
+TimeMix elementwise block:
+
+```text
+dram__throughput   82-85% of peak sustained
+lts__throughput    41-44%
+sm__throughput     58-64%
+```
+
+The block is DRAM-bound at 83% of peak, and inductor already fuses the six
+lerps together with the L2 normalize into one kernel
+(`triton_per_fused_add_clamp_min_div_expand_linalg_vector_norm_mul_sub_view_0`).
+Total remaining headroom is ~17%, about 8 ms — less than half the projected
+saving, and only achievable at 100% of peak.
+
+This also corrects an earlier estimate in this document. Hand-counting tensor
+passes gave ~50% of peak; the measured figure is 83%. The conclusion (do not
+port the upstream fused kernels) was right, but the arithmetic behind it was
+not — and it nearly went the other way when the 32 MiB L2 raised the question of
+whether that traffic was DRAM-served at all. It is.
+
+### GEMM: cuBLAS wins even with autotuning forced
+
+Inductor gates GEMM autotuning on `is_big_gpu()`, which hard-codes
+`min_sms = 68`. This card has 34, so setting `max_autotune_gemm = True` is
+silently ignored — the only symptom is a "Not enough SMs" warning. A first
+attempt to test this was therefore void. With the gate monkeypatched so
+templates are genuinely considered:
+
+```text
+                         wall ms   matmul bucket   throughput
+default GEMM              371.25      133.13 ms   258.6 samp/s
+autotune (gate bypassed)  364.05      133.24 ms   263.7 samp/s
+```
+
+The matmul bucket does not move. cuBLAS beats every Triton template inductor
+generates for `[6720, 768] x [768, 768]` and friends.
+
+For calibration: we achieve **32.8 TFLOP/s**. Dense BF16 peak on this card is
+~88 TFLOP/s (4352 cores at 2.54 GHz, 4x FP32 with FP32 accumulate) — the
+commonly quoted 176 TFLOP/s is the 2:4 sparsity figure and does not apply. So
+we are at 37% of dense peak, which is unremarkable for skinny `K=768` GEMMs but
+not obviously improvable with available tooling.
+
+### Launch overhead: batch sizing got there first
+
+A shape-keyed CUDA graph cache — capturing each of the ~18 subgroup shapes once
+into a shared memory pool, rather than `mode="reduce-overhead"` re-capturing —
+is a real design and correctly identifies that our rejection tested only the
+automatic path. The Windows WDDM launch cost (12-25 us against 3-5 us on Linux)
+is a plausible mechanism for the size of the gap.
+
+But it was sized against batch 48, where the gap was 24%. At batch 96 the gap is
+**9.8%**, because more tokens per launch amortizes the same fixed cost. The
+remaining prize is roughly 36 ms, not 45-55 ms, against a substantial
+implementation carrying the stable-`.grad` constraint documented above.
+
+### Current best configuration
+
+```text
+padded  + foreach + compile, batch 48    148.8 samp/s   1.00x
+grouped + fused   + compile, batch 96    263.7 samp/s   1.77x
+```

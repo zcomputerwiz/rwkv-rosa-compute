@@ -31,6 +31,7 @@ if str(SRC_ROOT) not in sys.path:
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
+import torch._inductor.config as inductor_config
 import torch.nn.functional as F
 from torch.profiler import ProfilerActivity, profile
 
@@ -289,6 +290,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--steps", type=int, default=10)
     parser.add_argument("--top", type=int, default=15)
+    parser.add_argument("--max_autotune", action="store_true",
+                        help="Force inductor GEMM autotuning. Inductor disables "
+                             "it below ~40 SMs; this card has 34, so the "
+                             "heuristic may be excluding a real win.")
     parser.add_argument("--compile_mode",
                         choices=("default", "reduce-overhead", "max-autotune"),
                         default="default",
@@ -305,6 +310,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("CUDA required", file=sys.stderr)
         return 1
 
+    if args.max_autotune:
+        inductor_config.max_autotune = True
+        inductor_config.max_autotune_gemm = True
+        inductor_config.coordinate_descent_tuning = True
+        # Setting the configs is not sufficient. inductor gates GEMM autotuning
+        # on is_big_gpu(), which hard-codes min_sms = 68 (a 3080). This card has
+        # 34, so the templates are never even considered and the configs above
+        # are silently ignored - the "Not enough SMs" warning is the only sign.
+        # Override it so the hypothesis can actually be tested.
+        import torch._inductor.utils as inductor_utils
+
+        inductor_utils.is_big_gpu = lambda *a, **k: True
+        for module_name in ("torch._inductor.kernel.mm_common",
+                            "torch._inductor.kernel.mm",
+                            "torch._inductor.lowering"):
+            module = sys.modules.get(module_name)
+            if module is not None and hasattr(module, "is_big_gpu"):
+                module.is_big_gpu = inductor_utils.is_big_gpu
+
     device = torch.device("cuda")
     task_cfg = Task3SumConfig(num_filler=args.num_filler)
     vocab = build_default_vocab(
@@ -316,7 +340,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"device     : {torch.cuda.get_device_name(0)}")
     print(f"config     : 0B RWKV-7, N={args.num_filler}, batch {args.batch_size}, "
           f"bf16 + compile"
-          + (", fused AdamW" if args.fused_adamw else ", foreach AdamW"))
+          + (", fused AdamW" if args.fused_adamw else ", foreach AdamW")
+          + (", max-autotune GEMM" if args.max_autotune else ""))
     print(f"padded     : B={batches[0]['targets'].shape[0]} "
           f"T={batches[0]['targets'].shape[1]}")
     print()
