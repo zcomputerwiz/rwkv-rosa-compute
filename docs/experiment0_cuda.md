@@ -220,6 +220,27 @@ Do not enable TF32 or `torch.compile` in the same comparison; both are separate
 numerical/execution interventions and should be measured independently after the
 basic CUDA path is validated.
 
+After recording the eager baseline, the CUDA benchmark harness can measure an
+opt-in CUDA Graph execution path for full-model workloads:
+
+```powershell
+python scripts/benchmark_rwkv_cuda.py `
+  --mode full_rwkv_forward `
+  --mode full_rwkv_forward_backward `
+  --batch 1 `
+  --timesteps 1 `
+  --full-model-compile-backend cudagraphs `
+  --output results/cuda_benchmarks/rwkv7_cudagraphs_b1_t1.json
+```
+
+The custom recurrence is an explicit compiler graph break, so its numerical
+implementation remains the pinned fused CUDA operator. Compilation is applied
+only to full-model modes, is disabled by default, and is recorded in the JSON
+configuration. Its first-call capture cost is consumed by benchmark warmups,
+not by the timed samples. Compare only fixed-shape workloads and keep eager and
+compiled runs separate; CUDA Graph capture is an execution intervention, not a
+replacement baseline.
+
 ## Recommended 0B comparison
 
 After the stock pretrained checkpoint loads successfully and the fused oracle

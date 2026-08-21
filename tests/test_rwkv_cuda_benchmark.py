@@ -62,6 +62,35 @@ def test_smoke_and_explicit_single_workload_cli():
     assert (single[0].batch, single[0].timesteps) == (16, 64)
 
 
+def test_full_model_compile_backend_is_explicit_and_recorded():
+    parser = build_parser()
+    matrix, config = plan_from_args(
+        parser.parse_args(
+            [
+                "--mode",
+                "full_rwkv_forward",
+                "--batch",
+                "1",
+                "--timesteps",
+                "1",
+                "--full-model-compile-backend",
+                "cudagraphs",
+            ]
+        )
+    )
+    assert len(matrix) == 1
+    assert config["full_model_compile_backend"] == "cudagraphs"
+
+
+def test_full_model_compile_backend_rejects_a_silent_noop():
+    parser = build_parser()
+    args = parser.parse_args(
+        ["--smoke", "--full-model-compile-backend", "cudagraphs"]
+    )
+    with pytest.raises(ValueError, match="requires at least one full-model mode"):
+        plan_from_args(args)
+
+
 @pytest.mark.parametrize(
     "argv",
     [
