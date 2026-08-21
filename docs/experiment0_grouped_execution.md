@@ -175,3 +175,92 @@ precision="fp16" refused explicitly: GradScaler must wrap every backward, and
 Enabling grouping changes the `run_id`, because summation order differs and
 moves logits by float32 epsilon. It must not be switched on partway through a
 sweep.
+
+## Where the time actually goes
+
+Profiled with `scripts/profile_exp0_step.py` at N=0, batch 48, bf16 + compile.
+Attribution is by CUDA kernel name, because `torch.compile` erases module
+boundaries. Nothing landed in the `unclassified` bucket.
+
+```text
+                     padded 316.12 ms      grouped 191.19 ms
+matmul / gemm            37.5%                 36.2%
+triton fused             26.1%                 24.8%
+elementwise / copy       16.1%                 12.5%
+optimizer                 9.7%                 16.0%
+rwkv recurrence           8.1%                  8.6%
+cross entropy             2.2%                  1.9%
+reduction / norm          0.3%                  0.1%
+```
+
+Three things follow, and they reorder the remaining work.
+
+**Pointwise work is the largest addressable block.** `triton fused` plus
+`elementwise / copy` is 37.3% of the grouped step. That is exactly the surface
+the upstream fused TimeMix/ChannelMix kernels target, so Track F is where the
+headroom is — and its bar is now compiled PyTorch at 1.76x, not eager.
+
+**The optimizer is a fixed per-parameter cost.** It measures 30.53 ms padded and
+30.52 ms grouped: identical, because it depends on parameter count rather than
+tokens. Grouping cannot reduce it, so shrinking everything else pushed it from
+9.7% to 16.0%. See the next section — it is also the cheapest win available.
+
+**The recurrence is 8.5%, as the A/B predicted.** Both upstream v3 variants were
+already rejected on measurement; this confirms the ceiling was low regardless.
+
+### What this profile cannot tell you
+
+Splitting the GEMM bucket into output head versus backbone linears by operand
+shape **does not work**, and an earlier version of the script reported the head
+at `0.00 ms` because of it: kernel-level profiler events carry no
+`input_shapes`, only `aten` op events do, so nothing matched. That reads as a
+finding rather than as a measurement failure, and the code was removed.
+
+By parameter count the head is 24.58M of 109.5M linear parameters over a nearly
+identical token count, so roughly 22% of the GEMM bucket, about 8% of the step.
+That is an estimate. Measuring it needs an ablation on `output_vocab_size`,
+not shape matching.
+
+## Fused AdamW: 2.7x, and a protocol change
+
+The optimizer's 30.5 ms looked far above its bandwidth bound - AdamW touches
+param, grad, `exp_avg` and `exp_avg_sq`, about 1.84 GB per step at 115.04M
+parameters, which is 6-9 ms at this card's achievable bandwidth. Measured with
+`scripts/benchmark_optimizer_variants.py`:
+
+```text
+variant             median ms   speedup     GB/s
+foreach (default)       32.01    1.000x       57
+fused                   11.80    2.714x      156
+single-tensor           65.69    0.487x       28
+```
+
+That is 20.2 ms off a 191.19 ms step — **10.6% of total step time** — from an
+existing flag, `--fused_adamw`, which is already correctly wired to
+`fused=True` and already part of the `run_id`.
+
+It supersedes the note in `docs/experiment0_precision_and_compile.md` that fused
+AdamW "measured ~2-4% and sits inside the run-to-run variability of a real run".
+
+**It is not numerically free.** Twenty steps with identical gradients:
+
+```text
+bitwise identical : False
+max abs diff      : 1.812e-05
+max rel diff      : 2.495e+00   (parameters near zero inflate the ratio)
+fp32 eps          : 1.192e-07
+```
+
+So it belongs with TF32 and bf16: a deliberate protocol choice, recorded in the
+`run_id`, adopted at the start of a sweep and never switched on partway through.
+
+## Priority order after profiling
+
+```text
+1  --fused_adamw                    10.6% of step, one flag, protocol change
+2  Track F fused TimeMix/ChannelMix  37.3% block, must beat COMPILED PyTorch
+3  larger batch                      grouping freed ~4.7 GiB; amortizes the
+                                     fixed optimizer cost over more samples
+4  recurrence kernels                CLOSED - 8.5%, both v3 variants rejected
+5  masked head projection            CLOSED - grouping already reaches 100%
+```

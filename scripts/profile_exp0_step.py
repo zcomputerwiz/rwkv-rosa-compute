@@ -1,0 +1,261 @@
+"""Profile where a 0B RWKV-7 training step actually spends GPU time.
+
+Track I. The upstream-kernel audit assumed the fused recurrence was the thing
+worth optimizing; the A/B showed it is roughly 8% of step time, so the question
+"which upstream kernel should we adopt" is the wrong one until we know what the
+other ~92% is.
+
+This attributes self CUDA time to individual kernels and buckets them, for the
+padded and grouped paths, with torch.compile on - the configuration a real run
+would use. Compiled kernels lose module boundaries, so attribution is by kernel
+name rather than by nn.Module.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import random
+import sys
+from collections import defaultdict
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+import torch
+import torch.nn.functional as F
+from torch.profiler import ProfilerActivity, profile
+
+from exp0.config import ModelConfig, Task3SumConfig
+from exp0.dataset import Task3SumDataset, build_default_vocab, pad_collate_fn
+from exp0.generation import generate_protocol_packed_instances
+from exp0.grouped_execution import IGNORE_INDEX, grouped_loss_backward
+from exp0.train import create_model
+
+SHAPE = {"hidden": 768, "layers": 12, "heads": 12}
+
+# Kernel-name buckets, checked in order; first match wins. Names come from the
+# CUDA kernels themselves, so this is inherently a heuristic - the unmatched
+# bucket is printed so nothing is silently swept into "other".
+BUCKETS: List[Tuple[str, Tuple[str, ...]]] = [
+    ("rwkv recurrence", ("forward_kernel", "backward_kernel")),
+    ("matmul / gemm", ("gemm", "cutlass", "nvjet", "sm80_", "sm89_", "ampere_",
+                       "s16816", "cublas", "dot_kernel", "addmm")),
+    ("cross entropy", ("nll_loss", "log_softmax", "softmax", "cross_entropy")),
+    ("optimizer", ("adam", "foreach", "multi_tensor", "amsgrad")),
+    ("triton fused", ("triton_",)),
+    ("elementwise / copy", ("elementwise_kernel", "vectorized_elementwise",
+                            "copy_", "memcpy", "memset", "fill_", "cat_",
+                            "index_", "gather", "scatter")),
+    ("reduction / norm", ("reduce_kernel", "norm", "layer_norm", "group_norm",
+                          "welford", "mean_kernel", "sum_kernel")),
+]
+
+
+def bucket_for(name: str) -> str:
+    lowered = name.lower()
+    for label, needles in BUCKETS:
+        if any(needle in lowered for needle in needles):
+            return label
+    return "unclassified"
+
+
+def build_batches(vocab, task_cfg, batch_size: int, num_filler: int, count: int):
+    rng = random.Random(7)
+    batches = []
+    for _ in range(count):
+        packed = generate_protocol_packed_instances(
+            batch_size, length=task_cfg.length, dimension=task_cfg.dimension, rng=rng
+        )
+        dataset = Task3SumDataset(
+            packed, num_filler=num_filler, vocab=vocab,
+            parallel_ratio=0.5, filler_ratio=0.5,
+        )
+        batches.append(pad_collate_fn([dataset[i] for i in range(len(dataset))]))
+    return batches
+
+
+def make_model(vocab, task_cfg, device):
+    torch.manual_seed(1234)
+    torch.cuda.manual_seed_all(1234)
+    model = create_model(
+        ModelConfig(
+            architecture="rwkv",
+            hidden_size=SHAPE["hidden"],
+            num_hidden_layers=SHAPE["layers"],
+            num_attention_heads=SHAPE["heads"],
+            intermediate_size=SHAPE["hidden"] * 4,
+            head_dim=64,
+            rwkv_kernel="cuda",
+            device="cuda",
+            vocab_size=len(vocab),
+            output_vocab_size=32000,
+        ),
+        d_input=task_cfg.mod * task_cfg.dimension + task_cfg.length,
+        vocab=vocab,
+        task_cfg=task_cfg,
+    )
+    return model.to(device)
+
+
+def padded_step(forward_fn, model, optimizer, batch, device) -> None:
+    optimizer.zero_grad(set_to_none=True)
+    input_tuples = batch["input_tuples"].to(device, non_blocking=True)
+    targets = batch["targets"].to(device, non_blocking=True)
+    loss_mask = batch["loss_mask"].to(device, non_blocking=True)
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        logits = forward_fn(input_tuples, targets)
+        loss = F.cross_entropy(
+            logits.reshape(-1, logits.size(-1)),
+            loss_mask[:, 1:].reshape(-1),
+            ignore_index=IGNORE_INDEX,
+        )
+    loss.backward()
+    optimizer.step()
+
+
+def grouped_step(forward_fn, model, optimizer, batch, device) -> None:
+    optimizer.zero_grad(set_to_none=True)
+    grouped_loss_backward(
+        forward_fn, batch, device,
+        autocast=lambda: torch.autocast("cuda", dtype=torch.bfloat16),
+    )
+    optimizer.step()
+
+
+def profile_path(label: str, step_fn, batches, vocab, task_cfg, device,
+                 warmup: int, steps: int,
+                 record_shapes: bool = False) -> Dict[str, Any]:
+    model = make_model(vocab, task_cfg, device)
+    forward_fn = torch.compile(model.loss_logits)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+
+    for i in range(warmup):
+        step_fn(forward_fn, model, optimizer, batches[i % len(batches)], device)
+    torch.cuda.synchronize()
+
+    with profile(activities=[ProfilerActivity.CUDA],
+                 record_shapes=record_shapes) as prof:
+        for i in range(steps):
+            step_fn(forward_fn, model, optimizer, batches[i % len(batches)], device)
+        torch.cuda.synchronize()
+
+    per_kernel: Dict[str, float] = defaultdict(float)
+    per_kernel_calls: Dict[str, int] = defaultdict(int)
+    for event in prof.key_averages():
+        cuda_us = getattr(event, "self_device_time_total", 0) or 0
+        if cuda_us <= 0:
+            continue
+        per_kernel[event.key] += cuda_us
+        per_kernel_calls[event.key] += event.count
+
+    # NOTE: splitting the GEMM bucket into head vs backbone by operand shape
+    # does not work. Kernel-level profiler events carry no input_shapes - only
+    # aten op events do - so every kernel matches nothing and the head appears
+    # to cost zero, which reads as a finding rather than as the measurement
+    # failure it is. Isolating the head needs an ablation (vary
+    # output_vocab_size and diff step time), not shape matching.
+    head_us = 0.0
+    gemm_us = 0.0
+
+    total_us = sum(per_kernel.values())
+    buckets: Dict[str, float] = defaultdict(float)
+    for name, value in per_kernel.items():
+        buckets[bucket_for(name)] += value
+
+    del model, optimizer, forward_fn
+    torch.cuda.empty_cache()
+    return {
+        "label": label,
+        "head_gemm_us": head_us,
+        "gemm_us_by_shape": gemm_us,
+        "total_us": total_us,
+        "steps": steps,
+        "buckets": dict(buckets),
+        "kernels": sorted(per_kernel.items(), key=lambda kv: -kv[1]),
+        "calls": dict(per_kernel_calls),
+    }
+
+
+def report(result: Dict[str, Any], top: int) -> None:
+    total = result["total_us"]
+    steps = result["steps"]
+    print(f"=== {result['label']} ===")
+    print(f"  total GPU time {total / 1e3:.1f} ms over {steps} steps "
+          f"= {total / 1e3 / steps:.2f} ms/step")
+    print()
+    print(f"  {'bucket':22} {'ms/step':>9} {'share':>8}")
+    for name, value in sorted(result["buckets"].items(), key=lambda kv: -kv[1]):
+        print(f"  {name:22} {value / 1e3 / steps:>9.2f} {value / total:>7.1%}")
+    print()
+    if result.get("gemm_us_by_shape"):
+        head = result["head_gemm_us"]
+        gemm = result["gemm_us_by_shape"]
+        print(f"  GEMM split by operand shape")
+        print(f"    output head (32000)  {head / 1e3 / steps:>8.2f} ms/step "
+              f"{head / total:>6.1%} of step")
+        print(f"    backbone linears     {(gemm - head) / 1e3 / steps:>8.2f} ms/step "
+              f"{(gemm - head) / total:>6.1%} of step")
+        print()
+    print(f"  top {top} kernels")
+    print(f"  {'kernel':58} {'ms/step':>9} {'share':>7} {'calls':>7}")
+    for name, value in result["kernels"][:top]:
+        calls = result["calls"][name] // steps
+        display = name if len(name) <= 56 else name[:53] + "..."
+        print(f"  {display:58} {value / 1e3 / steps:>9.2f} "
+              f"{value / total:>6.1%} {calls:>7}")
+    print()
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--num_filler", type=int, default=0)
+    parser.add_argument("--batch_size", type=int, default=48)
+    parser.add_argument("--batches", type=int, default=4)
+    parser.add_argument("--warmup", type=int, default=5)
+    parser.add_argument("--steps", type=int, default=10)
+    parser.add_argument("--top", type=int, default=15)
+    parser.add_argument("--path", choices=("padded", "grouped", "both"),
+                        default="both")
+    args = parser.parse_args(argv)
+
+    if not torch.cuda.is_available():
+        print("CUDA required", file=sys.stderr)
+        return 1
+
+    device = torch.device("cuda")
+    task_cfg = Task3SumConfig(num_filler=args.num_filler)
+    vocab = build_default_vocab(
+        length=task_cfg.length, dimension=task_cfg.dimension, mod=task_cfg.mod
+    )
+    batches = build_batches(vocab, task_cfg, args.batch_size,
+                            args.num_filler, args.batches)
+
+    print(f"device     : {torch.cuda.get_device_name(0)}")
+    print(f"config     : 0B RWKV-7, N={args.num_filler}, batch {args.batch_size}, "
+          f"bf16 + compile")
+    print(f"padded     : B={batches[0]['targets'].shape[0]} "
+          f"T={batches[0]['targets'].shape[1]}")
+    print()
+
+    paths = []
+    if args.path in ("padded", "both"):
+        paths.append(("padded", padded_step))
+    if args.path in ("grouped", "both"):
+        paths.append(("grouped", grouped_step))
+
+    for label, step_fn in paths:
+        result = profile_path(label, step_fn, batches, vocab, task_cfg,
+                              device, args.warmup, args.steps)
+        report(result, args.top)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
