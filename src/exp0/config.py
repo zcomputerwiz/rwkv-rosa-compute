@@ -140,6 +140,9 @@ def drop_identity_neutral_fields(train_dict: Dict[str, Any]) -> Dict[str, Any]:
             train_dict.pop(key, None)
     if train_dict.get("immediate_protocol", True):
         train_dict.pop("immediate_protocol", None)
+    for key in ("tf32_matmul", "torch_compile"):
+        if not train_dict.get(key, False):
+            train_dict.pop(key, None)
     return train_dict
 
 
@@ -184,6 +187,13 @@ class TrainConfig:
     # requested, which is what an N=0 arm needs to be compute-matched against an
     # N>0 arm. Doing so is a different protocol and changes the run_id.
     immediate_protocol: bool = True
+    # Execution protocols, both off by default so "fp32" keeps meaning strict
+    # FP32 and an uncompiled graph. Enabling either is a deliberate protocol
+    # choice, is recorded in the report, and changes the run_id: TF32 lowers
+    # the internal precision of FP32 matmuls, and compilation fuses and
+    # reorders operations. Neither may be switched on partway through a sweep.
+    tf32_matmul: bool = False
+    torch_compile: bool = False
 
     def __post_init__(self):
         format_ratios = {
