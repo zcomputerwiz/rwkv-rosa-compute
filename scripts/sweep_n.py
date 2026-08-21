@@ -115,6 +115,33 @@ def build_runner_command(
         if args.immediate_protocol
         else "--no-immediate_protocol"
     )
+    cmd.extend(
+        [
+            "--early_stop_metric",
+            getattr(args, "early_stop_metric", "none"),
+            "--early_stop_tolerance",
+            str(getattr(args, "early_stop_tolerance", 0.0)),
+            "--early_stop_patience",
+            str(getattr(args, "early_stop_patience", 1)),
+            "--checkpoint_every_steps",
+            str(getattr(args, "checkpoint_every_steps", 5000)),
+        ]
+    )
+    if getattr(args, "early_stop_target", None) is not None:
+        cmd.extend(["--early_stop_target", str(args.early_stop_target)])
+
+    cmd.append("--tf32" if getattr(args, "tf32", False) else "--no-tf32")
+    cmd.append(
+        "--compile" if getattr(args, "torch_compile", False) else "--no-compile"
+    )
+    cmd.append(
+        "--construction_diagnostics"
+        if getattr(args, "construction_diagnostics", False)
+        else "--no-construction_diagnostics"
+    )
+    if getattr(args, "challenge_per_class", 0) > 0:
+        cmd.extend(["--challenge_per_class", str(args.challenge_per_class)])
+        cmd.extend(["--challenge_seed", str(getattr(args, "challenge_seed", 20260820))])
     return cmd
 
 
@@ -150,6 +177,21 @@ def canonical_sweep_config(args: argparse.Namespace) -> dict:
     # that predate it, exactly as for run identity in exp0.config.
     if config.get("immediate_protocol", True):
         config.pop("immediate_protocol", None)
+    if config.get("early_stop_metric", "none") == "none":
+        for key in (
+            "early_stop_metric",
+            "early_stop_target",
+            "early_stop_tolerance",
+            "early_stop_patience",
+        ):
+            config.pop(key, None)
+    for key in ("tf32", "torch_compile", "construction_diagnostics"):
+        if not config.get(key, False):
+            config.pop(key, None)
+    if not config.get("challenge_per_class", 0):
+        config.pop("challenge_per_class", None)
+        config.pop("challenge_seed", None)
+    config.pop("checkpoint_every_steps", None)
     return config
 
 
@@ -184,7 +226,7 @@ def summarize_run_report(n: int, summary_path: Path, report: dict) -> dict:
     metrics = report.get("metrics", {})
     immediate_protocol = metrics.get("immediate_protocol_per_seed") or []
     early_stopping = metrics.get("early_stopping_per_seed") or []
-    return {
+    record = {
         "n": n,
         "report_path": str(summary_path),
         "run_id": report.get("run_id"),
@@ -222,6 +264,9 @@ def summarize_run_report(n: int, summary_path: Path, report: dict) -> dict:
             item.get("epochs_trained") for item in early_stopping
         ],
     }
+    if "construction_diagnostics" in report:
+        record["construction_diagnostics"] = report["construction_diagnostics"]
+    return record
 
 
 def get_parser() -> argparse.ArgumentParser:
@@ -294,6 +339,48 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument(
+        "--early_stop_metric",
+        type=str,
+        default="none",
+        choices=["none", "filler_accuracy", "cot_result_nll"],
+        help=(
+            "Stop once the metric reaches its target. With 'none' (default) "
+            "--epochs is the exact budget; otherwise --epochs becomes a ceiling "
+            "and the run is no longer fixed-budget if training actually stops early."
+        ),
+    )
+    parser.add_argument(
+        "--early_stop_target",
+        type=float,
+        default=None,
+        help=(
+            "Override the stop target; valid only when --early_stop_metric is "
+            "enabled. Defaults to 1.0 for filler_accuracy or the measured "
+            "cot_result_nll_floor for cot_result_nll."
+        ),
+    )
+    parser.add_argument(
+        "--early_stop_tolerance",
+        type=float,
+        default=0.0,
+        help="Absolute slack around the target.",
+    )
+    parser.add_argument(
+        "--early_stop_patience",
+        type=int,
+        default=1,
+        help="Consecutive epochs that must meet the target before stopping.",
+    )
+    parser.add_argument(
+        "--checkpoint_every_steps",
+        type=int,
+        default=5000,
+        help=(
+            "Write rolling latest.pt checkpoints every N optimizer steps. "
+            "Use 0 to disable."
+        ),
+    )
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--val_num_workers", type=int, default=0)
     parser.add_argument("--prefetch_factor", type=int, default=2)
@@ -302,6 +389,40 @@ def get_parser() -> argparse.ArgumentParser:
         type=str,
         default="fp32",
         choices=["fp32", "bf16", "fp16"],
+    )
+    parser.add_argument(
+        "--tf32",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Allow TF32 for FP32 matmuls.",
+    )
+    parser.add_argument(
+        "--compile",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        dest="torch_compile",
+        help="Compile the training forward with torch.compile.",
+    )
+    parser.add_argument(
+        "--construction_diagnostics",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Emit supplementary construction-stratum diagnostics.",
+    )
+    parser.add_argument(
+        "--challenge_per_class",
+        type=int,
+        default=0,
+        help=(
+            "Also evaluate a deliberately rebalanced diagnostic challenge set "
+            "with this many instances per construction stratum (0 disables)."
+        ),
+    )
+    parser.add_argument(
+        "--challenge_seed",
+        type=int,
+        default=20260820,
+        help="Deterministic seed for the diagnostic challenge set.",
     )
     parser.add_argument(
         "--immediate_protocol",
