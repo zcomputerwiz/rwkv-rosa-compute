@@ -52,6 +52,9 @@ def test_packed_generation_matches_legacy_rng_stream():
         length=8,
         dimension=3,
         rng=random.Random(12345),
+        # Provenance is not part of the compact storage contract, so request it
+        # here to compare every field the legacy instance carries.
+        collect_provenance=True,
     )
 
     for idx, expected in enumerate(legacy):

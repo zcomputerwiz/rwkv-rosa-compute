@@ -411,6 +411,7 @@ def evaluate_accuracy(
     precision: str = "fp32",
     non_blocking: bool = False,
     return_prediction_counts: bool = False,
+    detail_sink: Dict[str, list] | None = None,
 ) -> float | tuple[float, Dict[str, int]]:
     """Evaluate exact True/False prediction using only ANS-position logits.
 
@@ -419,7 +420,17 @@ def evaluate_accuracy(
     scoring at the majority-class baseline from a model that emits a single
     constant answer, which is the difference between a weak result and a null
     one.
+
+    ``detail_sink`` optionally collects per-example predictions and the True and
+    False answer logits during this same pass, so construction-stratum
+    diagnostics never require a second forward pass. The return contract is
+    unchanged whether or not it is supplied.
     """
+    if detail_sink is not None:
+        detail_sink.setdefault("predicted_ids", [])
+        detail_sink.setdefault("true_logits", [])
+        detail_sink.setdefault("false_logits", [])
+        detail_sink.setdefault("labels", [])
     model.eval()
     total = 0
     correct_device = torch.zeros((), dtype=torch.int64, device=device)
@@ -475,6 +486,15 @@ def evaluate_accuracy(
                     ]
 
             predictions = answer_logits.argmax(dim=-1)
+            if detail_sink is not None:
+                detail_sink["predicted_ids"].extend(predictions.cpu().tolist())
+                detail_sink["true_logits"].extend(
+                    answer_logits[:, ans_true_id].float().cpu().tolist()
+                )
+                detail_sink["false_logits"].extend(
+                    answer_logits[:, ans_false_id].float().cpu().tolist()
+                )
+                detail_sink["labels"].extend(has_3sum.cpu().tolist())
             expected = torch.where(
                 has_3sum,
                 torch.full_like(predictions, ans_true_id),
@@ -731,6 +751,7 @@ def train_model(
     checkpoint_every_steps: int = 0,
     resume_checkpoint: str | Path | None = None,
     checkpoint_run_id: str | None = None,
+    collect_validation_details: bool = False,
 ) -> Tuple[nn.Module, Dict[str, Any]]:
     """Train one seed, optionally writing exact-resume checkpoints.
 
@@ -944,6 +965,7 @@ def train_model(
     prior_cuda_peak_allocated = completed.get("cuda_peak_memory_allocated_bytes")
     prior_cuda_peak_reserved = completed.get("cuda_peak_memory_reserved_bytes")
 
+    final_validation_details: Dict[str, list] | None = None
     epochs_completed = start_epoch
     early_stop_criterion_reached = False
     early_stop_epoch: Optional[int] = None
@@ -1170,6 +1192,9 @@ def train_model(
         epoch_online_train_answer_accuracies_by_format.append(format_accuracies)
         epoch_end_learning_rates.append(float(optimizer.param_groups[0]["lr"]))
 
+        # Only the last completed epoch's details are retained; each epoch
+        # overwrites the previous sink, so this costs one pass, not N.
+        validation_detail_sink = {} if collect_validation_details else None
         filler_acc, filler_prediction_counts = evaluate_accuracy(
             model,
             filler_val_loader,
@@ -1180,7 +1205,10 @@ def train_model(
             precision=train_cfg.precision,
             non_blocking=non_blocking,
             return_prediction_counts=True,
+            detail_sink=validation_detail_sink,
         )
+        if validation_detail_sink is not None:
+            final_validation_details = validation_detail_sink
         epoch_filler_accuracies.append(filler_acc)
         epoch_filler_prediction_counts.append(filler_prediction_counts)
         if filler_acc >= best_filler_acc:
@@ -1386,6 +1414,9 @@ def train_model(
             "exact_mid_epoch_resume": checkpointing_enabled,
         },
     }
+
+    if final_validation_details is not None:
+        history["final_validation_details"] = final_validation_details
 
     if epoch_cot_diagnostics:
         history["epoch_cot_diagnostics"] = epoch_cot_diagnostics

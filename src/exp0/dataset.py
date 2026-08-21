@@ -112,6 +112,12 @@ class PackedInstances:
     tuples: torch.Tensor
     has_3sum: torch.Tensor
     matching_indices: torch.Tensor
+    # Optional generation provenance for diagnostics. Off by default so the
+    # compact storage contract and every existing run are unchanged; -1 encodes
+    # "not recorded" in both. construction_arm is the generator branch, not the
+    # realized label.
+    construction_arm: Optional[torch.Tensor] = None
+    corruption_count: Optional[torch.Tensor] = None
 
     def __post_init__(self):
         if self.tuples.dtype != torch.uint8 or self.tuples.ndim != 3:
@@ -128,6 +134,16 @@ class PackedInstances:
             or self.matching_indices.shape[0] != count
         ):
             raise ValueError("Packed instance tensors must contain the same N.")
+        for name, provenance in (
+            ("construction_arm", self.construction_arm),
+            ("corruption_count", self.corruption_count),
+        ):
+            if provenance is None:
+                continue
+            if provenance.dtype != torch.int8 or provenance.ndim != 1:
+                raise ValueError(f"Packed {name} must be a rank-1 int8 tensor.")
+            if provenance.shape[0] != count:
+                raise ValueError("Packed instance tensors must contain the same N.")
 
     def __len__(self) -> int:
         return self.tuples.shape[0]
@@ -154,10 +170,20 @@ class PackedInstances:
         matching_indices = None
         if raw_match[0] >= 0:
             matching_indices = tuple(int(value) for value in raw_match)
+        construction_arm = None
+        if self.construction_arm is not None:
+            raw_arm = int(self.construction_arm[idx].item())
+            construction_arm = None if raw_arm < 0 else bool(raw_arm)
+        corruption_count = None
+        if self.corruption_count is not None:
+            raw_corruption = int(self.corruption_count[idx].item())
+            corruption_count = None if raw_corruption < 0 else raw_corruption
         return Instance3Sum(
             tuples=tuple_values,
             has_3sum=has_3sum,
             matching_indices=matching_indices,
+            construction_arm=construction_arm,
+            corruption_count=corruption_count,
         )
 
 
@@ -170,8 +196,14 @@ def generate_packed_instances(
     *,
     generator_mode: str = SOURCE_GENERATOR,
     corruption_rate: float = DEFAULT_CORRUPTION_RATE,
+    collect_provenance: bool = False,
 ) -> PackedInstances:
-    """Generate instances directly into compact shared tensor storage."""
+    """Generate instances directly into compact shared tensor storage.
+
+    ``collect_provenance`` additionally records the construction arm and
+    corruption count for diagnostics. It is off by default so the compact
+    storage contract is unchanged; it does not touch RNG ordering either way.
+    """
     if num_samples < 0:
         raise ValueError("num_samples must be non-negative.")
     if length >= 32768:
@@ -182,6 +214,8 @@ def generate_packed_instances(
     tuple_array = np.empty((num_samples, length, dimension), dtype=np.uint8)
     label_array = np.empty(num_samples, dtype=np.bool_)
     match_array = np.full((num_samples, 3), -1, dtype=np.int16)
+    arm_array = np.full(num_samples, -1, dtype=np.int8)
+    corruption_array = np.full(num_samples, -1, dtype=np.int8)
 
     for idx in range(num_samples):
         instance = generate_instance(
@@ -196,11 +230,22 @@ def generate_packed_instances(
         label_array[idx] = instance.has_3sum
         if instance.matching_indices is not None:
             match_array[idx] = instance.matching_indices
+        if collect_provenance:
+            if instance.construction_arm is not None:
+                arm_array[idx] = int(instance.construction_arm)
+            if instance.corruption_count is not None:
+                corruption_array[idx] = int(instance.corruption_count)
 
     return PackedInstances(
         tuples=torch.from_numpy(tuple_array),
         has_3sum=torch.from_numpy(label_array),
         matching_indices=torch.from_numpy(match_array),
+        construction_arm=(
+            torch.from_numpy(arm_array) if collect_provenance else None
+        ),
+        corruption_count=(
+            torch.from_numpy(corruption_array) if collect_provenance else None
+        ),
     )
 
 
