@@ -86,6 +86,10 @@ python scripts/run_experiment.py ... --construction_diagnostics
 python scripts/analyze_exp0_errors.py <report>.json --errors --compare
 ```
 
+For deterministic reconstruction from completed training checkpoints and
+cross-seed hard-instance overlap, see
+[`experiment0_checkpoint_analysis.md`](experiment0_checkpoint_analysis.md).
+
 `--construction_diagnostics` reuses the run's existing final validation pass, so
 it adds no forward pass. It records per-stratum counts, errors, accuracy, and
 confusion cells, plus a per-instance record for every error including the True
