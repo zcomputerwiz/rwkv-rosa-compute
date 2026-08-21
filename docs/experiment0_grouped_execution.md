@@ -361,3 +361,47 @@ grouped + fused AdamW   + compile    224.73 ms wall    1.435x
 Both at N=0, batch 48, bf16, on realistic shuffled batches. The padded figure is
 shape-invariant — it always pads to B=48 T=136 — so the generator fix does not
 move it.
+
+## Batch size: 96 is the operating point
+
+Grouping halved peak memory, which frees room to raise the batch. Swept at N=0,
+grouped, bf16 + compile + fused AdamW:
+
+```text
+batch   throughput      peak memory       off-GPU gap
+   48   210.6 samp/s    6.63 GiB (41%)       24.1%
+   96   257.8 samp/s   11.18 GiB (70%)       11.0%
+  144    26.9 samp/s   15.64 GiB (98%)        1.5%
+  192    11.6 samp/s   19.61 GiB (123%)         --
+```
+
+**Batch 96 gives 1.224x throughput and halves the off-GPU gap**, 24.1% to 11.0%.
+That is the same launch and dispatch overhead CUDA graphs failed to recover:
+more tokens per launch amortizes the fixed per-launch cost and the fixed 10.8 ms
+optimizer, so a larger batch reaches part of it for free.
+
+**The capacity cliff is not gradual.** 96 to 144 is a 9.6x throughput collapse,
+not a taper — once allocation approaches the card there is no graceful
+degradation. Hence 70% as the operating point rather than 90%: allocator
+behaviour varies batch to batch, and a configuration averaging 90% will
+occasionally land past the cliff mid-run.
+
+The batch-192 row is instrumentation failure, not data: it reports GPU time
+22790 ms against wall 16573 ms, a negative gap, which is impossible. Under
+host-memory spill the profiler's kernel accounting stops corresponding to wall
+time. The throughput number is directionally right; its components are not.
+
+Two framings worth separating, because they point opposite ways:
+
+```text
+capacity  (VRAM occupancy)      stay well below   - the cliff above
+bandwidth (memory controller)   push it up        - idle controller is waste
+```
+
+The elementwise block runs at roughly 50% of the card's 288 GB/s at batch 48,
+and a larger batch moves that up. Capacity is the binding constraint here,
+bandwidth is not.
+
+**Batch size is a protocol change, not a throughput knob.** It alters gradient
+noise and the optimization trajectory, so it changes the `run_id` and must not
+be varied within a sweep.
