@@ -87,14 +87,27 @@ def test_resume_tolerates_loader_difference_with_a_warning():
         validate_checkpoint_signature(saved, expected)
 
 
-def test_resume_tolerates_run_id_shift_caused_by_that_difference():
-    """A pre-normalization checkpoint carries the old hash; accept it."""
+def test_run_id_difference_is_never_excused():
+    """Caught live: a single-seed resume of a three-seed run differs ONLY in
+    run_id, because seeds_run is hashed into it but absent from the signature.
+    An earlier version of this exemption waved that through while reporting
+    that every scientific field matched."""
+    saved = _signature()
+    saved["run_id"] = "three_seed_run"
+    expected = _signature()
+    expected["run_id"] = "one_seed_resume"
+
+    with pytest.raises(ValueError, match="does not match"):
+        validate_checkpoint_signature(saved, expected)
+
+
+def test_run_id_difference_not_excused_even_alongside_loader_drift():
     saved = _signature()
     saved["training"]["num_workers"] = 2
-    saved["run_id"] = "old_hash_from_before"
+    saved["run_id"] = "different"
     expected = _signature()
 
-    with pytest.warns(RuntimeWarning):
+    with pytest.raises(ValueError, match="does not match"):
         validate_checkpoint_signature(saved, expected)
 
 

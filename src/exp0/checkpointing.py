@@ -198,13 +198,15 @@ def validate_checkpoint_signature(
     obstacle with no scientific content. Such a checkpoint is accepted with a
     warning.
 
-    ``run_id`` is exempt only as a consequence of that, and only when every
-    other section already matches. The run_id is a hash of exactly the model,
-    task, evaluation, and training inputs recorded here; if all of those agree
-    and the only training disagreements are DataLoader fields, the differing
-    hash can only come from those fields. That makes the exemption a deduction
-    rather than an override - it is how checkpoints written before DataLoader
-    settings became identity-neutral remain resumable.
+    ``run_id`` is NOT exempt, and the reason is worth recording. It is tempting
+    to argue that if every signature section matches, a differing run_id can
+    only have come from the DataLoader fields - but the run_id is also a hash of
+    ``seeds_run``, ``eval_seed`` and ``val_samples``, none of which appear in
+    this signature. A single-seed resume of a three-seed run therefore produces
+    a different run_id with every recorded section identical, and exempting the
+    run_id would wave that through while claiming the science matched. Since
+    DataLoader fields are now normalized out of the run_id, a genuine
+    worker-count change leaves it untouched and needs no exemption.
     """
     if dict(saved) == dict(expected):
         return
@@ -215,19 +217,17 @@ def validate_checkpoint_signature(
     training_diffs = (
         _training_disagreements(saved, expected) if "training" in differing else []
     )
-    tolerated_training = set(training_diffs) <= CHECKPOINT_TOLERATED_FIELDS
-    # run_id may differ only as a downstream effect of the tolerated fields, and
-    # only when nothing else disagrees.
-    substantive = [
-        key for key in differing if key not in ("training", "run_id")
-    ]
-    if tolerated_training and not substantive:
-        detail = ", ".join(training_diffs) or "run_id only"
+    only_training_differs = differing == ["training"]
+    if (
+        only_training_differs
+        and training_diffs
+        and set(training_diffs) <= CHECKPOINT_TOLERATED_FIELDS
+    ):
         warnings.warn(
             "Resuming a checkpoint whose DataLoader settings differ from the "
-            f"requested run ({detail}). These do not change what the run "
-            "computes, so the resume is allowed and the signature is repaired. "
-            "Every scientific field matched exactly.",
+            f"requested run ({', '.join(training_diffs)}). These do not change "
+            "what the run computes, so the resume is allowed and the signature "
+            "is repaired.",
             RuntimeWarning,
             stacklevel=2,
         )

@@ -127,13 +127,18 @@ Normalized rather than removed, so the canonical config keeps the same shape.
 `validate_checkpoint_signature` accepts a checkpoint whose only disagreements
 are these fields, emits a `RuntimeWarning`, and proceeds.
 
-`run_id` is exempt too, but **only as a consequence** and only when every other
-section already matches. The `run_id` is a hash of exactly the model, task,
-evaluation, and training inputs in the signature; if all of those agree and the
-only training disagreements are DataLoader fields, the differing hash can only
-have come from those fields. The exemption is a deduction, not an override — a
-`run_id` mismatch alongside any substantive difference is still rejected, and so
-is a mixture of loader drift and a real protocol change.
+`run_id` is **not** exempt, and the reason is worth recording because the
+opposite seemed obviously right at first. The tempting argument is that if every
+signature section matches, a differing `run_id` can only have come from the
+DataLoader fields. That is false: the `run_id` also hashes `seeds_run`,
+`eval_seed` and `val_samples`, none of which appear in the signature.
+
+A single-seed resume of a three-seed run therefore differs in `run_id` alone,
+with every recorded section identical. An earlier draft of this exemption
+accepted exactly that during a live test, reporting `(run_id only)` while
+claiming every scientific field matched. Since DataLoader fields are now
+normalized out of the `run_id`, a genuine worker-count change leaves it
+untouched and needs no exemption at all.
 
 ### Runs whose identity shifted
 
