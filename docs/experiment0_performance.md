@@ -141,9 +141,34 @@ The CUDA peak-memory fields are `null` on CPU and are measured with PyTorch's CU
 
 CPU CI verifies correctness/equivalence but does not claim CUDA speedups or VRAM savings. GPU throughput and peak allocated/reserved memory should be measured on the actual experiment machine before choosing a new production batch size.
 
-## Deferred optimization: `torch.compile`
+## Compilation and precision levers (`torch.compile`, TF32, BF16)
 
-`torch.compile` is intentionally not enabled by this change. It can improve throughput on some model/GPU/software combinations, but compilation mode and CUDA graph behavior can also add startup cost or memory. It should be benchmarked separately on the actual experiment environment after the deterministic data/logit/AMP improvements above are established.
+Measured throughput levers and precision configurations are documented in detail in [`experiment0_precision_and_compile.md`](experiment0_precision_and_compile.md).
+
+Key levers available via CLI flags:
+- `--compile`: Enables `torch.compile(model.loss_logits)` with Triton codegen (delivers 1.40x on RWKV-7 and 2.12x on Llama combined with BF16 on Ada GPUs).
+- `--tf32` / `--no-tf32`: Opt-in TensorFloat-32 for FP32 matmuls (~1.23x speedup on FP32 with minimal numerical deviation).
+- `--precision bf16`: BF16 mixed precision autocast (1.61x speedup on Llama, standard for fused RWKV CUDA recurrence).
+
+Reproduce and measure levers on your GPU using:
+```bash
+python scripts/benchmark_training_precision.py --arch both
+```
+
+On Windows, `torch.compile` requires the `triton-windows` package (installed via `pip install -e ".[cuda]"`) and MSVC toolset 14.44+ (handled automatically by `scripts/run_cuda_tests.ps1`).
+
+## Sequence padding analysis & length-aware grouped execution
+
+In mixed training batches (50% parallel CoT, 50% filler), batches are padded to the longest sequence in the batch. Because CoT sequences have fixed length (~40 tokens) regardless of $N$, filler examples at low $N$ (e.g. length 10 at $N=0$) waste substantial computation processing padding tokens.
+
+To inspect and quantify padding waste across the $N$-sweep:
+```bash
+python scripts/analyze_sweep_padding.py --batch-size 128
+```
+
+At $N=0$, only ~51% of recurrent transitions are logical; the remaining 49% are padding and chunk-alignment overhead.
+
+[`src/exp0/grouped_execution.py`](../src/exp0/grouped_execution.py) provides length-homogeneous subgroup execution. It partitions a mixed batch into homogeneous length groups, executes forward/backward passes per group with token-weighted loss summation (`reduction="sum"`), and applies a single global gradient clip and AdamW update per optimizer batch.
 
 ## RWKV-7 CUDA benchmark and profiling harness
 
