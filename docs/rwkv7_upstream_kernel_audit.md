@@ -7,23 +7,35 @@ BENCHMARK / REJECT recommendation and the evidence for each.
 ```text
 upstream pinned commit : ec56ea2b172c065a793d25723bc03e2af1f018dd
 upstream path          : external/RWKV-LM/RWKV-v7/train_temp/cuda/
-our vendored kernel    : external/rosa_soft/contrib/rwkv7_legacy/csrc/cuda/
-                         rwkv7_clampw.cu + rwkv7_clampw.cpp
+our kernel             : rwkv7_clampw.cu + rwkv7_clampw.cpp, from that same
+                         upstream directory
+loaded by              : src/exp0/models/rwkv_cuda.py:25-31, 70-72
+build flags            : -D_N_=64 -D_CHUNK_LEN_=16 (rwkv_cuda.py:84-92)
+dtype                  : bf16 only, enforced again at rwkv_cuda.py:234
 ```
 
-Experiment 0 vendors the **oldest** recurrence kernel in that directory and
-implements everything else — TimeMix mixing, projections, gates, normalization,
-ChannelMix, and the output head — as ordinary PyTorch.
+Experiment 0 compiles the **oldest** recurrence kernel in that directory
+directly from the pinned submodule — `rwkv_cuda.py` says it "intentionally loads
+the pinned BlinkDL RWKV-7 CUDA source" — and implements everything else
+(TimeMix mixing, projections, gates, normalization, ChannelMix, and the output
+head) as ordinary PyTorch.
 
-The first revision of this document was independently re-verified against the
-sources; four claims were corrected as a result. Corrections are marked inline
-and listed under [Verification history](#verification-history).
+Note for anyone auditing this tree: `external/rosa_soft/contrib/rwkv7_legacy/`
+also contains a `rwkv7_clampw` kernel. That one is dtype-generic
+(`template<typename F, int HEAD_SIZE, int CHUNK_LEN>`) and looks like the
+natural comparison target, but **it is not ours** and is referenced nowhere in
+`src/`, `tests/`, or `scripts/`. Comparing against it produces a false
+signature-mismatch finding; the second revision of this document made exactly
+that error.
+
+This document has been through two rounds of independent verification. Findings
+are listed under [Verification history](#verification-history).
 
 ## Summary
 
 | Operation | Current repo | Upstream candidate | Directly compatible? | Expected benefit | Verdict |
 |---|---|---|---|---|---|
-| Recurrence fwd/bwd | `rwkv7_clampw` | `rwkv7_clampw_v3_for_h100` | **No** — different templating and dtype surface; port required | Shared-memory preload removes repeated global reads; targets the traffic Nsight already flagged | **BENCHMARK** |
+| Recurrence fwd/bwd | `rwkv7_clampw` | `rwkv7_clampw_v3_for_h100` | Yes — same `template<int N>`, same bf16 binding surface; backward adds a `TILE` parameter | Shared-memory preload removes repeated global reads; targets the traffic Nsight already flagged | **BENCHMARK** |
 | Recurrence fwd/bwd, variant | `rwkv7_clampw` | `rwkv7_clampw_v3_for_h100_alt` | Same port cost as v3 | Same, minus the `v` preload: 20 KiB forward instead of 24 KiB | **BENCHMARK** (second arm) |
 | Recurrence, wide head | `rwkv7_clampw` | `rwkv7_clampw128_v2` | No — `static_assert(_N_ == 128)` | None at our head size | **REJECT** |
 | Recurrence, plain | `rwkv7_clampw` | `wkv7_cuda` / `wkv7_cuda_fp32` | Different op surface | Older than what we vendor | **REJECT** |
@@ -82,40 +94,62 @@ The occupancy consequence is asymmetric and matters for planning: on a nominal
 only two backward blocks. Training is backward-dominated, so the backward figure
 is the one that governs.
 
+It does, however, **launch without special configuration**. The per-block
+default cap on Ada `sm_89` is 48 KiB, and these are static `__shared__`
+declarations with no dynamic shared-memory argument at the launch site:
+
+```text
+backward static shared   37,120 B
+per-block default cap    49,152 B
+headroom                 12,032 B  = 11.75 KiB
+```
+
+So no `cudaFuncSetAttribute` opt-in is needed and `TILE` need not drop to 8.
+That matters because a `TILE` change would alter accumulation grouping, and the
+numerical equivalence below is the property that makes v3 adoptable at all.
+
 Both kernels additionally use per-thread `float` arrays of length `N` — `state`
 in forward (`:28`), three of them in backward (`:102`). Those are compiler-managed
 register or local storage rather than static shared memory, so the complete
 occupancy picture needs compiled register and spill counts, not source alone.
 
-### Signatures do not match ours
+### Signatures match ours
 
-An earlier revision claimed the kernel signatures were identical to ours and
-that the Python binding would need little or no change. **That is wrong.** The
-logical tensor-pointer order does match, but the templating and dtype surface do
-not:
+Against the kernel we actually compile — the upstream flat-directory
+`rwkv7_clampw` — the templating and binding surface line up:
 
 ```text
-ours  rwkv7_clampw.cu:40,116
-      template<typename F, int HEAD_SIZE, int CHUNK_LEN>
-      host entry points take runtime head_size and chunk_len
-      dispatches FP32, FP16, BF16
-      binding expects [B,T,H,N], reads head_size = r.size(3)
-
-v3    rwkv7_clampw_v3_for_h100.cu:23,96-97
-      template<int N>  and  template<int N, int TILE>
+ours  rwkv7_clampw.cu:20   template<int N> __launch_bounds__(N,2)  forward_kernel
+      rwkv7_clampw.cu:83   template<int N>                         backward_kernel
       chunk length from the compile-time _CHUNK_LEN_ macro
-      FP32 or BF16 only
-      binding infers B,T,H from dims 0-2 only
+      bf16 throughout; binding takes (B, T, H, bf* ...)
+
+v3    ..._v3_for_h100.cu:23   template<int N> __launch_bounds__(N,2)  forward_kernel_preload
+      ..._v3_for_h100.cu:96   template<int N, int TILE>               backward_kernel_preload
+      same _CHUNK_LEN_ macro, same bf16 binding parameter lists
 ```
 
-Adopting v3 therefore means either porting its tiling into our generic
-templates, or deliberately narrowing the supported surface — which would
-**drop FP16**. That is real integration work, not a drop-in swap, and it is why
-the verdict is now plain BENCHMARK rather than "BENCHMARK then likely ADOPT".
+The only structural difference is the extra `TILE` template parameter on v3's
+backward, which is a launch-site change. `rwkv7_clampw_v3.cpp` declares the same
+forward and backward parameter lists as `rwkv7_clampw.cpp`; only the symbol
+names (`cuda_forward_v3`) and the `TORCH_LIBRARY` namespace differ.
 
-One porting contract to preserve: v3's forward loop always processes a full
-chunk and so assumes `T` is chunk-divisible. Our binding asserts
-`seq_len % 16 == 0`; that assertion must survive the port.
+Because both are bf16-only, adopting v3 costs no dtype coverage. `rwkv_cuda.py`
+already converts to BF16 and enforces it in the autograd function, so there is
+no FP16 path to lose.
+
+The practical adoption route is therefore to add the v3 sources as an alternate,
+flag-selected pair in the extension build and A/B them — not to restructure our
+kernel. The `TORCH_LIBRARY` namespace differs, so both can register side by side
+for a direct comparison.
+
+One contract to preserve: v3's forward loop always processes a full chunk and so
+assumes `T` is chunk-divisible. That already holds — the kernel we load asserts
+`T % _CHUNK_LEN_ == 0` (`rwkv7_clampw.cu:174`), the binding guards it, and
+`rwkv_cuda.py` pads public inputs before dispatch — but it must stay true.
+
+The verdict is BENCHMARK rather than ADOPT because nothing has been measured,
+not because integration is hard.
 
 ### The `_alt` variant
 
@@ -234,19 +268,42 @@ inspected here is recorded at the top of this document.
 
 ## Verification history
 
-The first revision was re-verified independently against the sources. Confirmed:
-the absence of Hopper machinery, the head-128 rejection, both L2Wrap rejections
-including the 65536 vocab constant, the presence of backward kernels in all six
-fused candidates, and numerical equivalence between our kernel and v3.
+Two rounds of independent source re-verification.
 
-Corrected:
+**Round 1** confirmed the absence of Hopper machinery, the head-128 rejection,
+both L2Wrap rejections including the 65536 vocab constant, the presence of
+backward kernels in all six fused candidates, and numerical equivalence between
+our kernel and v3. It corrected four claims:
 
 ```text
-1  signature match         claimed identical; templating and dtype surface differ
-2  shared-memory footprint 24 KiB is forward only; backward is 36.25 KiB
+1  signature match         claimed identical; said to differ      -> WRONG, see round 2
+2  shared-memory footprint 24 KiB is forward only; backward 36.25 KiB
 3  fused kernel head size  only 2 of 6 encode head 64, not all 6
 4  omitted files           _alt variant and rwkv7_clampw_v3.cpp binding
 ```
 
-Correction 1 removed the basis for the earlier "then likely ADOPT" wording, so
-the recurrence verdict is now plain BENCHMARK.
+**Round 2** found that correction 1 was itself wrong, and why. The comparison had
+been made against `external/rosa_soft/contrib/rwkv7_legacy/`, which is not the
+kernel Experiment 0 builds. Reading the loader settles it:
+
+```text
+rwkv_cuda.py:25-31   _source_dir() -> external/RWKV-LM/RWKV-v7/train_temp/cuda
+rwkv_cuda.py:70-72   loads rwkv7_clampw.cpp + rwkv7_clampw.cu from there
+grep rwkv7_legacy across src/ tests/ scripts/   no hits
+```
+
+Against the file we do build, the original signature claim holds: both are
+`template<int N>` driven by the `_CHUNK_LEN_` macro with identical bf16 binding
+parameter lists, differing only in v3's extra `TILE` template parameter on the
+backward. The supposed FP16 loss was also an artifact of the wrong comparison —
+our path is bf16-only by construction.
+
+Corrections 2, 3, and 4 concern upstream files and are unaffected. Round 2 also
+established the 48 KiB launchability headroom recorded above.
+
+The recurrence verdict is BENCHMARK in both revisions, but for a different
+reason: not because integration is costly, but because nothing has been measured.
+
+Method note: round 1 was given the wrong path as a premise and reported a
+mismatch consistent with it. Verifying a claim about *our* build requires reading
+the loader, not just the kernel sources.
