@@ -84,8 +84,18 @@ second timescales, one of them power-capped. The 10.4% Ampere difference sits
 against a within-run stdev near 3%, so the direction is plausible, but neither
 the Ada rejection nor the Ampere adoption is established by a window that short.
 
-Re-run with enough `--steps` to cover several seconds of sustained execution
-before acting on either. Note this affects the timing comparison only: the
+The harness had a second defect, worse than the short window. It allocated the
+operator's output, saved chunk state and `sa` buffer **inside the timing loop** —
+about 58 MB per iteration at the CoT shape, 42 MB of it the state tensor — plus
+six `.contiguous()` calls and a `torch.cuda.synchronize()` per step. A 0.5 ms
+measurement was therefore kernel time plus allocator bookkeeping plus sync, while
+the difference under test is a few percent of the total. Both the Ada and Ampere
+figures were produced this way.
+
+`scripts/benchmark_rwkv7_recurrence_variants.py` now preallocates the workspace
+once, reuses it, times with CUDA events rather than wall clock, and defaults to
+2000 iterations instead of 30. Re-run it on both cards before acting on either
+verdict. Note this affects the timing comparison only: the
 correctness result (max deviation 0.0002 against an 0.08 tolerance on both
 cards) is unaffected, since that is a numerical check rather than a timed one.
 
