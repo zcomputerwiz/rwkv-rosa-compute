@@ -564,3 +564,112 @@ Until this is resolved, treat the two as mutually exclusive on the Llama path
 and pick by measurement: `torch.compile` is worth 1.31x on 0A shapes (#32),
 while grouped execution's benefit on Llama has not been measured on GPU at all
 - every grouped benchmark in this document is RWKV 0B.
+
+
+## Ampere cross-check (RTX 3070 Laptop, sm_86, 8 GiB, 4 MiB L2)
+
+Three Ada conclusions were re-measured on Ampere. One held, one reversed, and
+one turns out to rest on too little data on both cards. They are separated below
+by how much weight the measurement can carry, because the timing windows differ
+by three orders of magnitude.
+
+### Solid: Track F stays rejected
+
+`ncu` on the isolated TimeMix elementwise block:
+
+```text
+                          dram__throughput   lts__throughput   sm__throughput
+Ada    vectorized              82-85%             41-44%           58-64%
+Ampere vectorized              86-89%             44-48%           13-14%
+```
+
+Ampere is at 86-89% of DRAM peak, comparable to Ada's 83%. The concern that
+Ada's 32 MiB L2 was masking DRAM headroom - the mechanism that reversed the v3
+verdict - does not apply here. **The six upstream fused TimeMix/ChannelMix
+kernels stay rejected on both architectures.**
+
+Ampere did surface a distinction Ada's profile did not separate. Unvectorized
+broadcast kernels are **compute-bound, not bandwidth-bound**: 44% DRAM against
+50-66% SM, spent on integer division and modulo for broadcast indexing. The
+`[1, 1, C]` parameter broadcasts in TimeMix are the likely source. That is the
+one part of the elementwise block with real headroom, and it is an indexing
+problem rather than a bandwidth one.
+
+### Solid: memory, and the 8 GiB operating point
+
+Peak allocation is deterministic, and the pressure zone was re-measured across
+10 batches (12 steps per batch) to eliminate allocator noise:
+
+```text
+batch   grouped peak   % of 8 GiB   throughput        status
+   24      5.24 GiB       65%         80.1 samples/s
+   28      5.47 GiB       68%         83.7 samples/s
+   32      5.98 GiB       75%         89.8 samples/s  <- safe operating point
+   36      6.43 GiB       80%         88.6 samples/s
+   40      7.42 GiB       93%         98.0 samples/s  <- memory edge
+   44      8.01 GiB      100%         54.4 samples/s  <- allocator thrash
+   48      8.66 GiB      108%         22.5 samples/s  <- host-spill cliff
+```
+
+Batch 32 at 75% occupancy is the safe production recommendation. The cliff at
+48 is a 4x throughput penalty and unambiguous.
+
+Two cautions on the pressure zone. The curve is **not** monotonic — batch 36
+(88.6) sits below batch 32 (89.8) before batch 40 rises to 98.0 — and batch 40
+moved from 58.9 to 98.0 samples/s between measurements, a 66% swing, with its
+memory reading shifting 7.63 to 7.42 GiB. That zone is unstable rather than
+resolved, so batch 40's "peak throughput" rests on one re-run that disagreed
+with its predecessor by two thirds. Treat anything above batch 36 as
+provisional.
+
+### Weaker than it looks: fused AdamW does not transfer
+
+```text
+                foreach     fused    achieved BW (fused)
+Ada             32.01 ms   11.80 ms    156 GB/s  (54% of 288 peak)
+Ampere          25.77 ms   26.00 ms     71 GB/s  (16% of 448 peak)
+```
+
+**`--fused_adamw` must not be assumed portable.** It is worth 2.714x on Ada and
+nothing on Ampere (0.991x).
+
+Power draw was monitored via `nvidia-smi` during 200 sustained steps of the
+optimizer benchmark. During the execution loop, power draw sits at **~28 Watts**
+(graphics clock 1290 MHz, memory clock 6501 MHz, temp 62°C), far below the 80W
+laptop power cap limit (which is only briefly approached during initialization).
+So the power cap is ruled out — that hypothesis is disproven, not merely
+unsupported.
+
+**What replaced it is not established either.** 71 GB/s is **16% of this card's
+~448 GB/s peak** (256-bit GDDR6 at 14 Gbps), so it is not a DRAM streaming
+limit; Ada reaches 54% of its own peak running the same kernel over the same
+1.84 GB. The L2 argument fails independently: that working set is 59x Ada's L2
+and 471x Ampere's, so neither card holds it and cache size cannot be what
+separates 2.714x from 0.991x.
+
+The measurement is solid and reproducible; the mechanism is open. An `ncu` run
+against the fused AdamW kernel would settle whether it is bandwidth-bound at
+all — `dram__throughput` answered the equivalent question for the elementwise
+block in one command. Until then, record this as an unexplained 6x gap in
+achieved bandwidth between the two cards rather than as a hardware ceiling,
+because "hardware limit" closes an investigation that should stay open.
+
+### Recurrence verdict re-measured with fixed harness (2000 steps)
+
+The recurrence A/B was re-run using the fixed harness (workspace preallocated
+outside timing loop, timed via CUDA Events, 2000 iterations):
+
+```text
+                        current       v3      v3_alt    v3 speedup
+CoT group  B24 T144      0.486 ms   0.452 ms  0.468 ms    1.077x (+7.7%)
+filler     B24 T16       0.078 ms   0.075 ms  0.079 ms    1.040x (+4.0%)
+padded     B48 T144      0.915 ms   0.895 ms  0.923 ms    1.023x (+2.3%)
+```
+
+Within-run standard deviation is ~0.016 ms over 2000 steps. The direction
+holds: `v3` gives a real +7.7% speedup on Ampere for CoT shapes (where it was
+0.951-1.000x on Ada). Because recurrence is ~4-6% of Ampere step time, this
+translates to roughly ~0.4-0.5% end-to-end.
+
+The memory and `ncu` figures above are unaffected: peak allocation is
+deterministic and `ncu` reads hardware counters per kernel launch.

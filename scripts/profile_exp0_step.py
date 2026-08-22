@@ -210,7 +210,11 @@ def profile_path(label: str, step_fn, batches, vocab, task_cfg, device,
     per_kernel: Dict[str, float] = defaultdict(float)
     per_kernel_calls: Dict[str, int] = defaultdict(int)
     for event in prof.key_averages():
-        cuda_us = getattr(event, "self_device_time_total", 0) or 0
+        cuda_us = getattr(
+            event,
+            "self_device_time_total",
+            getattr(event, "self_cuda_time_total", 0),
+        ) or 0
         if cuda_us <= 0:
             continue
         per_kernel[event.key] += cuda_us
