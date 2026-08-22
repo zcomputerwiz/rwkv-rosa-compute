@@ -35,8 +35,8 @@ are listed under [Verification history](#verification-history).
 
 | Operation | Current repo | Upstream candidate | Directly compatible? | Expected benefit | Verdict |
 |---|---|---|---|---|---|
-| Recurrence fwd/bwd | `rwkv7_clampw` | `rwkv7_clampw_v3_for_h100` | Yes — same `template<int N>`, same bf16 binding surface; backward adds a `TILE` parameter | **None measured on Ada**: 0.951-1.000x, i.e. a tie or slightly slower | **REJECT** (measured) |
-| Recurrence fwd/bwd, variant | `rwkv7_clampw` | `rwkv7_clampw_v3_for_h100_alt` | Same port cost as v3 | **Slower on Ada**: 0.693-0.922x | **REJECT** (measured) |
+| Recurrence fwd/bwd | `rwkv7_clampw` | `rwkv7_clampw_v3_for_h100` | Yes — same `template<int N>`, same bf16 binding surface; backward adds a `TILE` parameter | **Architecture-dependent**: 1.104x on Ampere (4 MiB L2), 0.951-1.000x on Ada (32 MiB L2) | **ADOPT on small-L2 parts**, neutral on Ada |
+| Recurrence fwd/bwd, variant | `rwkv7_clampw` | `rwkv7_clampw_v3_for_h100_alt` | Same port cost as v3 | 1.049x on Ampere, 0.693-0.922x on Ada; below v3 on both | **REJECT** (v3 dominates it) |
 | Recurrence, wide head | `rwkv7_clampw` | `rwkv7_clampw128_v2` | No — `static_assert(_N_ == 128)` | None at our head size | **REJECT** |
 | Recurrence, plain | `rwkv7_clampw` | `wkv7_cuda` / `wkv7_cuda_fp32` | Different op surface | Older than what we vendor | **REJECT** |
 | TimeMix 6-way mixing | PyTorch | `rwkv7_tmix_mix6_bf16_v5` | bf16; channel-generic; fwd+bwd present | Fuses six mixes we express separately | **BENCHMARK** |
@@ -48,7 +48,36 @@ are listed under [Verification history](#verification-history).
 | Head + CE | `nn.Linear` + `F.cross_entropy` | `rwkv7_head_l2wrap_ce_bf16_v4` | **No** — see below | Would fuse a 32k projection | **REJECT as-is, ADAPT the idea** |
 | CE only | `F.cross_entropy` | `rwkv7_l2wrap_ce_bf16_v2` | **No** — L2Wrap | — | **REJECT** |
 
-## Measured outcome: both v3 variants rejected
+## Measured outcome: v3 is architecture-dependent, not rejected
+
+**Corrected.** The rejection below was measured on Ada only and stated without
+that qualification. Re-run on Ampere it reverses:
+
+```text
+CoT group (B=24, T=144, C=768)      current      v3        v3_alt
+  Ada    (sm_89, 32 MiB L2)          0.387 ms   1.000x     0.875x
+  Ampere (sm_86,  4 MiB L2)          0.509 ms   1.104x     1.049x
+```
+
+Both correct at the existing tolerances (max deviation 0.0002 on both cards).
+
+The mechanism given below for the Ada result **predicts** this: v3 trades global
+reads for `__syncthreads` barriers and lower occupancy, and on Ada the reads it
+eliminates were already served by a 32 MiB L2, so it paid the costs for nothing.
+Ampere has 4 MiB. There the working set does not fit, the staging prevents L2
+thrashing, and the trade pays — most on the long CoT sequence, least on the
+short filler group (1.013x), exactly as that reasoning implies.
+
+So the analysis held and the verdict was over-generalized. The correct statement
+is that `clampw_v3` is worth adopting on small-L2 parts and is neutral-to-
+negative on large-L2 parts, and any adoption should be gated on the target
+architecture rather than decided globally.
+
+Scale, before anyone spends effort on it: the recurrence is about 8.5% of step
+time, so 1.104x on that slice is roughly 0.9% end to end. Real, measured, and
+small.
+
+## Original Ada measurement (correct, but Ada-only)
 
 The audit below reasoned that v3's shared-memory preload should win because it
 targets the memory traffic profiling had flagged. **It does not.** Measured on
