@@ -128,6 +128,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--peak-lr", type=float, default=None,
                         help="default: the source run's last nonzero LR")
     parser.add_argument("--warmup-fraction", type=float, default=0.05)
+    parser.add_argument("--num-workers", type=int, default=None,
+                        help="DataLoader worker processes. The checkpoint "
+                             "signature stores the identity-normalized value "
+                             "(always 0) because worker count cannot change "
+                             "what a run computes, so the source run's real "
+                             "setting is not recoverable from it. Defaults to "
+                             "0, matching the signature; set it for speed.")
     parser.add_argument("--batch-size", type=int, default=None,
                         help="override the source run's batch size. This is a "
                              "FURTHER intervention on top of the new schedule: "
@@ -146,6 +153,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.error("--additional-epochs must be positive")
     if args.batch_size is not None and args.batch_size <= 0:
         parser.error("--batch-size must be positive")
+    if args.num_workers is not None and args.num_workers < 0:
+        parser.error("--num-workers must be non-negative")
 
     state = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     signature = state["signature"]
@@ -155,6 +164,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     source_batch_size = train_cfg.batch_size
     if args.batch_size is not None and args.batch_size != source_batch_size:
         train_cfg = replace(train_cfg, batch_size=args.batch_size)
+    # Unlike batch size, this is not an intervention: DataLoader settings are
+    # identity-neutral by construction, which is exactly why the signature
+    # cannot tell us what the source run actually used.
+    if args.num_workers is not None:
+        train_cfg = replace(train_cfg, num_workers=args.num_workers)
 
     completed = int(progress["epoch"])
     if completed < int(signature["epochs"]):
@@ -181,6 +195,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         print(f"batch size          : {train_cfg.batch_size}")
     print(f"train precision     : {train_cfg.precision}")
+    print(f"dataloader workers  : {train_cfg.num_workers}")
     if args.dry_run:
         print("\ndry run: nothing trained.")
         return 0
@@ -289,6 +304,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "batch_size": train_cfg.batch_size,
         "batch_size_overridden": train_cfg.batch_size != source_batch_size,
         "train_precision": train_cfg.precision,
+        "num_workers": train_cfg.num_workers,
         "distribution_note": (
             "Continuation of a completed run under a NEW learning-rate schedule. "
             "Not a fixed-budget run and not comparable to arms that stopped at "
