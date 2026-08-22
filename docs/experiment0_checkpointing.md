@@ -159,3 +159,54 @@ The practical consequence worth knowing: a run and its more-parallel rerun now
 share a `run_id`, and therefore an output filename. That is the intended
 semantics — they are the same experiment — but the later run overwrites the
 earlier report rather than sitting beside it.
+
+
+## Resuming one seed of a multi-seed run
+
+`--resume_checkpoint` accepts exactly one seed. A run launched with
+`--seeds 43 44 45` hashes all three into its `run_id`, so resuming seed 44
+alone computes a different `run_id` purely from the shortened seed list — even
+though the model, task, and protocol are identical.
+
+Two things follow, and both are now handled explicitly.
+
+The checkpoint tree is keyed by `run_id`, so the resume must adopt the
+original identity or it looks in the wrong directory. `run_experiment.py` reads
+the checkpoint's `run_id` and uses it for the checkpoint path and signature,
+announcing the substitution:
+
+```text
+Resuming into the original run identity 6c42a1bf81bbd727
+(this invocation's seed list hashes to 272b41830cceea5b).
+```
+
+The report keeps the invocation's own `run_id`, since it describes one seed
+rather than the sweep.
+
+**Why adopting the run_id is safe here and was not before.** The `run_id`
+hashes model, training, task, `eval_seed`, `val_samples`, and `seeds_run`. The
+signature checked the first three directly but recorded none of the last three
+— so adopting the checkpoint's `run_id` made the identity check vacuous and
+silently stopped verifying `eval_seed` and `val_samples` as well. A resume that
+changed the validation set would have passed.
+
+The signature now carries an `evaluation` section:
+
+```text
+evaluation: {eval_seed, val_samples, seeds_run}
+```
+
+`validate_checkpoint_signature` verifies `eval_seed` and `val_samples`
+directly, requires the resumed seeds to be a subset of the original sweep, and
+only then exempts `seeds_run` and the `run_id` derived from it — with a
+`RuntimeWarning`. Changing `eval_seed`, `val_samples`, or any protocol field is
+still rejected:
+
+```text
+ValueError: Training checkpoint does not match the requested run.
+Differing signature sections: evaluation
+```
+
+Checkpoints written before the `evaluation` section existed are **not** waved
+through: without it the exemption's precondition cannot be verified, so the
+resume is refused rather than allowed on an unverifiable claim.

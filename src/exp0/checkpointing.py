@@ -187,6 +187,40 @@ def _training_disagreements(
     ]
 
 
+def _resume_differs_only_by_seed_list(
+    saved: Mapping[str, Any],
+    expected: Mapping[str, Any],
+    differing: Sequence[str],
+) -> bool:
+    """True when the disagreement is exactly a single-seed resume of a sweep.
+
+    ``--resume_checkpoint`` accepts one seed, so resuming a seed of a run
+    launched with several necessarily changes ``seeds_run`` and the ``run_id``
+    hashed from it. That is legitimate; a changed ``eval_seed`` or
+    ``val_samples`` is not, and those are the only other run_id inputs.
+
+    Returns False for checkpoints written before the evaluation section existed,
+    so a legacy checkpoint is never waved through on an unverifiable claim.
+    """
+    if not set(differing) <= {"run_id", "evaluation"}:
+        return False
+    saved_eval = saved.get("evaluation")
+    expected_eval = expected.get("evaluation")
+    if not isinstance(saved_eval, Mapping) or not isinstance(expected_eval, Mapping):
+        return False
+    for key in ("eval_seed", "val_samples"):
+        if saved_eval.get(key) != expected_eval.get(key):
+            return False
+    # Every seed being resumed must have been part of the original sweep.
+    saved_seeds = saved_eval.get("seeds_run")
+    expected_seeds = expected_eval.get("seeds_run")
+    if not isinstance(saved_seeds, (list, tuple)) or not isinstance(
+        expected_seeds, (list, tuple)
+    ):
+        return False
+    return bool(expected_seeds) and set(expected_seeds) <= set(saved_seeds)
+
+
 def validate_checkpoint_signature(
     saved: Mapping[str, Any],
     expected: Mapping[str, Any],
@@ -213,6 +247,25 @@ def validate_checkpoint_signature(
 
     keys = sorted(set(saved) | set(expected))
     differing = [key for key in keys if saved.get(key) != expected.get(key)]
+
+    # Resuming ONE seed of a multi-seed run legitimately changes seeds_run, and
+    # therefore run_id. Both are exempt together, and only when eval_seed and
+    # val_samples match - those are the other run_id inputs, and without this
+    # section nothing else in the signature covers them.
+    if _resume_differs_only_by_seed_list(saved, expected, differing):
+        differing = [
+            key for key in differing if key not in ("run_id", "evaluation")
+        ]
+        warnings.warn(
+            "Resuming a single seed of a multi-seed run: seeds_run and the "
+            "run_id derived from it differ from the checkpoint. eval_seed and "
+            "val_samples matched exactly, and every other signature section is "
+            "unchanged, so the resume is allowed.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        if not differing:
+            return
 
     training_diffs = (
         _training_disagreements(saved, expected) if "training" in differing else []

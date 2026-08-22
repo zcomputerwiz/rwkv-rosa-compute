@@ -654,6 +654,29 @@ def main():
     if _check_existing_report(report_path, current_run_config):
         return
 
+    # --resume_checkpoint takes exactly one seed, so resuming a seed of a run
+    # launched with several computes a different run_id purely because
+    # seeds_run is hashed into it. The checkpoint tree is keyed by run_id, so
+    # without adopting the original the resume would look in the wrong
+    # directory and its signature would be rejected for a difference that
+    # carries no scientific meaning.
+    #
+    # This is safe only because the signature now records eval_seed and
+    # val_samples: validate_checkpoint_signature verifies those directly before
+    # exempting run_id, rather than assuming the difference is benign.
+    checkpoint_run_id = run_id
+    if args.resume_checkpoint is not None:
+        resumed_signature = torch.load(
+            args.resume_checkpoint, map_location="cpu", weights_only=False
+        ).get("signature", {})
+        original_run_id = resumed_signature.get("run_id")
+        if original_run_id and original_run_id != run_id:
+            print(
+                f"Resuming into the original run identity {original_run_id} "
+                f"(this invocation's seed list hashes to {run_id})."
+            )
+            checkpoint_run_id = original_run_id
+
     checkpointing_requested = (
         args.checkpoint_every_steps > 0
         or args.checkpoint_dir is not None
@@ -664,7 +687,7 @@ def main():
         checkpoint_root = (
             Path(args.checkpoint_dir).expanduser()
             if args.checkpoint_dir is not None
-            else out_dir / "checkpoints" / run_id
+            else out_dir / "checkpoints" / checkpoint_run_id
         )
 
     vocab = build_default_vocab(
@@ -791,7 +814,12 @@ def main():
             checkpoint_dir=seed_checkpoint_dir,
             checkpoint_every_steps=args.checkpoint_every_steps,
             resume_checkpoint=resume_checkpoint,
-            checkpoint_run_id=run_id,
+            checkpoint_run_id=checkpoint_run_id,
+            evaluation_context={
+                "eval_seed": args.eval_seed,
+                "val_samples": args.val_samples,
+                "seeds_run": sorted(args.seeds),
+            },
             collect_validation_details=args.construction_diagnostics,
         )
         history["seed"] = seed
