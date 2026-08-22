@@ -4,36 +4,46 @@
 import argparse
 import json
 import random
+import sys
 from pathlib import Path
 
-import torch
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
-from exp0.challenge_set import (
+import torch  # noqa: E402
+
+from exp0.challenge_set import (  # noqa: E402
     ChallengeSpec,
     challenge_set_report,
     generate_challenge_set,
 )
-from exp0.config import ModelConfig, Task3SumConfig, TrainConfig
-from exp0.construction_strata import (
+from exp0.config import ModelConfig, Task3SumConfig, TrainConfig  # noqa: E402
+from exp0.construction_strata import (  # noqa: E402
     build_records,
     diagnose_packed,
     error_records,
     summarize_strata,
 )
-from exp0.dataset import Task3SumDataset, build_default_vocab, pad_collate_fn
-from exp0.evaluate import (
+from exp0.dataset import (  # noqa: E402
+    Task3SumDataset,
+    build_default_vocab,
+    pad_collate_fn,
+)
+from exp0.evaluate import (  # noqa: E402
     canonical_run_config,
     compile_experiment_report,
     compute_run_id,
 )
-from exp0.generation import generate_protocol_packed_instances
-from exp0.rwkv_checkpoint import sha256_file
-from exp0.task3sum import (
+from exp0.generation import generate_protocol_packed_instances  # noqa: E402
+from exp0.rwkv_checkpoint import sha256_file  # noqa: E402
+from exp0.task3sum import (  # noqa: E402
     DEFAULT_CORRUPTION_RATE,
     GENERATOR_MODES,
     SOURCE_GENERATOR,
 )
-from exp0.train import evaluate_accuracy, train_model
+from exp0.train import evaluate_accuracy, train_model  # noqa: E402
 
 
 def get_parser() -> argparse.ArgumentParser:
