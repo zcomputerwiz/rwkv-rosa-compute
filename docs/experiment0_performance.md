@@ -299,17 +299,18 @@ Both figures below are steady-state on the same RTX 4060 Ti, derived from
 checkpoint intervals of real runs rather than from a microbenchmark. The Llama
 figure comes from the N=36 structural arm (`6fae967b93ccdb6a`, seed 43), whose
 five epoch checkpoints are 14 minutes apart for 2M samples each. The RWKV
-figure comes from the 0B N=0 pilot at 5000-step checkpoint intervals.
+figure comes from the 0B N=0 pilot, measured across two exact 5000-step
+checkpoint intervals (727 s).
 
 ```text
                    step time   batch   samples/s   params     tensors
 Llama 0A            161 ms      384      2381      21.75 M       41
-RWKV  0B            157 ms       32       204     115.03 M      404
+RWKV  0B            145 ms       32       220     115.03 M      404
 ```
 
-**The step times are within 3% of each other at a 12x difference in batch
-size.** Throughput therefore tracks batch size almost exactly: a 12x batch
-ratio produces an 11.7x throughput ratio. Both models are dominated by fixed
+**The step times are within about 10% of each other at a 12x difference in
+batch size.** Throughput therefore tracks batch size closely: a 12x batch ratio
+produces a 10.8x throughput ratio. Both models are dominated by fixed
 per-step cost rather than by per-sample compute, which is why shrinking the
 batch by 12x did not shrink the step time.
 
