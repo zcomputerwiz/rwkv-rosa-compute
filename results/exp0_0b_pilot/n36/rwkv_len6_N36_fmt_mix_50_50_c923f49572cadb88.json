@@ -1,0 +1,1776 @@
+{
+  "run_id": "c923f49572cadb88",
+  "run_config": {
+    "model": {
+      "architecture": "rwkv",
+      "init_mode": "pretrained",
+      "rwkv_checkpoint_sha256": "e10d7b1930c2644c5c6b194444774d6d82ec8212a78763493149de09aac7d83f",
+      "rwkv_kernel": "cuda",
+      "hidden_size": 768,
+      "num_hidden_layers": 12,
+      "num_attention_heads": 12,
+      "intermediate_size": 3072,
+      "head_dim": 64,
+      "llama_rope_theta": 10000.0,
+      "llama_initializer_range": 0.02,
+      "match3_shared_input_features": true,
+      "vocab_size": 1145,
+      "output_vocab_size": 32000,
+      "device": "cuda"
+    },
+    "training_protocol": {
+      "num_workers": 0,
+      "val_num_workers": 0,
+      "pin_memory": true,
+      "prefetch_factor": 2,
+      "batch_size": 32,
+      "learning_rate": 0.0001,
+      "epochs": 5,
+      "weight_decay": 0.01,
+      "grad_clip": 1.0,
+      "adam_beta1": 0.9,
+      "adam_beta2": 0.95,
+      "lr_schedule": "linear_warmup_decay",
+      "warmup_fraction": 0.05,
+      "precision": "bf16",
+      "fused_adamw": true,
+      "mixture": "50_50_cot_filler",
+      "parallel_ratio": 0.5,
+      "filler_ratio": 0.5,
+      "serial_ratio": 0.0,
+      "immediate_ratio": 0.0,
+      "neutral_ratio": 0.0,
+      "early_stop_metric": "filler_accuracy",
+      "early_stop_target": 0.99,
+      "early_stop_tolerance": 0.0,
+      "early_stop_patience": 1,
+      "immediate_protocol": false,
+      "torch_compile": true,
+      "grouped_execution": true
+    },
+    "task_config": {
+      "length": 6,
+      "dimension": 3,
+      "mod": 10,
+      "num_filler": 36,
+      "true_rate": 0.5,
+      "vocab_reduction": true,
+      "include_separator_token": true,
+      "include_eos_target": true,
+      "generator_mode": "source_corrupted",
+      "corruption_rate": 1.3333333333333333,
+      "num_samples": 2000000
+    },
+    "evaluation": {
+      "eval_seed": 9999,
+      "val_samples": 2000,
+      "seeds_run": [
+        42
+      ]
+    }
+  },
+  "model": {
+    "architecture": "rwkv",
+    "init_mode": "pretrained",
+    "rwkv_checkpoint": "C:\\Users\\Staff\\Documents\\Anitgravity\\models\\rwkv7-g1d-0.1b-20260129-ctx8192.pth",
+    "rwkv_checkpoint_sha256": "e10d7b1930c2644c5c6b194444774d6d82ec8212a78763493149de09aac7d83f",
+    "rwkv_kernel": "cuda",
+    "hidden_size": 768,
+    "num_hidden_layers": 12,
+    "num_attention_heads": 12,
+    "intermediate_size": 3072,
+    "head_dim": 64,
+    "llama_rope_theta": 10000.0,
+    "llama_initializer_range": 0.02,
+    "match3_shared_input_features": true,
+    "vocab_size": 1145,
+    "output_vocab_size": 32000,
+    "device": "cuda"
+  },
+  "initialization": {
+    "mode": "pretrained",
+    "pretrained_scope": "backbone_only",
+    "checkpoint_path": "C:\\Users\\Staff\\Documents\\Anitgravity\\models\\rwkv7-g1d-0.1b-20260129-ctx8192.pth",
+    "checkpoint_sha256": "e10d7b1930c2644c5c6b194444774d6d82ec8212a78763493149de09aac7d83f",
+    "source_architecture": {
+      "architecture": "rwkv7_x070",
+      "num_hidden_layers": 12,
+      "hidden_size": 768,
+      "intermediate_size": 3072,
+      "head_dim": 64,
+      "num_attention_heads": 12
+    },
+    "target_architecture": {
+      "architecture": "rwkv7_x070",
+      "num_hidden_layers": 12,
+      "hidden_size": 768,
+      "intermediate_size": 3072,
+      "head_dim": 64,
+      "num_attention_heads": 12
+    },
+    "strict_backbone_load": true,
+    "ignored_source_keys": [
+      "emb.weight",
+      "head.weight"
+    ],
+    "retained_target_defaults": [],
+    "task_interface_init": "random",
+    "shared_match3_input_features": true
+  },
+  "training_protocol": {
+    "num_workers": 4,
+    "val_num_workers": 0,
+    "pin_memory": true,
+    "prefetch_factor": 2,
+    "batch_size": 32,
+    "learning_rate": 0.0001,
+    "epochs": 5,
+    "weight_decay": 0.01,
+    "grad_clip": 1.0,
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.95,
+    "lr_schedule": "linear_warmup_decay",
+    "warmup_fraction": 0.05,
+    "precision": "bf16",
+    "fused_adamw": true,
+    "mixture": "50_50_cot_filler",
+    "parallel_ratio": 0.5,
+    "filler_ratio": 0.5,
+    "serial_ratio": 0.0,
+    "immediate_ratio": 0.0,
+    "neutral_ratio": 0.0,
+    "early_stop_metric": "filler_accuracy",
+    "early_stop_target": 0.99,
+    "early_stop_tolerance": 0.0,
+    "early_stop_patience": 1,
+    "immediate_protocol": false,
+    "tf32_matmul": false,
+    "torch_compile": true,
+    "grouped_execution": true
+  },
+  "task_config": {
+    "length": 6,
+    "dimension": 3,
+    "mod": 10,
+    "num_filler": 36,
+    "true_rate": 0.5,
+    "vocab_reduction": true,
+    "include_separator_token": true,
+    "include_eos_target": true,
+    "generator_mode": "source_corrupted",
+    "corruption_rate": 1.3333333333333333,
+    "num_samples": 2000000
+  },
+  "compute_budget": {
+    "num_filler": 36,
+    "length": 6,
+    "dimension": 3
+  },
+  "majority_class_baseline": 0.524,
+  "realized_mixture_counts": {
+    "parallel_cot": 999626,
+    "filler": 1000374,
+    "serial_cot": 0,
+    "immediate": 0,
+    "neutral": 0
+  },
+  "metrics": {
+    "filler_accuracy": 0.6085,
+    "early_stopping_per_seed": [
+      {
+        "enabled": true,
+        "metric": "filler_accuracy",
+        "target": 0.99,
+        "tolerance": 0.0,
+        "patience": 1,
+        "criterion_reached": false,
+        "criterion_reached_after_epoch": null,
+        "triggered": false,
+        "stopped_after_epoch": null,
+        "epochs_requested": 5,
+        "epochs_effective": 5,
+        "epochs_trained": 5
+      }
+    ],
+    "fixed_budget_run": true,
+    "immediate_protocol_per_seed": [
+      {
+        "enabled": false,
+        "applied": false,
+        "trigger": null,
+        "suppressed_trigger": null,
+        "epochs_requested": 5,
+        "epochs_effective": 5,
+        "weight_decay_requested": 0.01,
+        "weight_decay_effective": 0.01,
+        "grad_clip_requested": 1.0,
+        "grad_clip_effective": 1.0
+      }
+    ],
+    "immediate_protocol_applied_any_seed": false,
+    "filler_answer_prediction_counts_per_seed": [
+      {
+        "predicted_true": 1609,
+        "predicted_false": 391,
+        "predicted_other": 0,
+        "label_true": 1048,
+        "label_false": 952,
+        "total": 2000,
+        "degenerate_predictor": false
+      }
+    ],
+    "filler_answer_is_degenerate_any_seed": false,
+    "mean_accuracy": 0.6085,
+    "min_accuracy": 0.6085,
+    "max_accuracy": 0.6085,
+    "per_seed_accuracies": [
+      0.6085
+    ],
+    "best_online_training_answer_accuracy": 0.810145,
+    "best_online_training_answer_accuracy_by_format": {
+      "parallel_cot": 0.9999969988775802,
+      "filler": 0.6204349573259601,
+      "serial_cot": null,
+      "immediate": null,
+      "neutral": null
+    },
+    "cot_answer_given_cot_accuracy": 1.0,
+    "cot_pair_position_token_accuracy": 0.4676666666666667,
+    "cot_pair_position_semantic_accuracy": 0.9333333333333333,
+    "cot_pair_position_semantic_ceiling": 0.9333333333333333,
+    "cot_sum_token_accuracy": 0.4275838230210854,
+    "cot_sum_semantic_accuracy": 0.9981334255098514,
+    "cot_match_index_accuracy": 0.991588785046729,
+    "cot_result_semantic_accuracy": 0.9979,
+    "cot_result_nll": 0.9376535573323568,
+    "cot_result_nll_floor": 0.9287606679280599,
+    "cot_chance_baselines": {
+      "pair_position_token_accuracy": 0.16666666666666666,
+      "pair_position_semantic_accuracy": 0.3333333333333333,
+      "sum_token_accuracy": 0.09999999999999998,
+      "sum_semantic_accuracy": 0.27107500864154854,
+      "match_index_accuracy": 0.0625,
+      "match_index_accuracy_given_match_known": 0.4977414330218068,
+      "result_semantic_accuracy": 0.26363583333333335
+    },
+    "cot_first_slot_format_ambiguous": true,
+    "cot_per_pair": [
+      {
+        "pair_index": 0,
+        "i": 0,
+        "j": 1,
+        "result_count": 2000,
+        "pair_semantic_accuracy": 0.0,
+        "sum_semantic_accuracy": 0.9932470455824424,
+        "match_index_accuracy": 0.9865470852017937,
+        "result_semantic_accuracy": 0.9925
+      },
+      {
+        "pair_index": 1,
+        "i": 0,
+        "j": 2,
+        "result_count": 2000,
+        "pair_semantic_accuracy": 1.0,
+        "sum_semantic_accuracy": 0.9956331877729258,
+        "match_index_accuracy": 0.9821428571428571,
+        "result_semantic_accuracy": 0.9945
+      },
+      {
+        "pair_index": 2,
+        "i": 0,
+        "j": 3,
+        "result_count": 2000,
+        "pair_semantic_accuracy": 1.0,
+        "sum_semantic_accuracy": 0.9979035639412998,
+        "match_index_accuracy": 1.0,
+        "result_semantic_accuracy": 0.998
+      },
+      {
+        "pair_index": 3,
+        "i": 0,
+        "j": 4,
+        "result_count": 2000,
+        "pair_semantic_accuracy": 1.0,
+        "sum_semantic_accuracy": 1.0,
+        "match_index_accuracy": 1.0,
+        "result_semantic_accuracy": 1.0
+      },
+      {
+        "pair_index": 4,
+        "i": 0,
+        "j": 5,
+        "result_count": 2000,
+        "pair_semantic_accuracy": 1.0,
+        "sum_semantic_accuracy": 1.0,
+        "match_index_accuracy": null,
+        "result_semantic_accuracy": 1.0
+      },
+      {
+        "pair_index": 5,
+        "i": 1,
+        "j": 2,
+        "result_count": 2000,
+        "pair_semantic_accuracy": 1.0,
+        "sum_semantic_accuracy": 0.9956663055254604,
+        "match_index_accuracy": 0.9935064935064936,
+        "result_semantic_accuracy": 0.9955
+      },
+      {
+        "pair_index": 6,
+        "i": 1,
+        "j": 3,
+        "result_count": 2000,
+        "pair_semantic_accuracy": 1.0,
+        "sum_semantic_accuracy": 0.9957469431153642,
+        "match_index_accuracy": 1.0,
+        "result_semantic_accuracy": 0.996
+      },
+      {
+        "pair_index": 7,
+        "i": 1,
+        "j": 4,
+        "result_count": 2000,
+        "pair_semantic_accuracy": 1.0,
+        "sum_semantic_accuracy": 0.9984591679506933,
+        "match_index_accuracy": 1.0,
+        "result_semantic_accuracy": 0.9985
+      },
+      {
+        "pair_index": 8,
+        "i": 1,
+        "j": 5,
+        "result_count": 2000,
+        "pair_semantic_accuracy": 1.0,
+        "sum_semantic_accuracy": 1.0,
+        "match_index_accuracy": null,
+        "result_semantic_accuracy": 1.0
+      },
+      {
+        "pair_index": 9,
+        "i": 2,
+        "j": 3,
+        "result_count": 2000,
+        "pair_semantic_accuracy": 1.0,
+        "sum_semantic_accuracy": 0.998421052631579,
+        "match_index_accuracy": 0.99,
+        "result_semantic_accuracy": 0.998
+      },
+      {
+        "pair_index": 10,
+        "i": 2,
+        "j": 4,
+        "result_count": 2000,
+        "pair_semantic_accuracy": 1.0,
+        "sum_semantic_accuracy": 0.9974200206398349,
+        "match_index_accuracy": 1.0,
+        "result_semantic_accuracy": 0.9975
+      },
+      {
+        "pair_index": 11,
+        "i": 2,
+        "j": 5,
+        "result_count": 2000,
+        "pair_semantic_accuracy": 1.0,
+        "sum_semantic_accuracy": 1.0,
+        "match_index_accuracy": null,
+        "result_semantic_accuracy": 1.0
+      },
+      {
+        "pair_index": 12,
+        "i": 3,
+        "j": 4,
+        "result_count": 2000,
+        "pair_semantic_accuracy": 1.0,
+        "sum_semantic_accuracy": 0.9984646878198568,
+        "match_index_accuracy": 0.9782608695652174,
+        "result_semantic_accuracy": 0.998
+      },
+      {
+        "pair_index": 13,
+        "i": 3,
+        "j": 5,
+        "result_count": 2000,
+        "pair_semantic_accuracy": 1.0,
+        "sum_semantic_accuracy": 1.0,
+        "match_index_accuracy": null,
+        "result_semantic_accuracy": 1.0
+      },
+      {
+        "pair_index": 14,
+        "i": 4,
+        "j": 5,
+        "result_count": 2000,
+        "pair_semantic_accuracy": 1.0,
+        "sum_semantic_accuracy": 1.0,
+        "match_index_accuracy": null,
+        "result_semantic_accuracy": 1.0
+      }
+    ]
+  },
+  "metric_semantics": {
+    "best_online_training_answer_accuracy": "online fit diagnostic: best per-epoch answer accuracy accumulated from each training batch's existing forward pass before that batch's optimizer update. Mixed-format runs can be shortcut-contaminated, so use the per-format breakdown for interpretation.",
+    "best_online_training_answer_accuracy_by_format": "Best online answer accuracy split by realized training format.",
+    "cot_answer_given_cot_accuracy": "Final True/False accuracy when the ground-truth CoT prefix is teacher-forced; not evidence of independent 3SUM computation.",
+    "early_stopping_per_seed": "Per-seed early-stopping settings and outcome. criterion_reached records whether the patience rule was satisfied; triggered is true only when that criterion actually shortened the requested budget. Epoch-number fields are 1-based.",
+    "fixed_budget_run": "False only when at least one seed trained fewer epochs than requested. Reaching an early-stop criterion on the final requested epoch remains a fixed-budget run. Early-stopped runs select the epoch at which the metric first reached target, so their reported accuracy is an upward-biased peak rather than an end-of-budget measurement. Do NOT place them on the same accuracy-vs-compute curve as fixed-budget runs, and do not compare them across arms unless every arm stopped on the same rule.",
+    "immediate_protocol_per_seed": "Per-seed record of the immediate-answer protocol substitution, which fires when num_filler is 0 or the mixture is 'immediate'. It multiplies the requested epochs and replaces weight decay and gradient clip, so each value is reported both as requested and as it actually ran. enabled is false when the run was launched with --no-immediate_protocol; in that case suppressed_trigger names the condition the run met but did not act on.",
+    "immediate_protocol_applied_any_seed": "True when at least one seed ran under the immediate-answer protocol. Such a run trained more epochs than the canonical run config records, under a different weight decay and gradient clip. An N=0 arm is therefore NOT a compute-matched control for an N>0 arm from the same command line; read immediate_protocol_per_seed before comparing them.",
+    "filler_answer_prediction_counts_per_seed": "Predicted True/False/other histogram at the validation ANS position. Read this before interpreting any accuracy at or near majority_class_baseline.",
+    "filler_answer_is_degenerate_any_seed": "True when at least one seed emitted the same answer token for every validation example. Such a run has no accuracy signal, whatever the reported accuracy is.",
+    "cot_pair_position_token_accuracy": "STRUCTURAL, not computational: exact next-token accuracy on randomized reduced CoT pair tokens. Measures layout and positional counting, not 3SUM.",
+    "cot_pair_position_semantic_accuracy": "STRUCTURAL, not computational: pair-position accuracy accepting either valid summand token. Emitting labels[i] at every pair slot scores 1.0 without performing any pairwise computation, so this belongs with cot_answer_given_cot_accuracy rather than with the result metrics.",
+    "cot_pair_position_semantic_ceiling": "Hard ceiling on cot_pair_position_semantic_accuracy for this mixture. Formats share the tuple prefix and the ':' separator, so when a non-CoT format outweighs parallel_ratio/2 the first pair slot cannot be predicted and the ceiling is (pair_count - 1) / pair_count. A value at the ceiling means saturated, not partially learned.",
+    "cot_first_slot_format_ambiguous": "Whether the mixture makes the first post-separator target unpredictable from context; sets the ceiling above.",
+    "cot_sum_token_accuracy": "Exact next-token accuracy on sampled unmatched pair-sum tokens.",
+    "cot_sum_semantic_accuracy": "Unmatched pair-sum accuracy accepting any coordinate digit valid for the pair under vocabulary reduction.",
+    "cot_match_index_accuracy": "Exact accuracy for source-faithful matched-pair third-index tokens. Match slots are a small minority of result slots, so a model that has not learned 3SUM emits a sum digit everywhere and scores exactly 0.0; compare against the unconditional baseline, not the given-match-known one.",
+    "cot_result_semantic_accuracy": "Semantic accuracy across all CoT result slots (sum or match).",
+    "cot_result_nll": "Mean teacher-forced NLL over CoT result slots only.",
+    "cot_result_nll_floor": "Expected irreducible result-slot NLL from randomized coordinate selection; match-index targets are deterministic.",
+    "cot_chance_baselines": "Structured random baselines computed from the fixed validation layout and source-faithful k>j candidate sets. match_index_accuracy is the unconditional baseline (uniform choice over the result-slot vocabulary) and is the correct comparison for cot_match_index_accuracy. match_index_accuracy_given_match_known conditions on already knowing the pair matches and is reported for reference only; it is not a baseline any measured model competes against.",
+    "cot_per_pair": "Per-(i,j) specialization metrics in lexicographic pair order."
+  },
+  "eval_seed": 9999,
+  "val_samples": 2000,
+  "seeds_run": [
+    42
+  ],
+  "per_seed_details": [
+    {
+      "epoch_train_losses": [
+        0.6376158646470043,
+        0.4520026270993973,
+        0.3740745674869019,
+        0.3700808789136151,
+        0.3682131727375722
+      ],
+      "epoch_online_train_answer_accuracies": [
+        0.7731975,
+        0.7934125,
+        0.8001665,
+        0.805061,
+        0.810145
+      ],
+      "epoch_online_train_answer_accuracies_by_format": [
+        {
+          "parallel_cot": 0.9882285974954633,
+          "filler": 0.5583271856325734,
+          "serial_cot": null,
+          "immediate": null,
+          "neutral": null
+        },
+        {
+          "parallel_cot": 0.9999239715653655,
+          "filler": 0.5870554412649669,
+          "serial_cot": null,
+          "immediate": null,
+          "neutral": null
+        },
+        {
+          "parallel_cot": 0.9999879955103209,
+          "filler": 0.6004944150887568,
+          "serial_cot": null,
+          "immediate": null,
+          "neutral": null
+        },
+        {
+          "parallel_cot": 0.9999939977551604,
+          "filler": 0.6102737576146521,
+          "serial_cot": null,
+          "immediate": null,
+          "neutral": null
+        },
+        {
+          "parallel_cot": 0.9999969988775802,
+          "filler": 0.6204349573259601,
+          "serial_cot": null,
+          "immediate": null,
+          "neutral": null
+        }
+      ],
+      "best_online_train_answer_accuracy": 0.810145,
+      "best_online_train_answer_accuracy_by_format": {
+        "parallel_cot": 0.9999969988775802,
+        "filler": 0.6204349573259601,
+        "serial_cot": null,
+        "immediate": null,
+        "neutral": null
+      },
+      "epoch_filler_accuracies": [
+        0.5725,
+        0.5685,
+        0.5825,
+        0.6,
+        0.6085
+      ],
+      "epoch_filler_answer_prediction_counts": [
+        {
+          "predicted_true": 1649,
+          "predicted_false": 351,
+          "predicted_other": 0,
+          "label_true": 1048,
+          "label_false": 952,
+          "total": 2000,
+          "degenerate_predictor": false
+        },
+        {
+          "predicted_true": 1721,
+          "predicted_false": 279,
+          "predicted_other": 0,
+          "label_true": 1048,
+          "label_false": 952,
+          "total": 2000,
+          "degenerate_predictor": false
+        },
+        {
+          "predicted_true": 1793,
+          "predicted_false": 207,
+          "predicted_other": 0,
+          "label_true": 1048,
+          "label_false": 952,
+          "total": 2000,
+          "degenerate_predictor": false
+        },
+        {
+          "predicted_true": 1650,
+          "predicted_false": 350,
+          "predicted_other": 0,
+          "label_true": 1048,
+          "label_false": 952,
+          "total": 2000,
+          "degenerate_predictor": false
+        },
+        {
+          "predicted_true": 1609,
+          "predicted_false": 391,
+          "predicted_other": 0,
+          "label_true": 1048,
+          "label_false": 952,
+          "total": 2000,
+          "degenerate_predictor": false
+        }
+      ],
+      "best_filler_accuracy": 0.6085,
+      "best_filler_answer_prediction_counts": {
+        "predicted_true": 1609,
+        "predicted_false": 391,
+        "predicted_other": 0,
+        "label_true": 1048,
+        "label_false": 952,
+        "total": 2000,
+        "degenerate_predictor": false
+      },
+      "epochs_trained": 5,
+      "epochs_requested": 5,
+      "epochs_effective": 5,
+      "immediate_protocol": {
+        "enabled": false,
+        "applied": false,
+        "trigger": null,
+        "suppressed_trigger": null,
+        "epochs_requested": 5,
+        "epochs_effective": 5,
+        "weight_decay_requested": 0.01,
+        "weight_decay_effective": 0.01,
+        "grad_clip_requested": 1.0,
+        "grad_clip_effective": 1.0
+      },
+      "early_stopping": {
+        "enabled": true,
+        "metric": "filler_accuracy",
+        "target": 0.99,
+        "tolerance": 0.0,
+        "patience": 1,
+        "criterion_reached": false,
+        "criterion_reached_after_epoch": null,
+        "triggered": false,
+        "stopped_after_epoch": null,
+        "epochs_requested": 5,
+        "epochs_effective": 5,
+        "epochs_trained": 5
+      },
+      "execution_protocol": {
+        "tf32_matmul": false,
+        "torch_compile": true,
+        "grouped_execution": true,
+        "precision": "bf16"
+      },
+      "grouped_execution_stats": {
+        "target_positions_saved": 29988780,
+        "head_positions": 360011220,
+        "unsupervised_head_positions": 0,
+        "supervised_head_fraction": 1.0
+      },
+      "weight_decay": 0.01,
+      "grad_clip": 1.0,
+      "adam_betas": [
+        0.9,
+        0.95
+      ],
+      "lr_schedule": "linear_warmup_decay",
+      "warmup_fraction": 0.05,
+      "optimizer_steps": 312500,
+      "epoch_end_learning_rates": [
+        8e-05,
+        6e-05,
+        4e-05,
+        1.9999999999999995e-05,
+        0.0
+      ],
+      "epoch_seconds": [
+        10864.442705099995,
+        10462.139845999998,
+        10530.763255099999,
+        10472.67873710001,
+        10541.3634112
+      ],
+      "total_train_seconds": 52871.3879545,
+      "data_wait_seconds": 71.65785219803001,
+      "data_wait_fraction": 0.0013553238333689527,
+      "samples_per_second": 189.13821609158035,
+      "resolved_vocab_size": 1145,
+      "output_vocab_size": 32000,
+      "input_feature_dim": 44,
+      "compact_reduced_input_features": true,
+      "precision": "bf16",
+      "fused_adamw": true,
+      "rwkv_kernel": "cuda",
+      "loss_reporting_syncs_per_epoch": 1,
+      "validation_result_syncs_per_pass": 1,
+      "non_blocking_transfers": true,
+      "train_dataset_storage_bytes": 52000000,
+      "validation_dataset_storage_bytes": 52000,
+      "cuda_peak_memory_allocated_bytes": 3657316352,
+      "cuda_peak_memory_reserved_bytes": 4154458112,
+      "initialization": {
+        "mode": "pretrained",
+        "pretrained_scope": "backbone_only",
+        "checkpoint_path": "C:\\Users\\Staff\\Documents\\Anitgravity\\models\\rwkv7-g1d-0.1b-20260129-ctx8192.pth",
+        "checkpoint_sha256": "e10d7b1930c2644c5c6b194444774d6d82ec8212a78763493149de09aac7d83f",
+        "source_architecture": {
+          "architecture": "rwkv7_x070",
+          "num_hidden_layers": 12,
+          "hidden_size": 768,
+          "intermediate_size": 3072,
+          "head_dim": 64,
+          "num_attention_heads": 12
+        },
+        "target_architecture": {
+          "architecture": "rwkv7_x070",
+          "num_hidden_layers": 12,
+          "hidden_size": 768,
+          "intermediate_size": 3072,
+          "head_dim": 64,
+          "num_attention_heads": 12
+        },
+        "strict_backbone_load": true,
+        "ignored_source_keys": [
+          "emb.weight",
+          "head.weight"
+        ],
+        "retained_target_defaults": [],
+        "task_interface_init": "random",
+        "shared_match3_input_features": true
+      },
+      "checkpointing": {
+        "enabled": true,
+        "checkpoint_version": 1,
+        "checkpoint_every_steps": 5000,
+        "checkpoint_dir": "C:\\Users\\Staff\\Documents\\Anitgravity\\results\\exp0_0b_pilot\\n36\\checkpoints\\c923f49572cadb88\\seed_42",
+        "resumed_from": null,
+        "exact_mid_epoch_resume": true
+      },
+      "epoch_cot_diagnostics": [
+        {
+          "cot_answer_given_cot_accuracy": 1.0,
+          "cot_pair_position_token_accuracy": 0.466,
+          "cot_pair_position_semantic_accuracy": 0.9333333333333333,
+          "cot_pair_position_semantic_ceiling": 0.9333333333333333,
+          "cot_first_slot_format_ambiguous": true,
+          "cot_sum_token_accuracy": 0.16194262011752505,
+          "cot_sum_semantic_accuracy": 0.41728309713100586,
+          "cot_match_index_accuracy": 0.7214953271028037,
+          "cot_result_semantic_accuracy": 0.4281333333333333,
+          "cot_result_nll": 2.02856401163737,
+          "cot_result_nll_floor": 0.9287606679280599,
+          "cot_chance_baselines": {
+            "pair_position_token_accuracy": 0.16666666666666666,
+            "pair_position_semantic_accuracy": 0.3333333333333333,
+            "sum_token_accuracy": 0.09999999999999998,
+            "sum_semantic_accuracy": 0.27107500864154854,
+            "match_index_accuracy": 0.0625,
+            "match_index_accuracy_given_match_known": 0.4977414330218068,
+            "result_semantic_accuracy": 0.26363583333333335
+          },
+          "cot_per_pair": [
+            {
+              "pair_index": 0,
+              "i": 0,
+              "j": 1,
+              "pair_semantic_accuracy": 0.0,
+              "sum_semantic_accuracy": 0.32583005064715814,
+              "match_index_accuracy": 0.5964125560538116,
+              "result_semantic_accuracy": 0.356,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 1,
+              "i": 0,
+              "j": 2,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.3346069868995633,
+              "match_index_accuracy": 0.6130952380952381,
+              "result_semantic_accuracy": 0.358,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 2,
+              "i": 0,
+              "j": 3,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.3752620545073375,
+              "match_index_accuracy": 0.7282608695652174,
+              "result_semantic_accuracy": 0.3915,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 3,
+              "i": 0,
+              "j": 4,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.41037493579866463,
+              "match_index_accuracy": 0.9056603773584906,
+              "result_semantic_accuracy": 0.4235,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 4,
+              "i": 0,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.47,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 0.47,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 5,
+              "i": 1,
+              "j": 2,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.34507042253521125,
+              "match_index_accuracy": 0.6428571428571429,
+              "result_semantic_accuracy": 0.368,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 6,
+              "i": 1,
+              "j": 3,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.3896863370547581,
+              "match_index_accuracy": 0.773109243697479,
+              "result_semantic_accuracy": 0.4125,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 7,
+              "i": 1,
+              "j": 4,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.42424242424242425,
+              "match_index_accuracy": 0.9056603773584906,
+              "result_semantic_accuracy": 0.437,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 8,
+              "i": 1,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.455,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 0.455,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 9,
+              "i": 2,
+              "j": 3,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.4031578947368421,
+              "match_index_accuracy": 0.82,
+              "result_semantic_accuracy": 0.424,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 10,
+              "i": 2,
+              "j": 4,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.4391124871001032,
+              "match_index_accuracy": 0.9838709677419355,
+              "result_semantic_accuracy": 0.456,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 11,
+              "i": 2,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.4975,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 0.4975,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 12,
+              "i": 3,
+              "j": 4,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.43398157625383826,
+              "match_index_accuracy": 0.8478260869565217,
+              "result_semantic_accuracy": 0.4435,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 13,
+              "i": 3,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.4575,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 0.4575,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 14,
+              "i": 4,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.472,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 0.472,
+              "result_count": 2000
+            }
+          ],
+          "cot_diagnostic_counts": {
+            "pair_position_tokens": 30000,
+            "sum_results": 28930,
+            "match_results": 1070,
+            "all_results": 30000,
+            "answers": 2000
+          }
+        },
+        {
+          "cot_answer_given_cot_accuracy": 1.0,
+          "cot_pair_position_token_accuracy": 0.4676666666666667,
+          "cot_pair_position_semantic_accuracy": 0.9333333333333333,
+          "cot_pair_position_semantic_ceiling": 0.9333333333333333,
+          "cot_first_slot_format_ambiguous": true,
+          "cot_sum_token_accuracy": 0.4275838230210854,
+          "cot_sum_semantic_accuracy": 0.9920152091254753,
+          "cot_match_index_accuracy": 0.8841121495327103,
+          "cot_result_semantic_accuracy": 0.9881666666666666,
+          "cot_result_nll": 0.9884181365966797,
+          "cot_result_nll_floor": 0.9287606679280599,
+          "cot_chance_baselines": {
+            "pair_position_token_accuracy": 0.16666666666666666,
+            "pair_position_semantic_accuracy": 0.3333333333333333,
+            "sum_token_accuracy": 0.09999999999999998,
+            "sum_semantic_accuracy": 0.27107500864154854,
+            "match_index_accuracy": 0.0625,
+            "match_index_accuracy_given_match_known": 0.4977414330218068,
+            "result_semantic_accuracy": 0.26363583333333335
+          },
+          "cot_per_pair": [
+            {
+              "pair_index": 0,
+              "i": 0,
+              "j": 1,
+              "pair_semantic_accuracy": 0.0,
+              "sum_semantic_accuracy": 0.9684862127180641,
+              "match_index_accuracy": 0.7533632286995515,
+              "result_semantic_accuracy": 0.9445,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 1,
+              "i": 0,
+              "j": 2,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9814410480349345,
+              "match_index_accuracy": 0.9404761904761905,
+              "result_semantic_accuracy": 0.978,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 2,
+              "i": 0,
+              "j": 3,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9916142557651991,
+              "match_index_accuracy": 0.9456521739130435,
+              "result_semantic_accuracy": 0.9895,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 3,
+              "i": 0,
+              "j": 4,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9958911145351823,
+              "match_index_accuracy": 0.9622641509433962,
+              "result_semantic_accuracy": 0.995,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 4,
+              "i": 0,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9985,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 0.9985,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 5,
+              "i": 1,
+              "j": 2,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9821235102925244,
+              "match_index_accuracy": 0.8441558441558441,
+              "result_semantic_accuracy": 0.9715,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 6,
+              "i": 1,
+              "j": 3,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.987772461456672,
+              "match_index_accuracy": 0.9159663865546218,
+              "result_semantic_accuracy": 0.9835,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 7,
+              "i": 1,
+              "j": 4,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9953775038520801,
+              "match_index_accuracy": 0.9245283018867925,
+              "result_semantic_accuracy": 0.9935,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 8,
+              "i": 1,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 1.0,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 1.0,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 9,
+              "i": 2,
+              "j": 3,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9926315789473684,
+              "match_index_accuracy": 0.92,
+              "result_semantic_accuracy": 0.989,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 10,
+              "i": 2,
+              "j": 4,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9938080495356038,
+              "match_index_accuracy": 0.9193548387096774,
+              "result_semantic_accuracy": 0.9915,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 11,
+              "i": 2,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.998,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 0.998,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 12,
+              "i": 3,
+              "j": 4,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9928352098259979,
+              "match_index_accuracy": 0.9782608695652174,
+              "result_semantic_accuracy": 0.9925,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 13,
+              "i": 3,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9975,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 0.9975,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 14,
+              "i": 4,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 1.0,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 1.0,
+              "result_count": 2000
+            }
+          ],
+          "cot_diagnostic_counts": {
+            "pair_position_tokens": 30000,
+            "sum_results": 28930,
+            "match_results": 1070,
+            "all_results": 30000,
+            "answers": 2000
+          }
+        },
+        {
+          "cot_answer_given_cot_accuracy": 1.0,
+          "cot_pair_position_token_accuracy": 0.4642,
+          "cot_pair_position_semantic_accuracy": 0.9333333333333333,
+          "cot_pair_position_semantic_ceiling": 0.9333333333333333,
+          "cot_first_slot_format_ambiguous": true,
+          "cot_sum_token_accuracy": 0.42547528517110267,
+          "cot_sum_semantic_accuracy": 0.9966816453508469,
+          "cot_match_index_accuracy": 0.9738317757009346,
+          "cot_result_semantic_accuracy": 0.9958666666666667,
+          "cot_result_nll": 0.9522382176717122,
+          "cot_result_nll_floor": 0.9287606679280599,
+          "cot_chance_baselines": {
+            "pair_position_token_accuracy": 0.16666666666666666,
+            "pair_position_semantic_accuracy": 0.3333333333333333,
+            "sum_token_accuracy": 0.09999999999999998,
+            "sum_semantic_accuracy": 0.27107500864154854,
+            "match_index_accuracy": 0.0625,
+            "match_index_accuracy_given_match_known": 0.4977414330218068,
+            "result_semantic_accuracy": 0.26363583333333335
+          },
+          "cot_per_pair": [
+            {
+              "pair_index": 0,
+              "i": 0,
+              "j": 1,
+              "pair_semantic_accuracy": 0.0,
+              "sum_semantic_accuracy": 0.9887450759707372,
+              "match_index_accuracy": 0.9820627802690582,
+              "result_semantic_accuracy": 0.988,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 1,
+              "i": 0,
+              "j": 2,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9918122270742358,
+              "match_index_accuracy": 0.9464285714285714,
+              "result_semantic_accuracy": 0.988,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 2,
+              "i": 0,
+              "j": 3,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9942348008385744,
+              "match_index_accuracy": 0.9782608695652174,
+              "result_semantic_accuracy": 0.9935,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 3,
+              "i": 0,
+              "j": 4,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9989727786337956,
+              "match_index_accuracy": 1.0,
+              "result_semantic_accuracy": 0.999,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 4,
+              "i": 0,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 1.0,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 1.0,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 5,
+              "i": 1,
+              "j": 2,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9918743228602384,
+              "match_index_accuracy": 0.961038961038961,
+              "result_semantic_accuracy": 0.9895,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 6,
+              "i": 1,
+              "j": 3,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9946836788942052,
+              "match_index_accuracy": 0.9663865546218487,
+              "result_semantic_accuracy": 0.993,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 7,
+              "i": 1,
+              "j": 4,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9969183359013868,
+              "match_index_accuracy": 0.9811320754716981,
+              "result_semantic_accuracy": 0.9965,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 8,
+              "i": 1,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 1.0,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 1.0,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 9,
+              "i": 2,
+              "j": 3,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9978947368421053,
+              "match_index_accuracy": 0.98,
+              "result_semantic_accuracy": 0.997,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 10,
+              "i": 2,
+              "j": 4,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9974200206398349,
+              "match_index_accuracy": 1.0,
+              "result_semantic_accuracy": 0.9975,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 11,
+              "i": 2,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 1.0,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 1.0,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 12,
+              "i": 3,
+              "j": 4,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9969293756397134,
+              "match_index_accuracy": 1.0,
+              "result_semantic_accuracy": 0.997,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 13,
+              "i": 3,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.999,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 0.999,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 14,
+              "i": 4,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 1.0,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 1.0,
+              "result_count": 2000
+            }
+          ],
+          "cot_diagnostic_counts": {
+            "pair_position_tokens": 30000,
+            "sum_results": 28930,
+            "match_results": 1070,
+            "all_results": 30000,
+            "answers": 2000
+          }
+        },
+        {
+          "cot_answer_given_cot_accuracy": 1.0,
+          "cot_pair_position_token_accuracy": 0.4668,
+          "cot_pair_position_semantic_accuracy": 0.9333333333333333,
+          "cot_pair_position_semantic_ceiling": 0.9333333333333333,
+          "cot_first_slot_format_ambiguous": true,
+          "cot_sum_token_accuracy": 0.4256481161424127,
+          "cot_sum_semantic_accuracy": 0.9979605945385414,
+          "cot_match_index_accuracy": 0.983177570093458,
+          "cot_result_semantic_accuracy": 0.9974333333333333,
+          "cot_result_nll": 0.9437333048502604,
+          "cot_result_nll_floor": 0.9287606679280599,
+          "cot_chance_baselines": {
+            "pair_position_token_accuracy": 0.16666666666666666,
+            "pair_position_semantic_accuracy": 0.3333333333333333,
+            "sum_token_accuracy": 0.09999999999999998,
+            "sum_semantic_accuracy": 0.27107500864154854,
+            "match_index_accuracy": 0.0625,
+            "match_index_accuracy_given_match_known": 0.4977414330218068,
+            "result_semantic_accuracy": 0.26363583333333335
+          },
+          "cot_per_pair": [
+            {
+              "pair_index": 0,
+              "i": 0,
+              "j": 1,
+              "pair_semantic_accuracy": 0.0,
+              "sum_semantic_accuracy": 0.9926842993809791,
+              "match_index_accuracy": 0.9865470852017937,
+              "result_semantic_accuracy": 0.992,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 1,
+              "i": 0,
+              "j": 2,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9945414847161572,
+              "match_index_accuracy": 0.9821428571428571,
+              "result_semantic_accuracy": 0.9935,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 2,
+              "i": 0,
+              "j": 3,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9968553459119497,
+              "match_index_accuracy": 0.9891304347826086,
+              "result_semantic_accuracy": 0.9965,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 3,
+              "i": 0,
+              "j": 4,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 1.0,
+              "match_index_accuracy": 1.0,
+              "result_semantic_accuracy": 1.0,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 4,
+              "i": 0,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 1.0,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 1.0,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 5,
+              "i": 1,
+              "j": 2,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9956663055254604,
+              "match_index_accuracy": 0.9675324675324676,
+              "result_semantic_accuracy": 0.9935,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 6,
+              "i": 1,
+              "j": 3,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9962785752259437,
+              "match_index_accuracy": 0.9915966386554622,
+              "result_semantic_accuracy": 0.996,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 7,
+              "i": 1,
+              "j": 4,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9979455572675912,
+              "match_index_accuracy": 0.9811320754716981,
+              "result_semantic_accuracy": 0.9975,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 8,
+              "i": 1,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 1.0,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 1.0,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 9,
+              "i": 2,
+              "j": 3,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.998421052631579,
+              "match_index_accuracy": 0.99,
+              "result_semantic_accuracy": 0.998,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 10,
+              "i": 2,
+              "j": 4,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9979360165118679,
+              "match_index_accuracy": 0.9838709677419355,
+              "result_semantic_accuracy": 0.9975,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 11,
+              "i": 2,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 1.0,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 1.0,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 12,
+              "i": 3,
+              "j": 4,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9979529170931423,
+              "match_index_accuracy": 0.9565217391304348,
+              "result_semantic_accuracy": 0.997,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 13,
+              "i": 3,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 1.0,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 1.0,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 14,
+              "i": 4,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 1.0,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 1.0,
+              "result_count": 2000
+            }
+          ],
+          "cot_diagnostic_counts": {
+            "pair_position_tokens": 30000,
+            "sum_results": 28930,
+            "match_results": 1070,
+            "all_results": 30000,
+            "answers": 2000
+          }
+        },
+        {
+          "cot_answer_given_cot_accuracy": 1.0,
+          "cot_pair_position_token_accuracy": 0.4625,
+          "cot_pair_position_semantic_accuracy": 0.9333333333333333,
+          "cot_pair_position_semantic_ceiling": 0.9333333333333333,
+          "cot_first_slot_format_ambiguous": true,
+          "cot_sum_token_accuracy": 0.42640857241617697,
+          "cot_sum_semantic_accuracy": 0.9981334255098514,
+          "cot_match_index_accuracy": 0.991588785046729,
+          "cot_result_semantic_accuracy": 0.9979,
+          "cot_result_nll": 0.9376535573323568,
+          "cot_result_nll_floor": 0.9287606679280599,
+          "cot_chance_baselines": {
+            "pair_position_token_accuracy": 0.16666666666666666,
+            "pair_position_semantic_accuracy": 0.3333333333333333,
+            "sum_token_accuracy": 0.09999999999999998,
+            "sum_semantic_accuracy": 0.27107500864154854,
+            "match_index_accuracy": 0.0625,
+            "match_index_accuracy_given_match_known": 0.4977414330218068,
+            "result_semantic_accuracy": 0.26363583333333335
+          },
+          "cot_per_pair": [
+            {
+              "pair_index": 0,
+              "i": 0,
+              "j": 1,
+              "pair_semantic_accuracy": 0.0,
+              "sum_semantic_accuracy": 0.9932470455824424,
+              "match_index_accuracy": 0.9865470852017937,
+              "result_semantic_accuracy": 0.9925,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 1,
+              "i": 0,
+              "j": 2,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9956331877729258,
+              "match_index_accuracy": 0.9821428571428571,
+              "result_semantic_accuracy": 0.9945,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 2,
+              "i": 0,
+              "j": 3,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9979035639412998,
+              "match_index_accuracy": 1.0,
+              "result_semantic_accuracy": 0.998,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 3,
+              "i": 0,
+              "j": 4,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 1.0,
+              "match_index_accuracy": 1.0,
+              "result_semantic_accuracy": 1.0,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 4,
+              "i": 0,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 1.0,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 1.0,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 5,
+              "i": 1,
+              "j": 2,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9956663055254604,
+              "match_index_accuracy": 0.9935064935064936,
+              "result_semantic_accuracy": 0.9955,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 6,
+              "i": 1,
+              "j": 3,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9957469431153642,
+              "match_index_accuracy": 1.0,
+              "result_semantic_accuracy": 0.996,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 7,
+              "i": 1,
+              "j": 4,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9984591679506933,
+              "match_index_accuracy": 1.0,
+              "result_semantic_accuracy": 0.9985,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 8,
+              "i": 1,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 1.0,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 1.0,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 9,
+              "i": 2,
+              "j": 3,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.998421052631579,
+              "match_index_accuracy": 0.99,
+              "result_semantic_accuracy": 0.998,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 10,
+              "i": 2,
+              "j": 4,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9974200206398349,
+              "match_index_accuracy": 1.0,
+              "result_semantic_accuracy": 0.9975,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 11,
+              "i": 2,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 1.0,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 1.0,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 12,
+              "i": 3,
+              "j": 4,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 0.9984646878198568,
+              "match_index_accuracy": 0.9782608695652174,
+              "result_semantic_accuracy": 0.998,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 13,
+              "i": 3,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 1.0,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 1.0,
+              "result_count": 2000
+            },
+            {
+              "pair_index": 14,
+              "i": 4,
+              "j": 5,
+              "pair_semantic_accuracy": 1.0,
+              "sum_semantic_accuracy": 1.0,
+              "match_index_accuracy": null,
+              "result_semantic_accuracy": 1.0,
+              "result_count": 2000
+            }
+          ],
+          "cot_diagnostic_counts": {
+            "pair_position_tokens": 30000,
+            "sum_results": 28930,
+            "match_results": 1070,
+            "all_results": 30000,
+            "answers": 2000
+          }
+        }
+      ],
+      "best_cot_diagnostics": {
+        "cot_answer_given_cot_accuracy": 1.0,
+        "cot_pair_position_token_accuracy": 0.4676666666666667,
+        "cot_pair_position_semantic_accuracy": 0.9333333333333333,
+        "cot_sum_token_accuracy": 0.4275838230210854,
+        "cot_sum_semantic_accuracy": 0.9981334255098514,
+        "cot_match_index_accuracy": 0.991588785046729,
+        "cot_result_semantic_accuracy": 0.9979,
+        "cot_result_nll": 0.9376535573323568,
+        "cot_result_nll_floor": 0.9287606679280599,
+        "cot_chance_baselines": {
+          "pair_position_token_accuracy": 0.16666666666666666,
+          "pair_position_semantic_accuracy": 0.3333333333333333,
+          "sum_token_accuracy": 0.09999999999999998,
+          "sum_semantic_accuracy": 0.27107500864154854,
+          "match_index_accuracy": 0.0625,
+          "match_index_accuracy_given_match_known": 0.4977414330218068,
+          "result_semantic_accuracy": 0.26363583333333335
+        },
+        "cot_per_pair": [
+          {
+            "pair_index": 0,
+            "i": 0,
+            "j": 1,
+            "pair_semantic_accuracy": 0.0,
+            "sum_semantic_accuracy": 0.9932470455824424,
+            "match_index_accuracy": 0.9865470852017937,
+            "result_semantic_accuracy": 0.9925,
+            "result_count": 2000
+          },
+          {
+            "pair_index": 1,
+            "i": 0,
+            "j": 2,
+            "pair_semantic_accuracy": 1.0,
+            "sum_semantic_accuracy": 0.9956331877729258,
+            "match_index_accuracy": 0.9821428571428571,
+            "result_semantic_accuracy": 0.9945,
+            "result_count": 2000
+          },
+          {
+            "pair_index": 2,
+            "i": 0,
+            "j": 3,
+            "pair_semantic_accuracy": 1.0,
+            "sum_semantic_accuracy": 0.9979035639412998,
+            "match_index_accuracy": 1.0,
+            "result_semantic_accuracy": 0.998,
+            "result_count": 2000
+          },
+          {
+            "pair_index": 3,
+            "i": 0,
+            "j": 4,
+            "pair_semantic_accuracy": 1.0,
+            "sum_semantic_accuracy": 1.0,
+            "match_index_accuracy": 1.0,
+            "result_semantic_accuracy": 1.0,
+            "result_count": 2000
+          },
+          {
+            "pair_index": 4,
+            "i": 0,
+            "j": 5,
+            "pair_semantic_accuracy": 1.0,
+            "sum_semantic_accuracy": 1.0,
+            "match_index_accuracy": null,
+            "result_semantic_accuracy": 1.0,
+            "result_count": 2000
+          },
+          {
+            "pair_index": 5,
+            "i": 1,
+            "j": 2,
+            "pair_semantic_accuracy": 1.0,
+            "sum_semantic_accuracy": 0.9956663055254604,
+            "match_index_accuracy": 0.9935064935064936,
+            "result_semantic_accuracy": 0.9955,
+            "result_count": 2000
+          },
+          {
+            "pair_index": 6,
+            "i": 1,
+            "j": 3,
+            "pair_semantic_accuracy": 1.0,
+            "sum_semantic_accuracy": 0.9957469431153642,
+            "match_index_accuracy": 1.0,
+            "result_semantic_accuracy": 0.996,
+            "result_count": 2000
+          },
+          {
+            "pair_index": 7,
+            "i": 1,
+            "j": 4,
+            "pair_semantic_accuracy": 1.0,
+            "sum_semantic_accuracy": 0.9984591679506933,
+            "match_index_accuracy": 1.0,
+            "result_semantic_accuracy": 0.9985,
+            "result_count": 2000
+          },
+          {
+            "pair_index": 8,
+            "i": 1,
+            "j": 5,
+            "pair_semantic_accuracy": 1.0,
+            "sum_semantic_accuracy": 1.0,
+            "match_index_accuracy": null,
+            "result_semantic_accuracy": 1.0,
+            "result_count": 2000
+          },
+          {
+            "pair_index": 9,
+            "i": 2,
+            "j": 3,
+            "pair_semantic_accuracy": 1.0,
+            "sum_semantic_accuracy": 0.998421052631579,
+            "match_index_accuracy": 0.99,
+            "result_semantic_accuracy": 0.998,
+            "result_count": 2000
+          },
+          {
+            "pair_index": 10,
+            "i": 2,
+            "j": 4,
+            "pair_semantic_accuracy": 1.0,
+            "sum_semantic_accuracy": 0.9974200206398349,
+            "match_index_accuracy": 1.0,
+            "result_semantic_accuracy": 0.9975,
+            "result_count": 2000
+          },
+          {
+            "pair_index": 11,
+            "i": 2,
+            "j": 5,
+            "pair_semantic_accuracy": 1.0,
+            "sum_semantic_accuracy": 1.0,
+            "match_index_accuracy": null,
+            "result_semantic_accuracy": 1.0,
+            "result_count": 2000
+          },
+          {
+            "pair_index": 12,
+            "i": 3,
+            "j": 4,
+            "pair_semantic_accuracy": 1.0,
+            "sum_semantic_accuracy": 0.9984646878198568,
+            "match_index_accuracy": 0.9782608695652174,
+            "result_semantic_accuracy": 0.998,
+            "result_count": 2000
+          },
+          {
+            "pair_index": 13,
+            "i": 3,
+            "j": 5,
+            "pair_semantic_accuracy": 1.0,
+            "sum_semantic_accuracy": 1.0,
+            "match_index_accuracy": null,
+            "result_semantic_accuracy": 1.0,
+            "result_count": 2000
+          },
+          {
+            "pair_index": 14,
+            "i": 4,
+            "j": 5,
+            "pair_semantic_accuracy": 1.0,
+            "sum_semantic_accuracy": 1.0,
+            "match_index_accuracy": null,
+            "result_semantic_accuracy": 1.0,
+            "result_count": 2000
+          }
+        ],
+        "cot_pair_position_semantic_ceiling": 0.9333333333333333,
+        "cot_first_slot_format_ambiguous": true
+      },
+      "cot_diagnostic_counts": {
+        "pair_position_tokens": 30000,
+        "sum_results": 28930,
+        "match_results": 1070,
+        "all_results": 30000,
+        "answers": 2000
+      },
+      "seed": 42,
+      "training_seed": 42,
+      "task_seed": 42
+    }
+  ]
+}
