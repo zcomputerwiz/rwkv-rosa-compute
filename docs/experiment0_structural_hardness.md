@@ -87,10 +87,33 @@ interest is the sample efficiency of each N, not an asymptotic capability
 difference, and every arm needs enough budget for its own convergence before the
 comparison means anything.
 
-Caveats on this single run: one seed (42, not 43/45/45), fp32 rather than bf16,
-and n=1. The 96.4% versus 21-53% gap is far outside the seed variance seen
-anywhere else here, but a matched 10M N=36 arm is what would close the argument
-properly.
+### The matched N=36 arm, and how large the effect is
+
+That matched arm has now been run: same 10M dataset, seed 42, early stopping at
+`filler_accuracy 0.99`. **It stopped after one epoch.**
+
+```text
+                            presentations   canonical   challenge   near_3plus
+N=0  @ 10M x 5 epochs             50M         99.30%      98.85%      96.40%
+N=36 @ 10M x 1 epoch (stopped)    10M         99.95%      99.98%     100.00%
+```
+
+N=36 reaches a higher score on **one fifth** of the data, and solves the hard
+negatives completely where N=0 is still 3.6% short at five times the budget. Its
+prediction bias is -0.05% (1047 predicted true against 1048 actual), against the
++14 to +25% of the undertrained 2M seeds.
+
+So the sample-efficiency reading is confirmed and the magnitude is large — this
+is roughly a 5x data advantage on this task, not a marginal acceleration. What
+it is *not* is a capability separation: both arms essentially solve the task
+given enough budget, which is what the 2M-only comparison could not distinguish.
+
+Caveats. Early stopping selects a peak rather than an end-of-budget measurement,
+so this number is upward-biased by construction and must not go on an
+accuracy-vs-compute curve beside fixed-budget runs. The protocol also differs
+from the reference (bf16 + `torch.compile` + fused AdamW versus fp32), and both
+are n=1 on seed 42. It establishes "N=36 converges to ceiling, fast" — not a
+numerical head-to-head.
 
 ## Both arms are bimodal, and that is the finding
 

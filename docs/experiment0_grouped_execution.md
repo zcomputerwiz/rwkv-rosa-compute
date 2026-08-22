@@ -611,9 +611,16 @@ batch   grouped peak   % of 8 GiB   throughput        status
    48      8.66 GiB      108%         22.5 samples/s  <- host-spill cliff
 ```
 
-Batch 32 at 75% occupancy is the safe production recommendation. Batch 40
-achieves the peak compute throughput (98 samples/s) but leaves minimal safety
-margin (93% VRAM). The cliff at 48 is a 4x throughput penalty and unambiguous.
+Batch 32 at 75% occupancy is the safe production recommendation. The cliff at
+48 is a 4x throughput penalty and unambiguous.
+
+Two cautions on the pressure zone. The curve is **not** monotonic — batch 36
+(88.6) sits below batch 32 (89.8) before batch 40 rises to 98.0 — and batch 40
+moved from 58.9 to 98.0 samples/s between measurements, a 66% swing, with its
+memory reading shifting 7.63 to 7.42 GiB. That zone is unstable rather than
+resolved, so batch 40's "peak throughput" rests on one re-run that disagreed
+with its predecessor by two thirds. Treat anything above batch 36 as
+provisional.
 
 ### Weaker than it looks: fused AdamW does not transfer
 
@@ -630,9 +637,22 @@ Power draw was monitored via `nvidia-smi` during 200 sustained steps of the
 optimizer benchmark. During the execution loop, power draw sits at **~28 Watts**
 (graphics clock 1290 MHz, memory clock 6501 MHz, temp 62°C), far below the 80W
 laptop power cap limit (which is only briefly approached during initialization).
-The ~71 GB/s is the raw sequential DRAM streaming bandwidth achieved on this
-memory bus; because 1.84 GB exceeds both L2 caches, both `foreach` and `fused`
-stream identically through DRAM.
+So the power cap is ruled out — that hypothesis is disproven, not merely
+unsupported.
+
+**What replaced it is not established either.** 71 GB/s is **16% of this card's
+~448 GB/s peak** (256-bit GDDR6 at 14 Gbps), so it is not a DRAM streaming
+limit; Ada reaches 54% of its own peak running the same kernel over the same
+1.84 GB. The L2 argument fails independently: that working set is 59x Ada's L2
+and 471x Ampere's, so neither card holds it and cache size cannot be what
+separates 2.714x from 0.991x.
+
+The measurement is solid and reproducible; the mechanism is open. An `ncu` run
+against the fused AdamW kernel would settle whether it is bandwidth-bound at
+all — `dram__throughput` answered the equivalent question for the elementwise
+block in one command. Until then, record this as an unexplained 6x gap in
+achieved bandwidth between the two cards rather than as a hardware ceiling,
+because "hardware limit" closes an investigation that should stay open.
 
 ### Recurrence verdict re-measured with fixed harness (2000 steps)
 
