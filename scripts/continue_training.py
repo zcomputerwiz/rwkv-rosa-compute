@@ -128,6 +128,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--peak-lr", type=float, default=None,
                         help="default: the source run's last nonzero LR")
     parser.add_argument("--warmup-fraction", type=float, default=0.05)
+    parser.add_argument("--batch-size", type=int, default=None,
+                        help="override the source run's batch size. This is a "
+                             "FURTHER intervention on top of the new schedule: "
+                             "it changes the optimizer step count and gradient "
+                             "noise, so the continuation is not comparable to "
+                             "the source run's own epochs either.")
     parser.add_argument("--eval-seed", type=int, default=9999)
     parser.add_argument("--val-samples", type=int, default=2000)
     parser.add_argument("--out", type=Path, default=None)
@@ -138,11 +144,17 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.additional_epochs <= 0:
         parser.error("--additional-epochs must be positive")
+    if args.batch_size is not None and args.batch_size <= 0:
+        parser.error("--batch-size must be positive")
 
     state = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     signature = state["signature"]
     progress = state["progress"]
     model_cfg, train_cfg, task_cfg = configs_from_signature(signature)
+
+    source_batch_size = train_cfg.batch_size
+    if args.batch_size is not None and args.batch_size != source_batch_size:
+        train_cfg = replace(train_cfg, batch_size=args.batch_size)
 
     completed = int(progress["epoch"])
     if completed < int(signature["epochs"]):
@@ -163,6 +175,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"continuation epochs : {args.additional_epochs}")
     print(f"fresh schedule peak : {peak_lr:g} (warmup {args.warmup_fraction})")
     print(f"train samples       : {task_cfg.num_samples}")
+    if train_cfg.batch_size != source_batch_size:
+        print(f"batch size          : {train_cfg.batch_size} "
+              f"(OVERRIDDEN from {source_batch_size})")
+    else:
+        print(f"batch size          : {train_cfg.batch_size}")
+    print(f"train precision     : {train_cfg.precision}")
     if args.dry_run:
         print("\ndry run: nothing trained.")
         return 0
@@ -221,6 +239,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     scheduler = build_schedule(optimizer, steps_per_epoch * args.additional_epochs,
                                args.warmup_fraction)
     criterion = torch.nn.CrossEntropyLoss(ignore_index=-100)
+    # The source run's precision governs training too. Evaluating in bf16 while
+    # training in fp32 would extend a bf16 run under different numerics, which
+    # confounds whatever the continuation is meant to measure.
+    autocast_dtype = {"bf16": torch.bfloat16, "fp16": torch.float16}.get(
+        train_cfg.precision)
+    use_amp = autocast_dtype is not None and device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=train_cfg.precision == "fp16")
     ans_id = vocab.token2id["ANS"]
     true_id, false_id = vocab.token2id["True"], vocab.token2id["False"]
 
@@ -232,12 +257,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         loss_sum, loss_count = 0.0, 0
         for index, batch in enumerate(loader):
             optimizer.zero_grad(set_to_none=True)
-            logits = model.loss_logits(batch["input_tuples"].to(device),
-                                       batch["targets"].to(device))
-            loss = supervised_cross_entropy(logits, batch, criterion, device)
-            loss.backward()
+            with torch.autocast("cuda", dtype=autocast_dtype, enabled=use_amp):
+                logits = model.loss_logits(batch["input_tuples"].to(device),
+                                           batch["targets"].to(device))
+                loss = supervised_cross_entropy(logits, batch, criterion, device)
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             scheduler.step()
             loss_sum += float(loss.detach())
             loss_count += 1
@@ -257,6 +285,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     report = {
         "continuation_version": CONTINUATION_VERSION,
         "is_canonical_experiment_result": False,
+        "source_batch_size": source_batch_size,
+        "batch_size": train_cfg.batch_size,
+        "batch_size_overridden": train_cfg.batch_size != source_batch_size,
+        "train_precision": train_cfg.precision,
         "distribution_note": (
             "Continuation of a completed run under a NEW learning-rate schedule. "
             "Not a fixed-budget run and not comparable to arms that stopped at "
