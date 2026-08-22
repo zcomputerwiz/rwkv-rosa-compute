@@ -21,6 +21,9 @@ outputs record the same value.
 ## Headline
 
 Every seed favours N=36, and the benefit is concentrated in the hard negatives.
+**Read the next section before quoting any of this**: the same arm at 5x the
+data reaches 96.4% on those hard negatives without filler tokens, so what
+follows measures sample efficiency, not a capability gap.
 
 ```text
                      N=0      N=36     easy gain   hard gain   interaction
@@ -41,6 +44,53 @@ instances every N=0 seed solved and every N=36 seed missed :  0
 
 That asymmetry requires agreement across six independently trained models, so
 no single seed can produce it.
+
+## The effect is sample efficiency, not capability separation
+
+The obvious question this design cannot answer on its own is whether N=0 simply
+needs more data. It is answerable for free: `ef1125605d565142` is a completed
+N=0 run at 10M x 5 (5x this experiment's budget) with resumable checkpoints, and
+evaluating it on the frozen challenge set is inference over 6000 instances.
+
+```text
+corrupted_negative_near_3plus (the hard negatives)
+  N=0  @  2M x 5     42.3% / 53.3% / 21.3%    mean 38.97%
+  N=36 @  2M x 5     47.6% / 100.0% / 33.6%   mean 60.50%
+  N=0  @ 10M x 5     96.40%                   same arm, 5x data
+```
+
+**N=0 at full budget nearly solves the hard negatives**, beating two of the
+three N=36 seeds at 2M and approaching the transitioned seed's 100%. Its
+canonical accuracy reproduces the recorded 99.30% exactly, so the evaluation is
+sound.
+
+Full stratum profile of the 10M reference:
+
+```text
+positive_arm_positive             98.80%
+corrupted_arm_surviving_positive  98.40%
+corrupted_negative_near_0        100.00%
+corrupted_negative_near_1         99.90%
+corrupted_negative_near_2         99.60%
+corrupted_negative_near_3plus     96.40%
+True-prediction bias               +0.2%
+```
+
+So filler tokens **accelerate convergence** rather than unlocking a capability
+N=0 cannot reach. The structural gradient reported below is a property of
+undertrained models, and it flattens as training proceeds regardless of whether
+the extra compute comes from filler tokens or from more data.
+
+That is a real result, but a weaker one than "filler tokens enable hard-instance
+reasoning". It also changes what an N-sweep would measure: the quantity of
+interest is the sample efficiency of each N, not an asymptotic capability
+difference, and every arm needs enough budget for its own convergence before the
+comparison means anything.
+
+Caveats on this single run: one seed (42, not 43/45/45), fp32 rather than bf16,
+and n=1. The 96.4% versus 21-53% gap is far outside the seed variance seen
+anywhere else here, but a matched 10M N=36 arm is what would close the argument
+properly.
 
 ## Both arms are bimodal, and that is the finding
 
@@ -85,12 +135,32 @@ seed 45   positive_arm_positive             +1.40%   p = 3.38e-01
 ```
 
 Filler tokens are helping the model **reject near-miss negatives**, not find
-true positives. Supporting evidence: the True-prediction bias collapses from
-+14.1 / +9.8 / +25.4 percentage points at N=0 to +4.8 / +0.0 / +7.9 at N=36.
+true positives.
 
-The structural gradient itself is monotonic within every seed of both arms, so
-it is not an artefact of that bias — a uniform bias would depress all four
-negative strata equally rather than order them.
+The obvious objection is that this is just a decision-threshold shift: predict
+False more often, gain on negatives, lose on positives. It is not, and the
+cleanest disproof needs no appeal to stratum monotonicity. On the challenge set
+the True-prediction bias does move toward False, and positive accuracy rises
+anyway:
+
+```text
+          True-bias  N=0 -> N=36     positive_arm_positive
+seed 43      +14.1%  ->  +11.8%             +1.6%
+seed 45      +25.4%  ->  +17.2%             +1.4%
+```
+
+A pure threshold shift toward False **must** lower positive accuracy, because
+fewer positives are predicted True. Positives went up in both seeds. The model
+is discriminating better, not deciding differently.
+
+The 10M N=0 reference is the same phenomenon at its endpoint: bias +0.2% with
+98.8% on positives. Calibration and discrimination improve together as training
+proceeds — which is consistent with the sample-efficiency reading above rather
+than with filler tokens supplying a distinct mechanism.
+
+(Both bias figures above are measured on the challenge set. An earlier revision
+quoted canonical-validation biases alongside challenge-set accuracies; the
+argument holds either way but the numbers must come from one measurement.)
 
 ## Statistical cautions
 
@@ -108,10 +178,13 @@ x 3 seeds). Most p-values survive any correction comfortably, but seed 43's
 should not be described as trends.
 
 **Both arms train on 5x less data than the earlier N=0 reference run**
-(`ef1125605d565142`, 10M x 5 = 50M presentations, 99.30% accuracy). At 2M x 5
-the arms sit near the phase transition, which is why seed variance is large. If
-the transition rate is the quantity of interest, more seeds at this budget will
-answer it better than more data per seed.
+(`ef1125605d565142`, 10M x 5 = 50M presentations, 99.30% accuracy). That gap is
+now resolved rather than merely flagged — see the sample-efficiency section: the
+reference clears the hard negatives at 96.4% with no filler tokens at all. At
+2M x 5 both arms sit near the phase transition, which is why seed variance is
+large. If the transition rate is the quantity of interest, more seeds at this
+budget answer it better than more data per seed; if the asymptotic difference
+is, a matched 10M N=36 arm is required and this experiment does not address it.
 
 ## Reproducing
 

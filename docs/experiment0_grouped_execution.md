@@ -61,33 +61,50 @@ Grouping trades avoided work against fixed per-group launch overhead. The
 avoided work scales with batch size; the overhead does not.
 
 ```text
+Ada (RTX 4060 Ti)
 batch 24   0.958x   grouping is SLOWER
 batch 48   1.335x
 batch 64   padded path does not fit in 16 GiB
 ```
 
-At batch 24 splitting one launch into two costs more than the skipped padding
-saves when running under `torch.compile` on Ada. However, on eager execution (or platforms without inductor fusion), grouped execution avoids enough head projection overhead to show a **1.202x speedup** even at batch 24.
+At batch 24 on Ada, splitting one launch into two costs more than the skipped
+padding saves.
 
-### 8 GiB VRAM Card Validation (Ampere sm_86, RTX 3070 Laptop)
+**That crossover is hardware-dependent.** On Ampere (RTX 3070 Laptop, 8 GiB) the
+same batch 24 gives **1.202x** — grouping wins where it lost on Ada. The trade is
+fixed launch overhead against avoided compute, so a slower GPU makes the avoided
+compute worth relatively more. Do not assume either the batch-48 figure or the
+batch-24 crossover transfers between cards.
 
-On 8 GiB cards, grouped execution is not merely an optimization but an **enabler of batch scalability**:
+Both of those batch-24 measurements were taken with `--no-compile`, so the
+difference is the card, not the compilation mode. An earlier draft attributed
+the Ada slowdown to `torch.compile`; that is not what the runs did.
+
+### 8 GiB cards: grouping is what makes the batch reachable
+
+Measured on Ampere (RTX 3070 Laptop, 8 GiB), eager:
 
 ```text
-Batch 24 (both fit under 8 GiB in eager mode):
-  padded : 6.56 GiB peak, 324.14 ms/step (55.2% supervised head positions)
-  grouped: 4.38 GiB peak (-33.2% / -2.18 GiB), 269.77 ms/step (1.202x speedup)
+batch 24   padded   6.56 GiB   324.14 ms/step   55.2% supervised head positions
+           grouped  4.38 GiB   269.77 ms/step  100.0%          -33.2% memory, 1.202x
 
-Batch 32:
-  padded : 8.54 GiB peak -> spills over PCIe into host RAM (1,937.51 ms/step)
-  grouped: 6.12 GiB peak -> fits cleanly in 8 GiB VRAM (330.62 ms/step)
+batch 32   padded   8.54 GiB  1937.51 ms/step   SPILLS to host over PCIe
+           grouped  6.12 GiB   330.62 ms/step   fits cleanly
 
-Batch 48:
-  padded : ~9.76 GiB (unrunnable without severe PCIe allocator thrash)
-  grouped: ~5.03 GiB (with torch.compile) / 6.12-8.41 GiB (eager mode)
+batch 48   padded   ~9.76 GiB  unrunnable without severe allocator thrash
+           grouped  5.03 GiB compiled / 6.12-8.41 GiB eager
 ```
 
-Host spill signature: when padded execution exceeds device VRAM (e.g. 8.54 GiB on an 8 GiB device), GPU load reads 100% with elevated PCIe bus utilization (10-16%) while compute is stalled waiting on host memory pages. Timings from any spilling configuration must be discarded as allocator thrash.
+So on an 8 GiB card grouping is not merely an optimization — without it, batch
+32 and above cannot run at all. Note also that the grouped path costs more
+memory eager than compiled (6.12-8.41 vs 5.03 GiB at batch 48), so a
+configuration sized under `--compile` may not fit without it.
+
+**Host-spill signature**, worth recognizing because the timings it produces look
+like data: GPU utilization reads 100% while PCIe bus utilization sits at 10-16%
+and the memory controller is near idle — the device is waiting on host pages,
+not computing. The batch-32 padded row above is 5.9x slower than the grouped row
+for that reason. Discard timings from any spilling configuration.
 
 An earlier measurement of this at batch 64 produced "11.7x". That number was an
 artifact: peak allocation reached 16.41 GiB on a 16 GiB card, so the padded path
@@ -406,6 +423,21 @@ degradation. Hence 70% as the operating point rather than 90%: allocator
 behaviour varies batch to batch, and a configuration averaging 90% will
 occasionally land past the cliff mid-run.
 
+Peak memory is **not linear in batch size**, which matters when predicting
+whether a configuration fits:
+
+```text
+                       padded    grouped
+batch 24 (both cards)   6.56       3.87-4.38
+batch 32 (Ampere)       8.54       6.12
+batch 48 (Ada)          9.76       6.13
+```
+
+Scaling the batch-48 figure linearly predicts 6.51 GiB for batch 32; the
+measured value is 8.54 GiB, a 24% underestimate that put a run into host-memory
+spill on an 8 GiB card. There is a large batch-independent component, so
+size configurations from a measurement at the target batch, not from a ratio.
+
 The batch-192 row is instrumentation failure, not data: it reports GPU time
 22790 ms against wall 16573 ms, a negative gap, which is impossible. Under
 host-memory spill the profiler's kernel accounting stops corresponding to wall
@@ -497,3 +529,38 @@ implementation carrying the stable-`.grad` constraint documented above.
 padded  + foreach + compile, batch 48    148.8 samp/s   1.00x
 grouped + fused   + compile, batch 96    263.7 samp/s   1.77x
 ```
+
+## Incompatible with torch.compile on the Llama path
+
+`--grouped_execution` and `--compile` together fail during inductor codegen for
+the 0A Llama model:
+
+```text
+torch._inductor.exc.InductorError: CantSplit:
+  73728*s50 + 442368 not divisible by 192*s50 + 1152
+```
+
+`s50` is a symbolic dimension. Grouping makes the subgroup batch size dynamic,
+and inductor cannot split the resulting iteration ranges for this model's
+shapes. Each option works alone:
+
+```text
+--compile --fused_adamw                       OK
+--grouped_execution --fused_adamw             OK
+--compile --grouped_execution --fused_adamw   fails in inductor codegen
+```
+
+The failure is slow — it hangs in codegen rather than erroring promptly — so a
+long run started with both will appear to be warming up for minutes before
+dying. Smoke-test the combination on a small `--num_samples` before committing
+GPU hours to it.
+
+This did not appear in the RWKV 0B benchmarks, where the same two options
+coexist without recompiles after warmup. The difference is shape structure, not
+a defect in either option: RWKV pads time to CHUNK_LEN multiples, so its
+subgroup shapes are coarser, while Llama passes the raw lengths through.
+
+Until this is resolved, treat the two as mutually exclusive on the Llama path
+and pick by measurement: `torch.compile` is worth 1.31x on 0A shapes (#32),
+while grouped execution's benefit on Llama has not been measured on GPU at all
+- every grouped benchmark in this document is RWKV 0B.
