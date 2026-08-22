@@ -76,6 +76,36 @@ fixed launch overhead against avoided compute, so a slower GPU makes the avoided
 compute worth relatively more. Do not assume either the batch-48 figure or the
 batch-24 crossover transfers between cards.
 
+Both of those batch-24 measurements were taken with `--no-compile`, so the
+difference is the card, not the compilation mode. An earlier draft attributed
+the Ada slowdown to `torch.compile`; that is not what the runs did.
+
+### 8 GiB cards: grouping is what makes the batch reachable
+
+Measured on Ampere (RTX 3070 Laptop, 8 GiB), eager:
+
+```text
+batch 24   padded   6.56 GiB   324.14 ms/step   55.2% supervised head positions
+           grouped  4.38 GiB   269.77 ms/step  100.0%          -33.2% memory, 1.202x
+
+batch 32   padded   8.54 GiB  1937.51 ms/step   SPILLS to host over PCIe
+           grouped  6.12 GiB   330.62 ms/step   fits cleanly
+
+batch 48   padded   ~9.76 GiB  unrunnable without severe allocator thrash
+           grouped  5.03 GiB compiled / 6.12-8.41 GiB eager
+```
+
+So on an 8 GiB card grouping is not merely an optimization — without it, batch
+32 and above cannot run at all. Note also that the grouped path costs more
+memory eager than compiled (6.12-8.41 vs 5.03 GiB at batch 48), so a
+configuration sized under `--compile` may not fit without it.
+
+**Host-spill signature**, worth recognizing because the timings it produces look
+like data: GPU utilization reads 100% while PCIe bus utilization sits at 10-16%
+and the memory controller is near idle — the device is waiting on host pages,
+not computing. The batch-32 padded row above is 5.9x slower than the grouped row
+for that reason. Discard timings from any spilling configuration.
+
 An earlier measurement of this at batch 64 produced "11.7x". That number was an
 artifact: peak allocation reached 16.41 GiB on a 16 GiB card, so the padded path
 was thrashing the allocator rather than computing. It is recorded here because
