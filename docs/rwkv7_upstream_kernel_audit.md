@@ -74,8 +74,37 @@ negative on large-L2 parts, and any adoption should be gated on the target
 architecture rather than decided globally.
 
 Scale, before anyone spends effort on it: the recurrence is about 8.5% of step
-time, so 1.104x on that slice is roughly 0.9% end to end. Real, measured, and
-small.
+time on Ada and 4-6% on Ampere, so 1.104x on that slice is roughly 0.5-0.9% end
+to end. Small either way.
+
+**Both measurements are underpowered and this verdict is provisional.** The
+harness runs 30 iterations of a ~0.5 ms kernel — about **10 milliseconds** of
+actual GPU timing per variant, on cards whose clocks are managed on 100 ms to
+second timescales, one of them power-capped. The 10.4% Ampere difference sits
+against a within-run stdev near 3%, so the direction is plausible, but neither
+the Ada rejection nor the Ampere adoption is established by a window that short.
+
+The harness had a second defect, worse than the short window. It allocated the
+operator's output, saved chunk state and `sa` buffer **inside the timing loop** —
+about 58 MB per iteration at the CoT shape, 42 MB of it the state tensor — plus
+six `.contiguous()` calls and a `torch.cuda.synchronize()` per step. A 0.5 ms
+measurement was therefore kernel time plus allocator bookkeeping plus sync, while
+the difference under test is a few percent of the total. Both the Ada and Ampere
+figures were produced this way.
+
+`scripts/benchmark_rwkv7_recurrence_variants.py` now preallocates the workspace
+once, reuses it, times with CUDA events rather than wall clock, and defaults to
+2000 iterations instead of 30. Re-run it on both cards before acting on either
+verdict. Note this affects the timing comparison only: the
+correctness result (max deviation 0.0002 against an 0.08 tolerance on both
+cards) is unaffected, since that is a numerical check rather than a timed one.
+
+A separate caution on interpreting the Ampere step profile: the recurrence being
+a smaller *share* of step time there (4.1-6.2% versus 8.5%) is not evidence that
+v3 helped. `v3` is not wired into `rwkv_cuda.py`; those profiles ran the current
+vendored kernel, and its absolute cost was 18.6 ms in both the padded and
+grouped runs. The share differs because the surrounding work is relatively
+slower on that card.
 
 ## Original Ada measurement (correct, but Ada-only)
 

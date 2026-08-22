@@ -564,3 +564,99 @@ Until this is resolved, treat the two as mutually exclusive on the Llama path
 and pick by measurement: `torch.compile` is worth 1.31x on 0A shapes (#32),
 while grouped execution's benefit on Llama has not been measured on GPU at all
 - every grouped benchmark in this document is RWKV 0B.
+
+
+## Ampere cross-check (RTX 3070 Laptop, sm_86, 8 GiB, 4 MiB L2)
+
+Three Ada conclusions were re-measured on Ampere. One held, one reversed, and
+one turns out to rest on too little data on both cards. They are separated below
+by how much weight the measurement can carry, because the timing windows differ
+by three orders of magnitude.
+
+### Solid: Track F stays rejected
+
+`ncu` on the isolated TimeMix elementwise block:
+
+```text
+                          dram__throughput   lts__throughput   sm__throughput
+Ada    vectorized              82-85%             41-44%           58-64%
+Ampere vectorized              86-89%             44-48%           13-14%
+```
+
+Ampere is at 86-89% of DRAM peak, comparable to Ada's 83%. The concern that
+Ada's 32 MiB L2 was masking DRAM headroom - the mechanism that reversed the v3
+verdict - does not apply here. **The six upstream fused TimeMix/ChannelMix
+kernels stay rejected on both architectures.**
+
+Ampere did surface a distinction Ada's profile did not separate. Unvectorized
+broadcast kernels are **compute-bound, not bandwidth-bound**: 44% DRAM against
+50-66% SM, spent on integer division and modulo for broadcast indexing. The
+`[1, 1, C]` parameter broadcasts in TimeMix are the likely source. That is the
+one part of the elementwise block with real headroom, and it is an indexing
+problem rather than a bandwidth one.
+
+### Solid: memory, and the 8 GiB operating point
+
+Peak allocation is deterministic, so these do not depend on timing windows.
+
+```text
+batch   grouped peak   % of 8 GiB   throughput
+   24      5.24 GiB       65%         80.1 samples/s
+   32      5.98 GiB       75%         89.8 samples/s   <- operating point
+   36      6.43 GiB       80%         88.6 samples/s
+   40      7.63 GiB       95%         58.9 samples/s
+   48      8.66 GiB      108%         22.5 samples/s   <- host-spill cliff
+```
+
+Batch 32 at 75% occupancy is the recommendation. The cliff at 48 is a 4x
+throughput penalty and unambiguous.
+
+The 40 and 44 rows are non-monotonic - batch 44 measured *faster* than 40 while
+using more memory - which is allocator variance in the pressure zone. Do not
+quote either without re-measuring.
+
+### Weaker than it looks: fused AdamW does not transfer
+
+```text
+                foreach     fused    achieved BW (fused)
+Ada             32.01 ms   11.80 ms    156 GB/s  (54% of 288 peak)
+Ampere          25.60 ms   26.80 ms     69 GB/s  (15% of 448 peak)
+```
+
+**`--fused_adamw` must not be assumed portable.** It is worth 2.714x on Ada and
+nothing on Ampere.
+
+The mechanism originally proposed for this - that Ada's larger L2 keeps
+parameter chunks hot - does not survive arithmetic. AdamW streams param, grad,
+`exp_avg` and `exp_avg_sq`: 1.84 GB at 115M parameters, which is 59x Ada's L2
+and 471x Ampere's. Neither card holds that working set. A likelier explanation
+is the power cap: the 3070 Laptop was observed pinned at 79W of an 80W limit,
+and both variants landing at 15-16% of its rated bandwidth looks like a
+throttled ceiling reached regardless of kernel. Checking `power.draw` against
+`power.limit` during the benchmark would settle it.
+
+### Too short to trust: the v3 recurrence verdict, on BOTH cards
+
+The recurrence A/B measures 30 iterations of a ~0.5 ms kernel:
+
+```text
+benchmark                  steps   per-step   total measured
+recurrence A/B (v3)           30     0.50 ms       0.01 s
+optimizer variants            50    25.60 ms       1.28 s
+profile_exp0_step             12   375.00 ms       4.50 s
+grouped benchmark             24   300.00 ms       7.20 s
+```
+
+**Ten milliseconds of GPU time.** A laptop GPU manages clocks on 100 ms to
+second timescales, and this card is power-capped, so burst-versus-sustained
+clock behaviour is a live variable rather than a hypothetical.
+
+This applies equally to the Ada measurement that produced the original
+rejection - same `--steps 30`, same exposure. The Ampere/Ada difference is 10.4%
+against a within-run stdev of roughly 3%, so the direction may well be real, but
+neither number is established by a window that short, and the audit's
+architecture-dependent framing should be read as provisional until re-run with
+enough steps to cover several seconds of sustained execution.
+
+The memory and `ncu` figures above are unaffected: peak allocation is
+deterministic and `ncu` reads hardware counters per kernel launch.

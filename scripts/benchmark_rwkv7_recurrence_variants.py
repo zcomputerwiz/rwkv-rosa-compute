@@ -25,7 +25,6 @@ import os
 import statistics
 import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -83,12 +82,14 @@ def load_variant(name: str):
     return getattr(torch.ops, spec["ns"])
 
 
-def call_variant(ops, r, raw_w, k, v, a, b):
-    """Forward through the raw operator, mirroring _RWKV7ClampW.forward.
+def make_workspace(ops, r, raw_w, k, v, a, b):
+    """Preallocate everything the operator writes into, once.
 
-    The kernel takes the PRE-softplus decay parameter and applies the transform
-    internally; only the PyTorch oracle receives the transformed value. Tensors
-    are 4D [B, T, H, N] and bf16, and T must already be chunk-aligned.
+    The output, saved chunk state and `sa` buffer total ~58 MB at the CoT shape
+    (42 MB of that is the state tensor). Allocating them inside the timing loop
+    meant a ~0.5 ms measurement was kernel time plus allocator bookkeeping, and
+    the kernel difference under test is a few percent of that. Hoisted so the
+    timed region contains the launch and nothing else.
     """
     import torch
 
@@ -103,6 +104,12 @@ def call_variant(ops, r, raw_w, k, v, a, b):
         batch, timesteps, heads, head_dim,
         dtype=torch.float32, device=r.device,
     )
+    return tensors, out, state, sa
+
+
+def call_variant(ops, workspace):
+    """Launch the operator against a preallocated workspace."""
+    tensors, out, state, sa = workspace
     ops.forward(*tensors, out, state, sa)
     return out
 
@@ -148,10 +155,13 @@ def run_variant(name: str, shapes: List[Dict[str, int]], steps: int) -> Dict[str
             raw["r"].float(), raw["w"].float(), raw["k"].float(),
             raw["v"].float(), raw["a"].float(), raw["b"].float(),
         )
-        fused_out = call_variant(
+        workspace = make_workspace(
             ops, as_4d["r"], as_4d["w"], as_4d["k"],
             as_4d["v"], as_4d["a"], as_4d["b"],
-        ).reshape(shape["batch"], shape["timesteps"], shape["hidden"])
+        )
+        fused_out = call_variant(ops, workspace).reshape(
+            shape["batch"], shape["timesteps"], shape["hidden"]
+        )
         try:
             torch.testing.assert_close(
                 fused_out.float(), ref_out.float(),
@@ -164,17 +174,22 @@ def run_variant(name: str, shapes: List[Dict[str, int]], steps: int) -> Dict[str
         max_abs = float((fused_out.float() - ref_out.float()).abs().max())
 
         # --- timing, forward only (the backward needs the autograd wrapper)
-        args_4d = (as_4d["r"], as_4d["w"], as_4d["k"],
-                   as_4d["v"], as_4d["a"], as_4d["b"])
-        for _ in range(3):
-            call_variant(ops, *args_4d)
+        for _ in range(10):
+            call_variant(ops, workspace)
         torch.cuda.synchronize()
+
+        # CUDA events time the device directly, so host-side launch latency and
+        # the per-iteration synchronize that wall-clock timing needs are both
+        # out of the measurement.
         per_step = []
+        start_ev = torch.cuda.Event(enable_timing=True)
+        end_ev = torch.cuda.Event(enable_timing=True)
         for _ in range(steps):
-            start = time.perf_counter()
-            call_variant(ops, *args_4d)
-            torch.cuda.synchronize()
-            per_step.append(time.perf_counter() - start)
+            start_ev.record()
+            call_variant(ops, workspace)
+            end_ev.record()
+            end_ev.synchronize()
+            per_step.append(start_ev.elapsed_time(end_ev) / 1e3)
 
         result["shapes"].append({
             **shape,
@@ -191,7 +206,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--variant", choices=sorted(VARIANTS), default=None,
                         help="Internal: run exactly one variant in this process.")
-    parser.add_argument("--steps", type=int, default=30)
+    parser.add_argument("--steps", type=int, default=2000,
+                    help="Iterations per shape. The kernel is sub-millisecond, so "
+                         "the default covers seconds of sustained execution rather "
+                         "than the ~10 ms the previous default of 30 measured.")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
