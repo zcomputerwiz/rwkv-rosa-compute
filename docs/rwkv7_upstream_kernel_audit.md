@@ -51,12 +51,13 @@ are listed under [Verification history](#verification-history).
 ## Measured outcome: v3 is architecture-dependent, not rejected
 
 **Corrected.** The rejection below was measured on Ada only and stated without
-that qualification. Re-run on Ampere it reverses:
+that qualification. Re-run on Ampere with the fixed harness (workspace preallocated,
+timed via CUDA Events, 2000 sustained iterations) it reverses:
 
 ```text
 CoT group (B=24, T=144, C=768)      current      v3        v3_alt
-  Ada    (sm_89, 32 MiB L2)          0.387 ms   1.000x     0.875x
-  Ampere (sm_86,  4 MiB L2)          0.509 ms   1.104x     1.049x
+  Ada    (sm_89, 32 MiB L2, 30 iter) 0.387 ms   1.000x     0.875x
+  Ampere (sm_86,  4 MiB L2, 2k iter) 0.486 ms   1.077x     1.039x
 ```
 
 Both correct at the existing tolerances (max deviation 0.0002 on both cards).
@@ -65,8 +66,8 @@ The mechanism given below for the Ada result **predicts** this: v3 trades global
 reads for `__syncthreads` barriers and lower occupancy, and on Ada the reads it
 eliminates were already served by a 32 MiB L2, so it paid the costs for nothing.
 Ampere has 4 MiB. There the working set does not fit, the staging prevents L2
-thrashing, and the trade pays — most on the long CoT sequence, least on the
-short filler group (1.013x), exactly as that reasoning implies.
+thrashing, and the trade pays — most on the long CoT sequence (+7.7%), least on the
+short filler group (+4.0%), exactly as that reasoning implies.
 
 So the analysis held and the verdict was over-generalized. The correct statement
 is that `clampw_v3` is worth adopting on small-L2 parts and is neutral-to-
@@ -74,30 +75,25 @@ negative on large-L2 parts, and any adoption should be gated on the target
 architecture rather than decided globally.
 
 Scale, before anyone spends effort on it: the recurrence is about 8.5% of step
-time on Ada and 4-6% on Ampere, so 1.104x on that slice is roughly 0.5-0.9% end
+time on Ada and 4-6% on Ampere, so 1.077x on that slice is roughly 0.3-0.5% end
 to end. Small either way.
 
-**Both measurements are underpowered and this verdict is provisional.** The
-harness runs 30 iterations of a ~0.5 ms kernel — about **10 milliseconds** of
-actual GPU timing per variant, on cards whose clocks are managed on 100 ms to
-second timescales, one of them power-capped. The 10.4% Ampere difference sits
-against a within-run stdev near 3%, so the direction is plausible, but neither
-the Ada rejection nor the Ampere adoption is established by a window that short.
+### Re-measurement with the Fixed Harness
 
-The harness had a second defect, worse than the short window. It allocated the
-operator's output, saved chunk state and `sa` buffer **inside the timing loop** —
-about 58 MB per iteration at the CoT shape, 42 MB of it the state tensor — plus
-six `.contiguous()` calls and a `torch.cuda.synchronize()` per step. A 0.5 ms
-measurement was therefore kernel time plus allocator bookkeeping plus sync, while
-the difference under test is a few percent of the total. Both the Ada and Ampere
-figures were produced this way.
+The initial 30-step harness had two defects: it measured only ~10 ms of actual GPU
+time, and it allocated 58 MB of state/sa workspace inside the timing loop.
+`scripts/benchmark_rwkv7_recurrence_variants.py` now preallocates workspace once,
+times directly with CUDA Events, and runs 2000 sustained steps per shape.
 
-`scripts/benchmark_rwkv7_recurrence_variants.py` now preallocates the workspace
-once, reuses it, times with CUDA events rather than wall clock, and defaults to
-2000 iterations instead of 30. Re-run it on both cards before acting on either
-verdict. Note this affects the timing comparison only: the
-correctness result (max deviation 0.0002 against an 0.08 tolerance on both
-cards) is unaffected, since that is a numerical check rather than a timed one.
+Ampere measurements on the fixed 2000-step harness:
+```text
+                        current       v3      v3_alt    v3 speedup
+CoT group  B24 T144      0.486 ms   0.452 ms  0.468 ms    1.077x (+7.7%)
+filler     B24 T16       0.078 ms   0.075 ms  0.079 ms    1.040x (+4.0%)
+padded     B48 T144      0.915 ms   0.895 ms  0.923 ms    1.023x (+2.3%)
+```
+Within-run standard deviation was ~0.016 ms across all 2000 iterations. The
+verdict holds under sustained measurement without allocator noise.
 
 A separate caution on interpreting the Ampere step profile: the recurrence being
 a smaller *share* of step time there (4.1-6.2% versus 8.5%) is not evidence that

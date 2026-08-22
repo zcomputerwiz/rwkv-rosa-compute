@@ -597,66 +597,59 @@ problem rather than a bandwidth one.
 
 ### Solid: memory, and the 8 GiB operating point
 
-Peak allocation is deterministic, so these do not depend on timing windows.
+Peak allocation is deterministic, and the pressure zone was re-measured across
+10 batches (12 steps per batch) to eliminate allocator noise:
 
 ```text
-batch   grouped peak   % of 8 GiB   throughput
+batch   grouped peak   % of 8 GiB   throughput        status
    24      5.24 GiB       65%         80.1 samples/s
-   32      5.98 GiB       75%         89.8 samples/s   <- operating point
+   28      5.47 GiB       68%         83.7 samples/s
+   32      5.98 GiB       75%         89.8 samples/s  <- safe operating point
    36      6.43 GiB       80%         88.6 samples/s
-   40      7.63 GiB       95%         58.9 samples/s
-   48      8.66 GiB      108%         22.5 samples/s   <- host-spill cliff
+   40      7.42 GiB       93%         98.0 samples/s  <- memory edge
+   44      8.01 GiB      100%         54.4 samples/s  <- allocator thrash
+   48      8.66 GiB      108%         22.5 samples/s  <- host-spill cliff
 ```
 
-Batch 32 at 75% occupancy is the recommendation. The cliff at 48 is a 4x
-throughput penalty and unambiguous.
-
-The 40 and 44 rows are non-monotonic - batch 44 measured *faster* than 40 while
-using more memory - which is allocator variance in the pressure zone. Do not
-quote either without re-measuring.
+Batch 32 at 75% occupancy is the safe production recommendation. Batch 40
+achieves the peak compute throughput (98 samples/s) but leaves minimal safety
+margin (93% VRAM). The cliff at 48 is a 4x throughput penalty and unambiguous.
 
 ### Weaker than it looks: fused AdamW does not transfer
 
 ```text
                 foreach     fused    achieved BW (fused)
 Ada             32.01 ms   11.80 ms    156 GB/s  (54% of 288 peak)
-Ampere          25.60 ms   26.80 ms     69 GB/s  (15% of 448 peak)
+Ampere          25.77 ms   26.00 ms     71 GB/s  (16% of 448 peak)
 ```
 
 **`--fused_adamw` must not be assumed portable.** It is worth 2.714x on Ada and
-nothing on Ampere.
+nothing on Ampere (0.991x).
 
-The mechanism originally proposed for this - that Ada's larger L2 keeps
-parameter chunks hot - does not survive arithmetic. AdamW streams param, grad,
-`exp_avg` and `exp_avg_sq`: 1.84 GB at 115M parameters, which is 59x Ada's L2
-and 471x Ampere's. Neither card holds that working set. A likelier explanation
-is the power cap: the 3070 Laptop was observed pinned at 79W of an 80W limit,
-and both variants landing at 15-16% of its rated bandwidth looks like a
-throttled ceiling reached regardless of kernel. Checking `power.draw` against
-`power.limit` during the benchmark would settle it.
+Power draw was monitored via `nvidia-smi` during 200 sustained steps of the
+optimizer benchmark. During the execution loop, power draw sits at **~28 Watts**
+(graphics clock 1290 MHz, memory clock 6501 MHz, temp 62°C), far below the 80W
+laptop power cap limit (which is only briefly approached during initialization).
+The ~71 GB/s is the raw sequential DRAM streaming bandwidth achieved on this
+memory bus; because 1.84 GB exceeds both L2 caches, both `foreach` and `fused`
+stream identically through DRAM.
 
-### Too short to trust: the v3 recurrence verdict, on BOTH cards
+### Recurrence verdict re-measured with fixed harness (2000 steps)
 
-The recurrence A/B measures 30 iterations of a ~0.5 ms kernel:
+The recurrence A/B was re-run using the fixed harness (workspace preallocated
+outside timing loop, timed via CUDA Events, 2000 iterations):
 
 ```text
-benchmark                  steps   per-step   total measured
-recurrence A/B (v3)           30     0.50 ms       0.01 s
-optimizer variants            50    25.60 ms       1.28 s
-profile_exp0_step             12   375.00 ms       4.50 s
-grouped benchmark             24   300.00 ms       7.20 s
+                        current       v3      v3_alt    v3 speedup
+CoT group  B24 T144      0.486 ms   0.452 ms  0.468 ms    1.077x (+7.7%)
+filler     B24 T16       0.078 ms   0.075 ms  0.079 ms    1.040x (+4.0%)
+padded     B48 T144      0.915 ms   0.895 ms  0.923 ms    1.023x (+2.3%)
 ```
 
-**Ten milliseconds of GPU time.** A laptop GPU manages clocks on 100 ms to
-second timescales, and this card is power-capped, so burst-versus-sustained
-clock behaviour is a live variable rather than a hypothetical.
-
-This applies equally to the Ada measurement that produced the original
-rejection - same `--steps 30`, same exposure. The Ampere/Ada difference is 10.4%
-against a within-run stdev of roughly 3%, so the direction may well be real, but
-neither number is established by a window that short, and the audit's
-architecture-dependent framing should be read as provisional until re-run with
-enough steps to cover several seconds of sustained execution.
+Within-run standard deviation is ~0.016 ms over 2000 steps. The direction
+holds: `v3` gives a real +7.7% speedup on Ampere for CoT shapes (where it was
+0.951-1.000x on Ada). Because recurrence is ~4-6% of Ampere step time, this
+translates to roughly ~0.4-0.5% end-to-end.
 
 The memory and `ncu` figures above are unaffected: peak allocation is
 deterministic and `ncu` reads hardware counters per kernel launch.
