@@ -160,12 +160,16 @@ def profile_path(label: str, step_fn, batches, vocab, task_cfg, device,
                  warmup: int, steps: int,
                  record_shapes: bool = False,
                  fused_adamw: bool = False,
-                 compile_mode: str = "default") -> Dict[str, Any]:
+                 compile_mode: str = "default",
+                 no_compile: bool = False) -> Dict[str, Any]:
     model = make_model(vocab, task_cfg, device)
-    forward_fn = torch.compile(
-        model.loss_logits,
-        **({} if compile_mode == "default" else {"mode": compile_mode}),
-    )
+    if no_compile:
+        forward_fn = model.loss_logits
+    else:
+        forward_fn = torch.compile(
+            model.loss_logits,
+            **({} if compile_mode == "default" else {"mode": compile_mode}),
+        )
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=1e-4,
         **({"fused": True} if fused_adamw else {}),
@@ -196,7 +200,7 @@ def profile_path(label: str, step_fn, batches, vocab, task_cfg, device,
         torch.cuda.synchronize()
         wall.append(time.perf_counter() - start)
 
-    with profile(activities=[ProfilerActivity.CUDA],
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
                  record_shapes=record_shapes) as prof:
         for i in range(steps):
             step_fn(forward_fn, model, optimizer, batches[i % len(batches)], device,
@@ -308,6 +312,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "not a free speedup - see the grouped-execution doc.")
     parser.add_argument("--path", choices=("padded", "grouped", "both"),
                         default="both")
+    parser.add_argument("--no-compile", action="store_true", default=False,
+                        help="Disable torch.compile (for environments without inductor backend).")
     args = parser.parse_args(argv)
 
     if not torch.cuda.is_available():
@@ -343,7 +349,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     print(f"device     : {torch.cuda.get_device_name(0)}")
     print(f"config     : 0B RWKV-7, N={args.num_filler}, batch {args.batch_size}, "
-          f"bf16 + compile"
+          f"bf16" + ("" if args.no_compile else " + compile")
           + (", fused AdamW" if args.fused_adamw else ", foreach AdamW")
           + (", max-autotune GEMM" if args.max_autotune else ""))
     print(f"padded     : B={batches[0]['targets'].shape[0]} "
@@ -360,7 +366,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         result = profile_path(label, step_fn, batches, vocab, task_cfg,
                               device, args.warmup, args.steps,
                               fused_adamw=args.fused_adamw,
-                              compile_mode=args.compile_mode)
+                              compile_mode=args.compile_mode,
+                              no_compile=args.no_compile)
         report(result, args.top)
     return 0
 

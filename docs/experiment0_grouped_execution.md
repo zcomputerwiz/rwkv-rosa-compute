@@ -67,7 +67,27 @@ batch 64   padded path does not fit in 16 GiB
 ```
 
 At batch 24 splitting one launch into two costs more than the skipped padding
-saves. Do not assume the N=0 batch-48 figure transfers to a smaller batch.
+saves when running under `torch.compile` on Ada. However, on eager execution (or platforms without inductor fusion), grouped execution avoids enough head projection overhead to show a **1.202x speedup** even at batch 24.
+
+### 8 GiB VRAM Card Validation (Ampere sm_86, RTX 3070 Laptop)
+
+On 8 GiB cards, grouped execution is not merely an optimization but an **enabler of batch scalability**:
+
+```text
+Batch 24 (both fit under 8 GiB in eager mode):
+  padded : 6.56 GiB peak, 324.14 ms/step (55.2% supervised head positions)
+  grouped: 4.38 GiB peak (-33.2% / -2.18 GiB), 269.77 ms/step (1.202x speedup)
+
+Batch 32:
+  padded : 8.54 GiB peak -> spills over PCIe into host RAM (1,937.51 ms/step)
+  grouped: 6.12 GiB peak -> fits cleanly in 8 GiB VRAM (330.62 ms/step)
+
+Batch 48:
+  padded : ~9.76 GiB (unrunnable without severe PCIe allocator thrash)
+  grouped: ~5.03 GiB (with torch.compile) / 6.12-8.41 GiB (eager mode)
+```
+
+Host spill signature: when padded execution exceeds device VRAM (e.g. 8.54 GiB on an 8 GiB device), GPU load reads 100% with elevated PCIe bus utilization (10-16%) while compute is stalled waiting on host memory pages. Timings from any spilling configuration must be discarded as allocator thrash.
 
 An earlier measurement of this at batch 64 produced "11.7x". That number was an
 artifact: peak allocation reached 16.41 GiB on a 16 GiB card, so the padded path

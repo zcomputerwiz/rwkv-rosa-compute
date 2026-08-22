@@ -292,8 +292,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"torch             : {torch.__version__}")
     print(f"arch / N          : {args.arch} / {args.num_filler}")
     print(f"batch_size        : {args.batch_size}")
-    print(f"compile           : {not args.no_compile}")
-    print(f"dynamo recompile_limit : {torch._dynamo.config.recompile_limit}")
+    recompile_lim = getattr(
+        torch._dynamo.config,
+        "recompile_limit",
+        getattr(torch._dynamo.config, "cache_size_limit", "N/A"),
+    )
+    print(f"dynamo recompile_limit : {recompile_lim}")
     print()
 
     print("subgroup (B, T) distribution over real batches")
