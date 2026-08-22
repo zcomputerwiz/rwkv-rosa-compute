@@ -35,39 +35,70 @@ RWKV  N=0  s42      66.10%  60.60%  +27.0%   81.60%  81.30%  64.90%  48.20%  43.
 `bias` is the challenge-set True-prediction bias: predicted-true minus
 actual-true, as a percentage of the 6000 instances.
 
-## The negative-stratum profile is flat, and that is the finding
+## The accuracy profile looks flat, but the discrimination is graded
 
-Every Llama arm rejects the structurally easy negatives almost perfectly and
-degrades as near-matches accumulate. The RWKV arm does not have that gradient:
+At epoch 5 the negative-stratum accuracies (64.9 / 48.2 / 43.1 / 44.5) have far
+less spread than any Llama arm, whose gradients span 46-72 points. It is
+tempting to read that as "the model is not doing graded rejection". That
+reading is wrong, and the per-instance logits show why.
+
+Accuracy confounds discrimination with calibration. AUC does not - it is
+threshold-free, so a miscalibrated model with real signal still scores above
+0.5. Computed against the positive instances, per epoch:
 
 ```text
-                 near_0   near_1   near_2   near_3+   spread
-Llama N=0 s43    98.60%   86.30%   64.70%   42.30%    56.3 points
-Llama N=0 s44    99.70%   90.40%   76.60%   53.30%    46.4 points
-Llama N=0 s45    93.70%   64.90%   39.00%   21.30%    72.4 points
-RWKV  N=0 s42    64.90%   48.20%   43.10%   44.50%    21.8 points
+          bias   bal.acc  AUC all    near_0  near_1  near_2  near_3+
+epoch 1  +49.2%  55.84%   0.5924    0.6677  0.5943  0.5723   0.5354
+epoch 2  +49.2%  58.39%   0.6255    0.7549  0.6114  0.5837   0.5523
+epoch 3  +47.3%  60.21%   0.6497    0.8216  0.6507  0.6065   0.5201
+epoch 4  +34.2%  62.22%   0.7265    0.7776  0.7220  0.6944   0.7120
+epoch 5  +27.0%  65.81%   0.7500    0.8314  0.7496  0.7088   0.7104
 ```
 
-`corrupted_negative_near_0` instances have no near-matches at all and are the
-easiest negatives in the set. Llama scores 93.7-99.7% on them. RWKV scores
-64.9%, then flattens to 43-48% across the three harder strata - close to chance
-on a balanced binary decision, and essentially independent of how hard the
-instance is.
+At epoch 5 the strata run 0.8314 / 0.7496 / 0.7088 / 0.7104 - well above chance
+and ordered by structural difficulty. The model **is** discriminating in a
+graded way. The flat accuracy profile is a symptom of the +27.0% True-bias
+compressing those differences, not of absent signal.
 
-Combined with the +27.0% True-bias and 81% on both positive strata, the reading
-is that this model has learned to answer True by default and is near-guessing
-whenever the answer is False. It is not doing graded rejection at all, whereas
-the Llama arms at the same sample budget already are and fail only at the hard
-end.
+## The training trajectory, and an acquisition event at epoch 4
 
-Note that RWKV's `near_3plus` (44.50%) is **higher** than two of the three Llama
-N=0 seeds. That is not evidence of strength. It is a flat profile crossing a
-descending one, and quoting that single cell without the rest of the row would
-invert the conclusion.
+All five epoch checkpoints were evaluated on the same frozen set:
 
-Nearly half the decisions are marginal: 46.6% of instances have an absolute
-logit margin below 0.5 (median 0.500). The model is not confidently wrong, it
-is undecided.
+```text
+epoch  canon   chall    pos  corr_pos  near_0  near_1  near_2  near_3+
+  1    56.85%  44.33%  91.30   89.40   33.20   20.20   17.80    14.10
+  2    58.35%  46.62%  93.70   93.70   42.90   20.90   14.70    13.80
+  3    60.35%  48.87%  94.00   94.50   54.60   21.60   15.70    12.80
+  4    63.05%  55.02%  84.00   83.70   49.90   38.80   34.70    39.00
+  5    66.10%  60.60%  81.60   81.30   64.90   48.20   43.10    44.50
+```
+
+Through epochs 1-3 the model learns to reject only the easiest negatives:
+`near_0` accuracy climbs 33.2 -> 54.6 while the three harder strata stay flat or
+decline (`near_3plus` goes 14.1 -> 13.8 -> 12.8). This is the Llama shape
+beginning to form - easy negatives first.
+
+Epoch 3 to 4 is a regime change. Positive accuracy **drops** (94.0 -> 84.0,
+`corrupted_arm_surviving_positive` 94.5 -> 83.7) while every hard negative jumps
+(`near_3plus` 12.8 -> 39.0). Falling positives with rising negatives is the
+signature of a decision-threshold shift, and the training-side True-bias moves
+in the same epoch (34.9% -> 22.1%).
+
+But it is **not only** a threshold shift, and AUC proves it, because moving a
+threshold cannot change AUC. `near_3plus` AUC sits at chance through three
+epochs (0.5354, 0.5523, 0.5201) and then jumps to 0.7120 at epoch 4. The model
+acquired discriminative signal on the hardest negatives and recalibrated in the
+same epoch. Both AUC and balanced accuracy rise monotonically across all five
+epochs, so nothing here is stuck or saturating.
+
+## Prefer AUC for the N=0 vs N=36 comparison
+
+The N=0 arm ends at +27.0% True-bias. If the N=36 arm is better calibrated -
+which the 0A Llama results suggest, where bias fell alongside accuracy - then
+comparing raw stratum accuracies partly measures calibration rather than
+capability. AUC is invariant to that, so report both: AUC for whether filler
+tokens buy discriminative signal, accuracy for what the deployed decision
+actually does.
 
 ## What this cannot support
 
@@ -82,20 +113,30 @@ is undecided.
   therefore **not** supported by this comparison; the batch and LR would have to
   be matched, or scaled by the usual linear/sqrt heuristics, before that claim
   could be made.
+- **The Llama arms have no AUC figures here.** The trajectory and AUC analysis
+  cover only the RWKV checkpoints; the Llama per-epoch checkpoints were not
+  retained, so their rows in the results table stay accuracy-only and the AUC
+  comparison above is within-RWKV.
 - **Undertrained, by design.** The 0A work established that N=0 at 5x this
   budget reaches 96.4% on the hard negatives, so a weak N=0 result at 2M x 5 is
   the expected control behaviour and not a capability ceiling.
 
 ## What the paired N=36 arm should show
 
-If the filler-token effect replicates in RWKV, the N=36 arm should show a
-*shape* change and not merely a higher number: a recovered gradient across the
-negative strata, driven by `near_0` moving toward the 90s, and a True-bias
-falling well below +27.0%. A uniform lift with the profile still flat would
-indicate a better-calibrated guesser rather than a model that has started
-computing the task.
+The discriminating measurement is **AUC on the hard negatives**, not overall
+accuracy. The N=0 arm acquired `near_3plus` signal only at epoch 4 and ended at
+0.7104. An N=36 arm reaching comparable AUC in fewer epochs demonstrates the
+sample-efficiency effect the 0A work established; one ending near 0.71 after
+five epochs does not, however much its raw accuracy differs.
+
+Accuracy should still be reported, but read second and with the bias beside it:
+a uniform accuracy lift with AUC unchanged would be a better-calibrated
+guesser, not a model that has started computing the task.
 
 ## Reproducing
+
+All five epoch checkpoints were evaluated identically, varying only
+`--checkpoint` and `--out`; the command below is the final epoch.
 
 The evaluation needs the RWKV CUDA kernel, which is JIT-compiled and therefore
 needs `ninja` and MSVC `cl.exe` on PATH. Invoking `.venv\Scripts\python.exe`
