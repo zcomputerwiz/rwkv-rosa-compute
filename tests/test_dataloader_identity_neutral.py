@@ -150,3 +150,74 @@ def test_identical_signature_warns_about_nothing():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         validate_checkpoint_signature(_signature(), _signature())
+
+
+# --- single-seed resume of a multi-seed run -----------------------------------
+# Antigravity hit this resuming seed 44 of a --seeds 43 44 45 run after a crash:
+# --resume_checkpoint takes exactly one seed, so seeds_run and the run_id hashed
+# from it necessarily differ. They worked around it locally by adopting the
+# checkpoint's run_id, which also silently stopped checking eval_seed and
+# val_samples - the run_id's other inputs, recorded nowhere in the signature.
+
+
+def _sweep_signature(seeds, *, eval_seed=9999, val_samples=2000, run_id="sweep"):
+    sig = _signature()
+    sig["run_id"] = run_id
+    sig["evaluation"] = {
+        "eval_seed": eval_seed,
+        "val_samples": val_samples,
+        "seeds_run": list(seeds),
+    }
+    return sig
+
+
+def test_single_seed_resume_of_a_sweep_is_allowed():
+    saved = _sweep_signature([43, 44, 45], run_id="three_seed_hash")
+    expected = _sweep_signature([44], run_id="one_seed_hash")
+
+    with pytest.warns(RuntimeWarning, match="single seed of a multi-seed run"):
+        validate_checkpoint_signature(saved, expected)
+
+
+def test_resume_rejected_when_eval_seed_changed():
+    """The exact hole the local workaround opened."""
+    saved = _sweep_signature([43, 44, 45], eval_seed=9999, run_id="a")
+    expected = _sweep_signature([44], eval_seed=1234, run_id="b")
+
+    with pytest.raises(ValueError, match="does not match"):
+        validate_checkpoint_signature(saved, expected)
+
+
+def test_resume_rejected_when_val_samples_changed():
+    saved = _sweep_signature([43, 44, 45], val_samples=2000, run_id="a")
+    expected = _sweep_signature([44], val_samples=500, run_id="b")
+
+    with pytest.raises(ValueError, match="does not match"):
+        validate_checkpoint_signature(saved, expected)
+
+
+def test_resume_rejected_for_a_seed_outside_the_original_sweep():
+    saved = _sweep_signature([43, 44, 45], run_id="a")
+    expected = _sweep_signature([99], run_id="b")
+
+    with pytest.raises(ValueError, match="does not match"):
+        validate_checkpoint_signature(saved, expected)
+
+
+def test_legacy_checkpoint_without_evaluation_section_is_not_waved_through():
+    """No evaluation section means the claim cannot be verified, so refuse."""
+    saved = _signature()
+    saved["run_id"] = "legacy_three_seed"
+    expected = _sweep_signature([44], run_id="one_seed_hash")
+
+    with pytest.raises(ValueError, match="does not match"):
+        validate_checkpoint_signature(saved, expected)
+
+
+def test_seed_list_exemption_does_not_excuse_a_protocol_change():
+    saved = _sweep_signature([43, 44, 45], run_id="a")
+    expected = _sweep_signature([44], run_id="b")
+    expected["task"] = {"num_filler": 36}
+
+    with pytest.raises(ValueError, match="does not match"):
+        validate_checkpoint_signature(saved, expected)

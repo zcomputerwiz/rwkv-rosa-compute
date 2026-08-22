@@ -6,7 +6,7 @@ import time
 from contextlib import nullcontext
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -621,10 +621,11 @@ def _checkpoint_signature(
     epochs: int,
     steps_per_epoch: int,
     checkpoint_run_id: str | None,
+    evaluation_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     model_signature = asdict(model_cfg)
     model_signature.pop("rwkv_checkpoint", None)
-    return {
+    signature = {
         "run_id": checkpoint_run_id,
         "model": model_signature,
         "training": drop_identity_neutral_fields(asdict(train_cfg)),
@@ -634,6 +635,14 @@ def _checkpoint_signature(
         "epochs": epochs,
         "steps_per_epoch": steps_per_epoch,
     }
+    # run_id is a hash of model, training, task AND eval_seed / val_samples /
+    # seeds_run. The first three are checked directly above; the last three were
+    # not recorded anywhere, so a resume that adopted the checkpoint's run_id -
+    # the only way to resume one seed of a multi-seed run - silently stopped
+    # checking them. Recording them makes the signature self-sufficient.
+    if evaluation_context is not None:
+        signature["evaluation"] = dict(evaluation_context)
+    return signature
 
 
 def _empty_completed_state() -> dict[str, Any]:
@@ -770,6 +779,7 @@ def train_model(
     checkpoint_every_steps: int = 0,
     resume_checkpoint: str | Path | None = None,
     checkpoint_run_id: str | None = None,
+    evaluation_context: Mapping[str, Any] | None = None,
     collect_validation_details: bool = False,
 ) -> Tuple[nn.Module, Dict[str, Any]]:
     """Train one seed, optionally writing exact-resume checkpoints.
@@ -932,6 +942,7 @@ def train_model(
         epochs=epochs,
         steps_per_epoch=steps_per_epoch,
         checkpoint_run_id=checkpoint_run_id,
+        evaluation_context=evaluation_context,
     )
 
     completed = _empty_completed_state()
