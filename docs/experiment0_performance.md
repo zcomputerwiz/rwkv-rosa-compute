@@ -288,3 +288,77 @@ These benchmarks characterize implementation performance only. They are not
 Experiment 0 accuracy results and must not be interpreted as evidence for or
 against H1/H2. Padding structure alone is not evidence of a GPU bottleneck;
 conclusions require measurements and profiler traces from the target systems.
+
+## Why RWKV 0B runs at hundreds of samples/s and Llama 0A at thousands
+
+The 0A and 0B arms differ in observed throughput by more than an order of
+magnitude, which invites the conclusion that the RWKV-7 recurrence is slow
+because it is sequential. Measurement does not support that reading.
+
+Both figures below are steady-state on the same RTX 4060 Ti, derived from
+checkpoint intervals of real runs rather than from a microbenchmark. The Llama
+figure comes from the N=36 structural arm (`6fae967b93ccdb6a`, seed 43), whose
+five epoch checkpoints are 14 minutes apart for 2M samples each. The RWKV
+figure comes from the 0B N=0 pilot at 5000-step checkpoint intervals.
+
+```text
+                   step time   batch   samples/s   params     tensors
+Llama 0A            161 ms      384      2381      21.75 M       41
+RWKV  0B            157 ms       32       204     115.03 M      404
+```
+
+**The step times are within 3% of each other at a 12x difference in batch
+size.** Throughput therefore tracks batch size almost exactly: a 12x batch
+ratio produces an 11.7x throughput ratio. Both models are dominated by fixed
+per-step cost rather than by per-sample compute, which is why shrinking the
+batch by 12x did not shrink the step time.
+
+Three factors stack, and the sequential recurrence is not among them:
+
+- **RWKV 0B is the larger model** at 115 M parameters against 21.75 M, a
+  factor of 5.3.
+- **It holds 404 parameter tensors against 41.** Every optimizer step pays
+  per-tensor cost roughly ten times over, and the forward pass issues
+  proportionally more small kernels. This is the main reason its fixed
+  per-step cost is high.
+- **It runs at batch 32 against 384**, chosen to fit the 8 GiB Ampere laptop
+  running the paired arm, not because 32 is optimal on a 16 GiB card.
+
+The recurrence itself is 8.1% of the grouped step and 8.6% of the padded step
+(see `docs/experiment0_grouped_execution.md`, "Where the time actually goes").
+The dominant bucket is `elementwise / copy` at 37.3% - the token-shift, gating,
+and per-head LayerNorm machinery wrapped around the recurrence across 12
+layers. Optimizing the fused CUDA recurrence therefore has a ceiling of about
+8% even if it were made free, which is the same conclusion the upstream kernel
+audit reached from source inspection (`docs/rwkv7_upstream_kernel_audit.md`).
+
+At batch 32 the GPU also sits at roughly 47% duty cycle with DataLoader workers
+near idle (0.04-0.06 cores each against 1.01 for the training process), so the
+0B pilot is launch-bound rather than starved or compute-limited. Larger batches
+are the lever - batch 96 measured 1.224x with the off-GPU gap falling from
+24.1% to 11.0% - but see the next section for why that is not free.
+
+### Batch size is not a free tuning knob
+
+`batch_size` is identity-bearing: it is part of `TrainConfig`, it is not in
+`DATALOADER_NEUTRAL_FIELDS`, and changing it changes the `run_id`. That is
+correct and deliberate, because unlike worker counts it changes what the run
+computes:
+
+- **Optimizer step count.** There is no gradient accumulation in this codebase,
+  so one batch is one update. At 2M samples per epoch, batch 32 performs 62,500
+  updates and batch 384 performs 5,208 - a 12x difference in the number of
+  gradient steps taken at the same learning rate.
+- **Gradient noise.** Minibatch gradient variance scales as 1/B, so batch 32
+  gradients are an order of magnitude noisier. Small-batch noise acts as
+  implicit regularization and is not a neutral implementation detail.
+
+The learning-rate schedule is the exception that is safe: `warmup_fraction` is
+a fraction of `total_optimizer_steps`, so warmup covers the same fraction of
+samples at any batch size and the schedule shape is preserved in sample space.
+
+The practical consequence for paired arms is that both must use the same batch
+size, and the pair is limited by the smaller card. Raising batch on the 16 GiB
+machine alone would confound the N=0 and N=36 comparison with an optimization
+change, so the 0B pilot runs at batch 32 on both machines and accepts the
+launch-bound duty cycle.
