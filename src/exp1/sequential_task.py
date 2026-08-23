@@ -14,8 +14,8 @@ about H2.
 applied at step ``k`` is selected by the runtime *value* of the register it
 reads::
 
-    v_even -> (v + a) mod m
-    v_odd  -> (v * b) mod m
+    v_even -> (v + a)     mod m
+    v_odd  -> (v * b + c) mod m
 
 The branch depends on a value that depends on every prior step, so the
 composition cannot be folded ahead of time and no associative scan applies.
@@ -56,6 +56,26 @@ residue a bijection and removes the attractor - measured max deviation falls
 from 7.4 points to 3.4 at ``mod=13``. This was caught by the first-pass audit of
 this generator, which is exactly what the audit is for.
 
+**The odd branch needs an additive offset.** An independent audit
+(`gemini-turing`, 2026-08-23) found two artefacts of a bare ``v * b`` odd
+branch, both reproduced here:
+
+* ``answer == b`` of the last instruction writing the answer register occurred
+  **11.36%** of the time against 7.69% chance. Since ``v * b = b (mod p)`` iff
+  ``v = 1``, that is a systematic path, and it is reachable by a purely local
+  heuristic - scan for the last write to the answer register, emit its ``b``
+  field, no chain evaluation at all. A 1.48x free lift elevates the phase
+  diagram's floor in a depth-independent way, compressing the dynamic range the
+  experiment exists to measure.
+* ``answer == 0`` occurred **3.84%** against 7.69%, because ``v * b`` with
+  ``v != 0`` and prime ``p`` never yields 0, and ``v = 0`` is even so takes the
+  additive branch.
+
+Adding ``c``: both go to uniform (measured 7.64% and 7.67%). The offset does not
+reintroduce the associativity hole, because the branch is still selected by the
+runtime value - both branches being affine is irrelevant when the *selection*
+is value-dependent.
+
 Leakage this generator deliberately avoids, and which the audit should confirm:
 chain instructions are not positionally biased, distractor and chain registers
 are drawn from one alphabet, and every instruction has identical surface form.
@@ -79,17 +99,18 @@ __all__ = [
 
 @dataclass(frozen=True)
 class Instruction:
-    """``target <- dispatch(source)`` with operands ``a`` (even) and ``b`` (odd)."""
+    """``target <- dispatch(source)`` with operands ``a`` (even) and ``b, c`` (odd)."""
 
     target: int
     source: int
     a: int
     b: int
+    c: int
 
     def apply(self, value: int, mod: int) -> int:
         if value % 2 == 0:
             return (value + self.a) % mod
-        return (value * self.b) % mod
+        return (value * self.b + self.c) % mod
 
 
 @dataclass(frozen=True)
@@ -180,6 +201,7 @@ def generate_instance(
                 source=source,
                 a=rng.randrange(mod),
                 b=rng.randrange(1, mod),
+                c=rng.randrange(mod),
             )
             want = source
 
@@ -195,6 +217,7 @@ def generate_instance(
                         source=rng.randrange(num_registers),
                         a=rng.randrange(mod),
                         b=rng.randrange(1, mod),
+                        c=rng.randrange(mod),
                     )
                 )
 
@@ -278,7 +301,9 @@ def _self_check() -> None:
     for pos in inst.chain_positions:
         mutated = list(inst.instructions)
         old = mutated[pos]
-        mutated[pos] = Instruction(old.target, old.source, (old.a + 1) % inst.mod, old.b)
+        mutated[pos] = Instruction(
+            old.target, old.source, (old.a + 1) % inst.mod, old.b, old.c
+        )
         if _simulate(inst.initial, mutated, inst.mod)[inst.answer_register] != inst.answer:
             changed += 1
     assert changed > 0, "chain instructions had no effect on the answer"

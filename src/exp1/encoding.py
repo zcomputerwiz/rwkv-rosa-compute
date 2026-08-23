@@ -63,7 +63,8 @@ class EncodingSpec:
         self.off_source = self.off_target + num_registers
         self.off_a = self.off_source + num_registers
         self.off_b = self.off_a + mod
-        self.off_value = self.off_b + mod
+        self.off_c = self.off_b + mod
+        self.off_value = self.off_c + mod
         self.off_position = self.off_value + mod
         self.d_input = self.off_position + self.seq_len
 
@@ -110,6 +111,7 @@ def encode_instance(
         x[i, spec.off_source + ins.source] = 1.0
         x[i, spec.off_a + ins.a] = 1.0
         x[i, spec.off_b + ins.b] = 1.0
+        x[i, spec.off_c + ins.c] = 1.0
 
     for _ in range(spec.num_silent):
         mark(silent_kind)  # kind bit is the ONLY difference between arms B and C
