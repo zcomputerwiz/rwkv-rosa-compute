@@ -43,6 +43,10 @@ import torch  # noqa: E402
 from torch.optim.lr_scheduler import LambdaLR  # noqa: E402
 from torch.utils.data import DataLoader  # noqa: E402
 
+from exp0.checkpointing import (  # noqa: E402
+    CHECKPOINT_VERSION,
+    atomic_torch_save,
+)
 from exp0.config import ModelConfig, Task3SumConfig, TrainConfig  # noqa: E402
 from exp0.dataset import (  # noqa: E402
     Task3SumDataset,
@@ -128,6 +132,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--peak-lr", type=float, default=None,
                         help="default: the source run's last nonzero LR")
     parser.add_argument("--warmup-fraction", type=float, default=0.05)
+    parser.add_argument("--save-checkpoint", type=Path, default=None,
+                        help="write the continued weights here. Without this "
+                             "the trained model is DISCARDED when the process "
+                             "exits and only the report survives, so the "
+                             "continuation cannot be evaluated afterwards. "
+                             "Defaults to <out>.pt beside the report.")
+    parser.add_argument("--no-save-checkpoint", action="store_true",
+                        help="discard the continued weights (previous "
+                             "behaviour); the run is then metrics-only.")
     parser.add_argument("--num-workers", type=int, default=None,
                         help="DataLoader worker processes. The checkpoint "
                              "signature stores the identity-normalized value "
@@ -324,6 +337,36 @@ def main(argv: Optional[List[str]] = None) -> int:
     out = args.out or (REPO_ROOT / "results" / "continuations" /
                        f"{signature.get('run_id')}_plus{args.additional_epochs}.json")
     out.parent.mkdir(parents=True, exist_ok=True)
+    # A continuation costs as much GPU time as an epoch of the source run.
+    # Discarding the weights makes that spend unrepeatable and unevaluable, so
+    # save unless explicitly told not to. The payload is shaped like a training
+    # checkpoint so the evaluate_* scripts can read it, but the signature
+    # records the continuation batch size and total epochs, and the canonical
+    # flag is False.
+    if not args.no_save_checkpoint:
+        ckpt_path = args.save_checkpoint or out.with_suffix(".pt")
+        continued_signature = dict(signature)
+        continued_signature["training"] = {
+            **signature.get("training", {}),
+            "batch_size": train_cfg.batch_size,
+        }
+        continued_signature["epochs"] = completed + args.additional_epochs
+        atomic_torch_save({
+            "checkpoint_version": CHECKPOINT_VERSION,
+            "signature": continued_signature,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "progress": {
+                "epoch": completed + args.additional_epochs,
+                "optimizer_steps": steps_per_epoch * args.additional_epochs,
+                "samples_consumed_in_epoch": 0,
+            },
+            "is_canonical_experiment_result": False,
+            "continuation_report": report,
+        }, ckpt_path)
+        report["checkpoint"] = str(ckpt_path)
+        print(f"wrote {ckpt_path}")
+
     out.write_text(json.dumps(report, indent=2, default=str) + "\n", encoding="utf-8")
     print(f"\nwrote {out}")
     return 0
