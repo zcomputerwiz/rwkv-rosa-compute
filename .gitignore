@@ -223,3 +223,5 @@ __marimo__/
 *.safetensors
 tests/fixtures/
 /results
+
+.inductor_cache/
