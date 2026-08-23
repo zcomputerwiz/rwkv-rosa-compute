@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import random
 import sys
 from pathlib import Path
@@ -617,7 +618,50 @@ def _challenge_diagnostics(args, task_cfg, vocab, model, train_cfg, model_cfg):
     return report
 
 
+def _apply_cuda_memory_fraction() -> None:
+    """Optionally hard-cap this process's share of the GPU.
+
+    PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold is advisory: it only
+    acts as the allocator approaches its limit, so a process running alone
+    hoards freely long before a second process appears. Measured on a 2M-sample
+    RWKV 0B run, peak ALLOCATED is 2.97 GiB while RESERVED reaches 8.70 GiB -
+    2.9x overhead. Two such runs then need 17.4 GiB of reservation to hold
+    5.9 GiB of tensors, and both thrash on a 16 GiB card.
+
+    set_per_process_memory_fraction is a hard cap, which forces the allocator to
+    reuse rather than grow. This is a runtime allocator setting: it changes no
+    configuration, no computation and no run_id, exactly like the DataLoader
+    fields in DATALOADER_NEUTRAL_FIELDS.
+
+    Set EXP0_CUDA_MEMORY_FRACTION (e.g. 0.45) to enable. Unset means unchanged
+    default behaviour.
+    """
+    raw = os.environ.get("EXP0_CUDA_MEMORY_FRACTION")
+    if not raw:
+        return
+    try:
+        fraction = float(raw)
+    except ValueError:
+        raise ValueError(
+            f"EXP0_CUDA_MEMORY_FRACTION must be a number, got {raw!r}."
+        ) from None
+    if not 0.0 < fraction <= 1.0:
+        raise ValueError(
+            f"EXP0_CUDA_MEMORY_FRACTION must be in (0, 1], got {fraction}."
+        )
+    if not torch.cuda.is_available():
+        return
+    torch.cuda.set_per_process_memory_fraction(fraction)
+    total = torch.cuda.get_device_properties(0).total_memory / 2**30
+    print(
+        f"CUDA memory capped at {fraction:.2f} of {total:.2f} GiB "
+        f"= {fraction * total:.2f} GiB for this process.",
+        flush=True,
+    )
+
+
 def main():
+    _apply_cuda_memory_fraction()
     args = get_parser().parse_args()
     task_cfg, model_cfg, train_cfg_base = build_configs(args)
 
