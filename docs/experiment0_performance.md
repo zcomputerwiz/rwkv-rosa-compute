@@ -363,3 +363,90 @@ size, and the pair is limited by the smaller card. Raising batch on the 16 GiB
 machine alone would confound the N=0 and N=36 comparison with an optimization
 change, so the 0B pilot runs at batch 32 on both machines and accepts the
 launch-bound duty cycle.
+
+## Running two training processes on one GPU
+
+Motivation: a single 2M-sample RWKV 0B run leaves the GPU around 47-75% duty
+cycle at batch 32, so a second run looks free. It is not, by default.
+
+```text
+config                       procs  batch   wall      aggregate
+solo                           1      32    499.3 s   120.2 samples/s
+dual, uncapped                 2      32   1255.3 s    95.6 samples/s   0.80x
+dual, garbage_collection       2      32    621.5 s   193.1 samples/s   1.61x
+solo                           1      64    369.6 s   162.3 samples/s   1.35x
+dual                           2      64   >3 h        11.8 samples/s   thrashed
+```
+
+Those figures come from 60k-sample runs. **They do not predict full-scale
+behaviour, and a schedule was built on them before that was discovered.** At 2M
+samples two concurrent runs thrash: memory pins at 16072 MiB and power collapses
+from ~100 W to 45 W, which is slower than running them one after another.
+
+### The cause is allocator hoarding, not demand
+
+```text
+peak ALLOCATED   2.97 GiB
+peak RESERVED    8.70 GiB      2.9x overhead
+```
+
+Two runs need **17.4 GiB of reservation to hold 5.9 GiB of tensors**. Nothing in
+the workload requires that; it is caching. The 60k benchmark succeeded precisely
+because it finished before the allocator could hoard, effectively simulating a
+capped run. Any concurrency benchmark here must run long enough to reach steady
+-state reservation, which takes on the order of fifteen minutes.
+
+`PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold` is advisory: it acts near
+the limit, so a process running alone hoards freely long before a neighbour
+appears. `expandable_segments` is **not supported on Windows** - it emits
+`expandable_segments not supported on this platform` and is ignored, so it
+cannot be credited for any measured improvement.
+
+`EXP0_CUDA_MEMORY_FRACTION` applies `torch.cuda.set_per_process_memory_fraction`,
+a hard cap that forces reuse rather than growth. It is a runtime allocator
+setting: no configuration, computation or `run_id` changes, exactly like the
+DataLoader fields. Whether it sustains two full-scale runs is **not yet
+measured**.
+
+### Concurrent runs must not share TORCHINDUCTOR_CACHE_DIR
+
+Two runs compiling the same kernels simultaneously race on the shared inductor
+cache, and one dies:
+
+```text
+InductorError: Failed to import <cache>/c57xvf....py
+SyntaxError: source code string cannot contain null bytes
+```
+
+This appears only on a cold cache, so a warm-cache benchmark will never show it
+while every new seed will hit it. Give each concurrent run its own
+`TORCHINDUCTOR_CACHE_DIR`.
+
+### The bottleneck is a single saturated dispatch thread
+
+Measured on a live 2M run at batch 32:
+
+```text
+main process     0.93 cores     <- one Python thread, saturated
+dataloader wkr   0.26 cores
+dataloader wkr   0.25 cores
+16 logical cores available, GPU at 75%
+```
+
+The limit is neither GPU compute nor CPU cores nor input: it is one Python
+thread issuing kernel launches. `data_wait_fraction` is 0.0013, so the input
+pipeline is not involved.
+
+This rules out the obvious in-process alternative. A single controller
+alternating two models in one thread would **double dispatch work on a thread
+that is already full**, gaining the shared allocator but not throughput. Getting
+throughput in-process would need multiple threads on separate CUDA streams, and
+most of that 0.93 cores is Python holding the GIL - autograd graph construction,
+module dispatch, optimizer stepping.
+
+CUDA MPS is the correct mechanism for genuine multi-process GPU sharing, and it
+is Linux-only. On Linux this problem largely disappears.
+
+The addressable lever for a dispatch-bound workload is fewer launches per step,
+not more parallelism. See `docs/experiment0_grouped_execution.md` for why CUDA
+graphs do not deliver that here, and for the graph-break lead that might.
