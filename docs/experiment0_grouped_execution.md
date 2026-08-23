@@ -379,6 +379,76 @@ launch gap, and GPU work is roughly 75% of wall time, so bucket-8 spends about
 keeps the cost low but leaves 12 shapes, which is worse than the 9 that already
 triggered the collapse.
 
+### Correction: the shape variance is in the batch dimension, not the length
+
+The bucketing table above pads the **time** dimension. Measured over 200 real
+batches, that is the wrong dimension to pad:
+
+```text
+N=0 :  16 distinct shape-sets   T values [4, 34]    B values: 17 distinct
+N=36:  17 distinct shape-sets   T values [34, 40]   B values: 17 distinct
+```
+
+There are only **two sequence lengths per arm** - one per format. Every distinct
+shape comes from the batch dimension, because each batch of 32 draws a random
+50/50 format split, so B wanders over roughly 7 to 25.
+
+(The T values also explain the memory asymmetry between arms. At N=0 the filler
+sequences are length 4 against chain-of-thought's 34, so grouping saves
+enormously; at N=36 filler is 40 and *longer* than CoT, which is why N=36
+processes 360M head positions against N=0's 180M.)
+
+The cheap fix is therefore **stratified batching**: force exactly 16 CoT and 16
+filler per batch, and there are exactly two static shapes - (16, 4) and (16, 34)
+at N=0 - at **zero padding cost**. That is strictly better than bucket-8 on both
+axes: 2 shapes rather than 8, and 0% overhead rather than 13.5%.
+
+**It is parked rather than adopted**, for two reasons. The measured CUDA-graph
+benefit on uniform shapes was only 1.089x, against a +39% rise in GPU time from
+copies into graph-owned buffers. And stratified batching, while unbiased for the
+epoch-level objective and identical in which instances are seen, changes the
+**gradient noise structure** - it is a variance-reduced estimator. The 0B result
+turns on a phase-transition lottery that appears sensitive to exactly that, so
+perturbing gradient noise to chase ~1.09x is a bad trade while that is the
+object of study. It would also change the `run_id` and require re-running the
+banked seed-42 pair.
+
+### A better lead: the graph breaks are the fused kernel, not the model
+
+Graph-break removal has already paid here - the dynamo fixes took breaks from
+18 to 6 on the padded path and were worth **1.303x with no algorithmic change**,
+with loss 10.708069 byte-identical across every run. That is the property the
+shape changes cannot offer: provably result-neutral, no protocol change, no
+`run_id` change.
+
+Running `torch._dynamo.explain` over `loss_logits` with the **reference** kernel
+on CPU gives:
+
+```text
+graph count      : 1
+graph break count: 0
+op count         : 7564
+```
+
+The model architecture traces cleanly. The remaining 6 padded / 12 grouped
+breaks therefore come from the CUDA path, and `_RWKV7ClampW`
+(`src/exp0/models/rwkv_cuda.py`) is a bare `torch.autograd.Function` with no
+`torch.library` registration and no fake/meta implementation, so dynamo cannot
+trace into it. The 6-to-12 doubling is consistent with breaks being per model
+invocation, since grouping invokes the model twice per step.
+
+The fix would be registering it via `torch.library.custom_op` with a
+`register_fake` meta implementation and an autograd formula. **The break count
+under CUDA is inferred, not measured** - confirming it needs a CUDA forward pass,
+which was deliberately not run while a multi-day study occupies the GPU.
+
+This must not be applied while that study is in flight. `torch_compile: true`
+is part of the `run_id`, but the kernel's registration is not part of any config
+field, so changing it would alter numerics while leaving the `run_id`
+**identical** - producing silently incomparable runs under the same identity.
+That is a worse failure mode than a changed `run_id`, because nothing detects
+it.
+
 **Conclusion.** Grouping and CUDA graphs are structurally incompatible:
 grouping produces variable shapes by construction and graphs require static
 ones. The launch-overhead half of the 25% gap is not reachable while grouping is
