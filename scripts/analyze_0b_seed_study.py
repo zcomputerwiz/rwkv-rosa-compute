@@ -82,6 +82,26 @@ def read_auc(payload: dict) -> float:
     return auc_from_per_instance(sc["per_instance"])
 
 
+def eval_settings_of(payload: dict) -> Optional[dict]:
+    """Recorded evaluation settings, from either schema in use.
+
+    Two nodes fixed the missing-settings gap independently and landed on
+    different shapes: a top-level ``evaluation_settings`` block here, and
+    ``batch_size``/``precision`` inside ``canonical_validation`` and
+    ``structural_challenge`` on antigravity-ampere. Both are legitimate records
+    of the same fact, so read either rather than treating one as unrecorded.
+    """
+    top = payload.get("evaluation_settings")
+    if isinstance(top, dict) and "batch_size" in top:
+        return top
+    for block in ("structural_challenge", "canonical_validation"):
+        inner = payload.get(block)
+        if isinstance(inner, dict) and "batch_size" in inner:
+            return {"batch_size": inner.get("batch_size"),
+                    "precision": inner.get("precision")}
+    return None
+
+
 def checkpoint_epoch(payload: dict) -> Optional[int]:
     """Epoch of the evaluated checkpoint, from its filename.
 
@@ -111,6 +131,10 @@ def collect(eval_dirs: Sequence[Path]) -> Tuple[Dict[int, Dict[int, float]],
 
     for eval_dir in eval_dirs:
         for path in sorted(eval_dir.rglob("*.json")):
+            # Superseded artifacts are quarantined rather than deleted, so they
+            # stay as evidence. They must not be read back as live results.
+            if any(part.startswith("superseded") for part in path.parts):
+                continue
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
             except (ValueError, OSError):
@@ -130,7 +154,7 @@ def collect(eval_dirs: Sequence[Path]) -> Tuple[Dict[int, Dict[int, float]],
                 auc = read_auc(payload)
             except (KeyError, ValueError):
                 continue
-            settings = payload.get("evaluation_settings")
+            settings = eval_settings_of(payload)
             prior = found.setdefault(run_id, {}).get(epoch)
             if prior is not None and abs(prior[0] - auc) > 1e-9:
                 # Two artifacts describe the same checkpoint and disagree. Silently
