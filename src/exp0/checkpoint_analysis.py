@@ -35,6 +35,16 @@ FINGERPRINT_VERSION = 1
 
 ConfigT = TypeVar("ConfigT", ModelConfig, Task3SumConfig, TrainConfig)
 
+# Fields deliberately removed from a config after checkpoints had already been
+# written carrying them. Dropped on load instead of rejected, because the
+# alternative is that any schema cleanup silently invalidates every banked
+# checkpoint - which is exactly what removing Task3SumConfig.seed did until this
+# was added. Unknown fields that are NOT listed here still raise, so typos and
+# corruption are caught as before.
+RETIRED_CONFIG_FIELDS: dict = {
+    "Task3SumConfig": frozenset({"seed"}),  # dead code, removed in b649f2c
+}
+
 
 def _config_from_mapping(
     config_type: type[ConfigT],
@@ -42,12 +52,13 @@ def _config_from_mapping(
     label: str,
 ) -> ConfigT:
     allowed = {item.name for item in fields(config_type)}
-    unexpected = sorted(set(values) - allowed)
+    retired = RETIRED_CONFIG_FIELDS.get(config_type.__name__, frozenset())
+    unexpected = sorted(set(values) - allowed - retired)
     if unexpected:
         raise ValueError(
             f"Checkpoint {label} contains unsupported fields: {unexpected}"
         )
-    return config_type(**dict(values))
+    return config_type(**{k: v for k, v in values.items() if k in allowed})
 
 
 def _json_bytes(value: Any) -> bytes:
