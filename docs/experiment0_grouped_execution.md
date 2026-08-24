@@ -311,16 +311,56 @@ fp32 eps          : 1.192e-07
 So it belongs with TF32 and bf16: a deliberate protocol choice, recorded in the
 `run_id`, adopted at the start of a sweep and never switched on partway through.
 
+## Track registry
+
+The track letters are used across this document and
+`rwkv7_upstream_kernel_audit.md`. This table is their single definition; add new
+letters here rather than introducing them inline.
+
+```text
+A2  padded baseline execution        the mixed 50/50 batch padded to its longest
+                                     sequence - what grouping replaces
+B   masked head projection           CLOSED - grouping already reaches 100%
+                                     supervised positions, nothing left to mask
+E   recurrence kernels               CLOSED - ~8% of step, both v3 variants
+                                     rejected by forward A/B on Ada
+F   fused TimeMix/ChannelMix         REJECTED on Ada and Ampere - the upstream
+                                     kernels target a block already at 82-89%
+                                     of DRAM peak
+G   objective-changing adoptions     EXCLUDED without separate approval:
+                                     L2Wrap, altered CE, FP8, quantized weights,
+                                     reduced output vocabulary
+H   fused projection + loss          OPEN - plain linear + cross_entropy with no
+                                     auxiliary term, so a full logits tensor is
+                                     never materialized
+I   re-profile the compiled path     OPEN - the ranked shares below were taken
+                                     before compilation; they need re-measuring
+J   compile grouped_loss_backward    OPEN - 59% of the grouped step by CPU time,
+                                     blocked on variable subgroup shapes
+```
+
+**B and H are distinct and were previously conflated.** B masks the projection so
+unsupervised positions are not computed; grouping made it pointless. H fuses the
+projection with the loss so the logits tensor is never materialized; that is a
+memory and dispatch question, untouched by grouping, and still open.
+
 ## Priority order after profiling
+
+Shares below are from the pre-compilation profile. Track I exists to re-measure
+them.
 
 ```text
 1  --fused_adamw                    10.6% of step, one flag, protocol change
 2  Track F fused TimeMix/ChannelMix  37.3% block, must beat COMPILED PyTorch
 3  larger batch                      grouping freed ~4.7 GiB; amortizes the
                                      fixed optimizer cost over more samples
-4  recurrence kernels                CLOSED - 8.5%, both v3 variants rejected
-5  masked head projection            CLOSED - grouping already reaches 100%
+4  Track E recurrence kernels        CLOSED - 8.5%, both v3 variants rejected
+5  Track B masked head projection    CLOSED - grouping already reaches 100%
 ```
+
+Track F has since been **rejected outright** on both architectures — see
+"Solid: Track F stays rejected" below — which promotes Track J to the largest
+addressable block by CPU time.
 
 ## CUDA graphs: rejected, and structurally so
 
