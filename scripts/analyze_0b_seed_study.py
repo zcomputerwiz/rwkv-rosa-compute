@@ -1,0 +1,246 @@
+"""Pre-registered analysis for the Experiment 0B seed study.
+
+Implements exactly what `PREREGISTRATION_0B_SEED_STUDY.md` fixes, and nothing
+else. Committed before the remaining seeds were evaluated so the analysis cannot
+be tuned to the data.
+
+Primary   one-sided exact Mann-Whitney U on per-seed corrupted_negative_near_3plus
+          ROC AUC at epoch 5, alternative N=0 > N=36, alpha 0.05.
+Secondary transition counts with Fisher's exact test, descriptive only. A seed
+          transitioned if near_3plus AUC rose by >= 0.10 between any two
+          consecutive epochs.
+
+The study population is defined by run_id, not seed number: earlier result
+families in results/ reuse the same seed numbers at different configurations,
+and multi-seed batch runs share one run_id across several seeds.
+
+Run::
+
+    python scripts/analyze_0b_seed_study.py
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import re
+from itertools import combinations
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
+
+# Frozen by pre-registration. Do not edit to accommodate a run that does not fit.
+STUDY = {
+    0: {42: "c968fce9af66aa32", 43: "706b5459779b201d", 44: "d6d23abcab7a898b",
+        45: "0c3f9edbcb2c310f", 46: "304c24dc614f6b1a"},
+    36: {42: "c923f49572cadb88", 44: "cd865b1f9c9b1089",
+         45: "cf9e58a1052dc20a", 46: "e1ee93fa823e4523"},
+}
+STRATUM = "corrupted_negative_near_3plus"
+CHALLENGE_ID = "e06f92897411fe2e"
+TRANSITION_DELTA = 0.10
+ALPHA = 0.05
+
+
+def auc_from_per_instance(per_instance: Sequence[dict]) -> float:
+    """Tie-corrected Mann-Whitney AUC, positives vs one negative stratum.
+
+    Duplicated rather than imported so the pre-registered analysis does not
+    change if a shared helper is refactored later.
+    """
+    pos = [r["margin"] for r in per_instance if r["realized_label"] is True]
+    neg = [r["margin"] for r in per_instance
+           if r["realized_label"] is False and r["stratum"] == STRATUM]
+    if not pos or not neg:
+        raise ValueError("missing positives or negatives for the stratum")
+    xs = sorted([(v, 0) for v in pos] + [(v, 1) for v in neg])
+    ranks: Dict[int, float] = {}
+    i = 0
+    while i < len(xs):
+        j = i
+        while j + 1 < len(xs) and xs[j + 1][0] == xs[i][0]:
+            j += 1
+        r = (i + j) / 2 + 1
+        for k in range(i, j + 1):
+            ranks[k] = r
+        i = j + 1
+    rank_pos = sum(ranks[k] for k, (_, lab) in enumerate(xs) if lab == 0)
+    return (rank_pos - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg))
+
+
+def read_auc(payload: dict) -> float:
+    """Prefer the emitted auc_summary; fall back to recomputing it."""
+    sc = payload["structural_challenge"]
+    if sc.get("challenge_id") != CHALLENGE_ID:
+        raise ValueError(f"wrong challenge: {sc.get('challenge_id')}")
+    summary = sc.get("auc_summary") or {}
+    if STRATUM in summary:
+        return float(summary[STRATUM])
+    return auc_from_per_instance(sc["per_instance"])
+
+
+def checkpoint_epoch(payload: dict) -> Optional[int]:
+    """Epoch of the evaluated checkpoint, from its filename.
+
+    The ``epochs`` field is the run's *configured* total and is 5 on every
+    record including per-epoch ones, so it cannot order a series. Rolling
+    ``latest.pt`` checkpoints are not epoch boundaries and are skipped.
+    """
+    match = re.search(r"epoch_(\d+)\.pt", str(payload.get("checkpoint", "")))
+    return int(match.group(1)) if match else None
+
+
+def collect(eval_dirs: Sequence[Path]) -> Tuple[Dict[int, Dict[int, float]],
+                                                Dict[int, Dict[int, List[float]]]]:
+    """Return (final-epoch AUC by arm/seed, per-epoch AUC series by arm/seed).
+
+    Scans recursively: run_id is the filter, so where a file happens to live
+    does not matter. The two pilot arms sit in different directories and the
+    remote arm arrives through the shared folder.
+    """
+    final: Dict[int, Dict[int, float]] = {0: {}, 36: {}}
+    series: Dict[int, Dict[int, List[float]]] = {0: {}, 36: {}}
+    wanted = {run_id: (arm, seed)
+              for arm, seeds in STUDY.items() for seed, run_id in seeds.items()}
+    # epoch -> auc, keyed per run, so a base file duplicating _e5 collapses
+    found: Dict[str, Dict[int, float]] = {}
+
+    for eval_dir in eval_dirs:
+        for path in sorted(eval_dir.rglob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            run_id = payload.get("run_id")
+            if run_id not in wanted:
+                continue
+            arm, seed = wanted[run_id]
+            if payload.get("seed") != seed or payload.get("num_filler") != arm:
+                continue
+            epoch = checkpoint_epoch(payload)
+            if epoch is None:
+                continue
+            try:
+                found.setdefault(run_id, {})[epoch] = read_auc(payload)
+            except (KeyError, ValueError):
+                continue
+
+    for run_id, by_epoch in found.items():
+        arm, seed = wanted[run_id]
+        ordered = [by_epoch[e] for e in sorted(by_epoch)]
+        series[arm][seed] = ordered
+        final[arm][seed] = by_epoch[max(by_epoch)]
+    return final, series
+
+
+def mann_whitney_one_sided(x: Sequence[float], y: Sequence[float]) -> float:
+    """P(rank-sum of x >= observed) by exact enumeration. Alternative: x > y."""
+    n1 = len(x)
+    pooled = sorted(list(x) + list(y))
+    rank = {v: i + 1 for i, v in enumerate(pooled)}
+    observed = sum(rank[v] for v in x)
+    total = hits = 0
+    for combo in combinations(range(len(pooled)), n1):
+        total += 1
+        if sum(i + 1 for i in combo) >= observed:
+            hits += 1
+    return hits / total
+
+
+def fisher_two_sided(a: int, b: int, c: int, d: int) -> float:
+    n, r1, r2, c1 = a + b + c + d, a + b, c + d, a + c
+
+    def pr(x: int) -> float:
+        return (math.comb(r1, x) * math.comb(r2, c1 - x)) / math.comb(n, c1)
+
+    observed = pr(a)
+    lo, hi = max(0, c1 - r2), min(r1, c1)
+    return sum(pr(x) for x in range(lo, hi + 1) if pr(x) <= observed + 1e-12)
+
+
+def transitioned(series: Sequence[float]) -> Optional[bool]:
+    """None when there are too few epochs to judge."""
+    if len(series) < 2:
+        return None
+    return any(series[i + 1] - series[i] >= TRANSITION_DELTA
+               for i in range(len(series) - 1))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--eval-dir", type=Path, nargs="+",
+                    default=[Path("results"), Path("D:/ProjectSync/exp0_0b_seed_study/inbox")],
+                    help="directories scanned recursively; run_id is the filter")
+    args = ap.parse_args()
+
+    final, series = collect([d for d in args.eval_dir if d.exists()])
+
+    print("per-seed near_3plus AUC at final epoch\n")
+    print(f"  {'arm':>5} {'seed':>5} {'run_id':>18} {'AUC':>8} {'epochs':>7} {'transition':>11}")
+    for arm in (0, 36):
+        for seed, run_id in STUDY[arm].items():
+            if seed in final[arm]:
+                tr = transitioned(series[arm][seed])
+                tr_s = "-" if tr is None else ("yes" if tr else "no")
+                print(f"  {arm:5d} {seed:5d} {run_id:>18} {final[arm][seed]:8.4f} "
+                      f"{len(series[arm][seed]):7d} {tr_s:>11}")
+            else:
+                print(f"  {arm:5d} {seed:5d} {run_id:>18} {'MISSING':>8} {'-':>7} {'-':>11}")
+
+    x, y = list(final[0].values()), list(final[36].values())
+    n_expected = (len(STUDY[0]), len(STUDY[36]))
+    print(f"\nobserved {len(x)} of {n_expected[0]} (N=0), "
+          f"{len(y)} of {n_expected[1]} (N=36)")
+    if len(x) < n_expected[0] or len(y) < n_expected[1]:
+        print("INCOMPLETE - the pre-registered test is defined on the full set.\n"
+              "Values below are diagnostic only and must not be reported as the result.")
+    if not x or not y:
+        print("\nnothing to test yet")
+        return 0
+
+    p = mann_whitney_one_sided(x, y)
+    print("\nPRIMARY  one-sided exact Mann-Whitney U, alternative N=0 > N=36")
+    print(f"  N=0  n={len(x)} median {sorted(x)[len(x)//2]:.4f}")
+    print(f"  N=36 n={len(y)} median {sorted(y)[len(y)//2]:.4f}")
+    print(f"  p = {p:.4f}   {'REJECT' if p <= ALPHA else 'no rejection'} at alpha={ALPHA}")
+    print(f"  minimum achievable p at this design: {1/math.comb(len(x)+len(y), len(x)):.4f}")
+
+    t0 = [transitioned(series[0][s]) for s in final[0]]
+    t36 = [transitioned(series[36][s]) for s in final[36]]
+    a, b = sum(1 for t in t0 if t), sum(1 for t in t0 if t is False)
+    c, d = sum(1 for t in t36 if t), sum(1 for t in t36 if t is False)
+    print(f"\nSECONDARY (descriptive)  transitions: N=0 {a}/{a+b}, N=36 {c}/{c+d}")
+    if a + b and c + d:
+        print(f"  Fisher two-sided p = {fisher_two_sided(a, b, c, d):.4f}  (not a significance claim)")
+    unjudged = sum(1 for t in t0 + t36 if t is None)
+    if unjudged:
+        print(f"  {unjudged} seed(s) lacked per-epoch evaluations and are excluded here")
+    return 0
+
+
+def _self_check() -> None:
+    # exact values verified independently against the power analysis
+    assert abs(fisher_two_sided(5, 0, 0, 5) - 0.0079) < 5e-5
+    assert abs(fisher_two_sided(4, 1, 1, 4) - 0.2063) < 5e-5
+    assert abs(mann_whitney_one_sided([3, 4, 5], [0, 1, 2]) - 1 / 20) < 1e-12
+    assert abs(mann_whitney_one_sided([0, 1, 2], [3, 4, 5]) - 1.0) < 1e-12
+    # ties are corrected, not broken arbitrarily
+    assert abs(auc_from_per_instance([
+        {"margin": 1.0, "realized_label": True, "stratum": "positive_arm_positive"},
+        {"margin": 1.0, "realized_label": False, "stratum": STRATUM},
+    ]) - 0.5) < 1e-12
+    assert transitioned([0.52, 0.71]) is True
+    assert transitioned([0.566, 0.5661]) is False
+    assert transitioned([0.6]) is None
+    print("self-check OK")
+
+
+if __name__ == "__main__":
+    import sys
+    if "--self-check" in sys.argv:
+        _self_check()
+    else:
+        raise SystemExit(main())
