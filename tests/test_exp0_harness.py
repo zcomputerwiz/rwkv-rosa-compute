@@ -237,7 +237,7 @@ def test_compile_experiment_report():
 def test_compile_experiment_report_provenance():
     model_cfg = ModelConfig()
     train_cfg = TrainConfig(seed=111)
-    task_cfg = Task3SumConfig(seed=222)
+    task_cfg = Task3SumConfig()
     per_seed_results = _per_seed_results()[:2]
 
     initialization = {
