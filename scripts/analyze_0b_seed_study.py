@@ -39,6 +39,9 @@ STUDY = {
 STRATUM = "corrupted_negative_near_3plus"
 CHALLENGE_ID = "e06f92897411fe2e"
 TRANSITION_DELTA = 0.10
+# Pre-registration section 4: evaluation settings are part of the outcome
+# definition, because batch size shifts the reported AUC by ~0.003.
+PINNED_SETTINGS = {"batch_size": 128, "precision": "bf16"}
 ALPHA = 0.05
 
 
@@ -100,6 +103,7 @@ def collect(eval_dirs: Sequence[Path]) -> Tuple[Dict[int, Dict[int, float]],
     """
     final: Dict[int, Dict[int, float]] = {0: {}, 36: {}}
     series: Dict[int, Dict[int, List[float]]] = {0: {}, 36: {}}
+    conflicts: List[tuple] = []
     wanted = {run_id: (arm, seed)
               for arm, seeds in STUDY.items() for seed, run_id in seeds.items()}
     # epoch -> auc, keyed per run, so a base file duplicating _e5 collapses
@@ -123,15 +127,41 @@ def collect(eval_dirs: Sequence[Path]) -> Tuple[Dict[int, Dict[int, float]],
             if epoch is None:
                 continue
             try:
-                found.setdefault(run_id, {})[epoch] = read_auc(payload)
+                auc = read_auc(payload)
             except (KeyError, ValueError):
                 continue
+            settings = payload.get("evaluation_settings")
+            prior = found.setdefault(run_id, {}).get(epoch)
+            if prior is not None and abs(prior[0] - auc) > 1e-9:
+                # Two artifacts describe the same checkpoint and disagree. Silently
+                # keeping whichever the glob reached last would make the result
+                # depend on filename order. Prefer the one whose settings match the
+                # pre-registered pinning; if neither does, record the conflict.
+                prior_ok = prior[1] == PINNED_SETTINGS
+                this_ok = settings is not None and (
+                    settings.get("batch_size") == PINNED_SETTINGS["batch_size"]
+                    and settings.get("precision") == PINNED_SETTINGS["precision"])
+                if this_ok and not prior_ok:
+                    pass                       # this one wins
+                elif prior_ok and not this_ok:
+                    continue                   # keep the prior
+                else:
+                    conflicts.append((run_id, epoch, prior[0], auc))
+                    continue
+            found[run_id][epoch] = (auc, settings)
 
     for run_id, by_epoch in found.items():
         arm, seed = wanted[run_id]
-        ordered = [by_epoch[e] for e in sorted(by_epoch)]
-        series[arm][seed] = ordered
-        final[arm][seed] = by_epoch[max(by_epoch)]
+        series[arm][seed] = [by_epoch[e][0] for e in sorted(by_epoch)]
+        final[arm][seed] = by_epoch[max(by_epoch)][0]
+    if conflicts:
+        print("CONFLICTING EVALUATIONS - same checkpoint, different values:")
+        for run_id, epoch, a, b in conflicts:
+            arm, seed = wanted[run_id]
+            print(f"  N={arm} seed {seed} epoch {epoch}: {a:.6f} vs {b:.6f} "
+                  f"(delta {abs(a-b):.6f}) - neither carries the pinned settings")
+        print("  Re-evaluate at the pinned settings; the result below is not "
+              "well defined until this is resolved." + chr(10))
     return final, series
 
 
