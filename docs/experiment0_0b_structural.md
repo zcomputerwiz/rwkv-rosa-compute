@@ -179,12 +179,28 @@ e06f92897411fe2e` and `content_sha256 bef50bba1c80600d` both recompute from the
 frozen challenge file, and the remote copy of that file is byte-identical to the
 repo copy.
 
-The AUC figures above were computed here from the eval's `per_instance` block
-(score = `margin`, tie-corrected ranks), because that eval reported accuracy
-only. Accuracy is not sufficient on these models: seed 44 predicts True for
-78.2% of instances against a 33.3% base rate, so accuracy conflates
-discrimination with calibration in exactly the way that produced a wrong
-published reading of this data once already.
+Accuracy is not sufficient on these models: seed 44 predicts True for 78.2% of
+instances against a 33.3% base rate, so accuracy conflates discrimination with
+calibration in exactly the way that produced a wrong published reading of this
+data once already. The first artifact reported accuracy only, so the AUC above
+was computed here from its `per_instance` block (score = `margin`, tie-corrected
+ranks).
+
+`antigravity-ampere` then added AUC to their evaluator and re-published. Their
+independent implementation agrees exactly:
+
+```text
+stratum                          theirs      mine       delta
+corrupted_negative_near_0      0.781203  0.781203    0.00e+00
+corrupted_negative_near_1      0.620795  0.620795    0.00e+00
+corrupted_negative_near_2      0.584881  0.584881    0.00e+00
+corrupted_negative_near_3plus  0.559286  0.559286    0.00e+00
+auc_all                        0.636541  0.636541    0.00e+00
+```
+
+Two implementations, two machines, zero difference at six decimal places. The
+metric is now emitted in the artifact rather than reconstructed by the reader,
+and seeds 45 and 46 will carry `auc_summary` natively.
 
 ### Two readings this data does not support
 
