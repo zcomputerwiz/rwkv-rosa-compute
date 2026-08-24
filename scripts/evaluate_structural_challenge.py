@@ -230,6 +230,23 @@ def main(argv: list[str] | None = None) -> int:
         "seed": train_cfg.seed,
         "num_filler": task_cfg.num_filler,
         "epochs": signature.get("epochs"),
+        # Evaluation settings are part of the result, not incidental. Batch size
+        # changes the reported AUC by ~0.003 at these sizes: different batch
+        # shapes tile the bf16 kernel differently and move roughly five
+        # instances of 6000 across the decision boundary. Two evaluations of one
+        # checkpoint disagreed by 0.0094 before this was recorded, and nothing
+        # in the artifact explained why.
+        "evaluation_settings": {
+            "batch_size": args.batch_size,
+            "precision": args.precision,
+            "device": str(args.device),
+        },
+        "environment": {
+            "torch": torch.__version__,
+            "cuda": torch.version.cuda,
+            "gpu": (torch.cuda.get_device_name(0)
+                    if torch.cuda.is_available() else None),
+        },
         "canonical_validation": {
             "eval_seed": 9999,
             "samples": 2000,
