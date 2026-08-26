@@ -64,15 +64,16 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# --- Effective task array ----------------------------------------------------
+# --- Effective task array (single canonical form) ----------------------------
+# Machine channel (-ArgsJson / PUEUE_TASK_JSON env) or human positional args
+# both normalize into $Task. A JSON scalar is rejected: tasks are arrays.
 $Task = @()
-if (-not $ArgsJson -and $env:PUEUE_TASK_JSON) {
-    # Machine channel: an environment variable survives any transport
-    # byte-exactly, unlike command-line quoting.
-    $ArgsJson = $env:PUEUE_TASK_JSON
-}
-if ($ArgsJson) {
-    $parsed = ConvertFrom-Json $ArgsJson
+if ($ArgsJson -or $env:PUEUE_TASK_JSON) {
+    $raw = if ($ArgsJson) { $ArgsJson } else { $env:PUEUE_TASK_JSON }
+    $parsed = ConvertFrom-Json $raw
+    if ($parsed -isnot [System.Array]) {
+        throw "ArgsJson must be a JSON ARRAY of strings; a scalar was given."
+    }
     foreach ($item in @($parsed)) {
         if ($null -eq $item -or $item.GetType().Name -ne "String") {
             throw "ArgsJson must be a JSON array of strings."
@@ -83,21 +84,31 @@ if ($ArgsJson) {
     $Task = @($TaskArgs)
 }
 
-# --- 1. Repository selection ------------------------------------------------
+# --- 1. Repository selection (checkout-bound, fails closed on mismatch) -----
 if (-not $RepoRoot) {
     $RepoRoot = Split-Path -Parent $PSScriptRoot
 }
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
+$wrapperCheckout = Split-Path -Parent $PSScriptRoot
+if ((Resolve-Path -LiteralPath $wrapperCheckout).Path -ne $RepoRoot) {
+    throw ("-RepoRoot '$RepoRoot' does not match this launcher's checkout " +
+           "'$wrapperCheckout'. Clone-bound launchers do not run against " +
+           "foreign trees.")
+}
 Set-Location -LiteralPath $RepoRoot
 
-# --- 2. Provenance: commit + dirty state ------------------------------------
-$commit = ""
-$dirty = $true
-try {
+# --- 2. Provenance: commit + dirty state (explicit failure states) ----------
+$commit = "UNAVAILABLE (git rev-parse failed)"
+$dirty = "UNKNOWN"
+git -C $RepoRoot rev-parse HEAD *> $null
+if ($LASTEXITCODE -eq 0) {
     $commit = git -C $RepoRoot rev-parse HEAD
-    $dirty = (git -C $RepoRoot status --porcelain).Count -gt 0
-} catch {
-    $commit = "unavailable"
+    git -C $RepoRoot status --porcelain *> $null
+    if ($LASTEXITCODE -eq 0) {
+        $dirty = [bool]((git -C $RepoRoot status --porcelain | Measure-Object).Count)
+    } else {
+        $dirty = "UNKNOWN (git status failed)"
+    }
 }
 
 # --- 3. Environment discovery (shared bootstrap) ----------------------------
@@ -126,8 +137,22 @@ Write-Host "PROVENANCE $json"
 
 if ($SelfCheck) {
     # Assertions that must hold for any queued job, CPU-only:
-    if (@($TaskArgs).Count -lt 1) {
+    if (@($Task).Count -lt 1) {
         throw "SelfCheck: expected at least one argument in the task array."
+    }
+    if ($RequireCuda) {
+        # Discovery IS validation for kernel-compiling jobs: fail closed,
+        # naming every missing tool.
+        $missing = @()
+        if (-not (Test-Path -LiteralPath $PythonExe)) { $missing += "python(.venv)" }
+        foreach ($t in "cl", "nvcc", "ninja") {
+            if (-not (Get-Command $t -ErrorAction SilentlyContinue)) { $missing += $t }
+        }
+        if ($missing) {
+            Write-Host ("SELFCHECK FAILED - missing required tools: " +
+                        ($missing -join ", ")) -ForegroundColor Red
+            exit 1
+        }
     }
     if ((Get-Location).Path -ne $RepoRoot) {
         throw "SelfCheck: working directory does not match repository root."
@@ -136,10 +161,14 @@ if ($SelfCheck) {
     exit 0
 }
 
-if (@($TaskArgs).Count -lt 1) {
-    throw "No task arguments supplied after parameter block."
+if (@($Task).Count -lt 1) {
+    throw "No task arguments supplied (-ArgsJson/PUEUE_TASK_JSON or positional)."
 }
 
 # --- 4. Execute the checked-in command as an array --------------------------
-& $TaskArgs[0] @($TaskArgs[1..($TaskArgs.Count - 1)])
+if ($Task.Count -eq 1) {
+    & $Task[0]
+} else {
+    & $Task[0] @($Task[1..($Task.Count - 1)])
+}
 exit $LASTEXITCODE
