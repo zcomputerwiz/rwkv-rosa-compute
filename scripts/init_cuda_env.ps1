@@ -32,12 +32,21 @@
     & $PythonExe -m pytest -m cuda
 #>
 param(
-    [switch]$RequireCuda
+    [switch]$RequireCuda,
+    # Optional explicit checkout. Callers that select a repository (e.g.
+    # pueue_wrap.ps1) pass it in; when omitted, the checkout containing this
+    # script is used.
+    [string]$RepoRoot
 )
 
 $ErrorActionPreference = "Stop"
 
-$RepoRoot = Split-Path -Parent $PSScriptRoot
+if (-not $RepoRoot) {
+    $RepoRoot = Split-Path -Parent $PSScriptRoot
+}
+if (-not (Test-Path -LiteralPath $RepoRoot)) {
+    throw "Repository root not found: $RepoRoot"
+}
 Set-Location $RepoRoot
 
 # --- Python interpreter -----------------------------------------------------
@@ -115,7 +124,16 @@ if (-not $toolset -and (Test-Path -LiteralPath $toolsetRoot)) {
 }
 $vcvarsArgs = if ($toolset) { "-vcvars_ver=$toolset" } else { "" }
 
-cmd /c "`"$vcvars`" $vcvarsArgs >nul 2>&1 && set" | ForEach-Object {
+# Run vcvars in cmd and copy the resulting environment into this session; a
+# child process cannot modify its parent, so this is the only way to get the
+# compiler onto PATH for the pytest process below. A failing vcvars must fail
+# the bootstrap: silently continuing leaves cl.exe missing and any -SelfCheck
+# or kernel build would report a confusing error much later.
+$vcvarsOutput = cmd /c "`"$vcvars`" $vcvarsArgs >nul 2>&1 && set"
+if ($LASTEXITCODE -ne 0) {
+    throw "vcvars64.bat failed with exit code $LASTEXITCODE (toolset: $toolset)."
+}
+$vcvarsOutput | ForEach-Object {
     if ($_ -match '^([^=]+)=(.*)$') {
         Set-Item -Path "env:$($Matches[1])" -Value $Matches[2] -ErrorAction SilentlyContinue
     }
