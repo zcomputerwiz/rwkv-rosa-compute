@@ -92,8 +92,11 @@ def main(argv=None) -> int:
     model_cfg = _config_from_mapping(ModelConfig, STUDY_MODEL, "model")
     vocab = build_default_vocab(length=task_cfg.length, dimension=task_cfg.dimension)
 
-    # Deterministic weights. Built on CPU and then moved, so initialization
-    # never touches the device RNG and both nodes get identical parameters.
+    # Single-threaded, because torch's CPU RNG fills large tensors through
+    # at::parallel_for and the values therefore depend on the thread count.
+    # v1 of this probe did not pin it, so two machines with different core
+    # counts built different weights while believing they had not.
+    torch.set_num_threads(1)
     torch.manual_seed(WEIGHT_SEED)
     model = create_model(
         model_cfg,
@@ -102,6 +105,20 @@ def main(argv=None) -> int:
         task_cfg=task_cfg,
         compact_reduced_features=task_cfg.vocab_reduction,
     )
+
+    # Overwrite every floating tensor from one seeded generator. Construction
+    # alone is not enough: RWKV-7 initializes the low-rank time-mix pairs with
+    # one side at zero, so w1 @ w2 is zero whatever w2 holds and the whole LoRA
+    # path is inert on a freshly built model. v1 hashed logits from that model
+    # and therefore never exercised the low-rank products - the part of the
+    # computation most likely to differ between architectures. Refilling both
+    # sides makes every branch active.
+    gen = torch.Generator().manual_seed(WEIGHT_SEED)
+    with torch.no_grad():
+        for tensor in model.state_dict().values():
+            if tensor.is_floating_point():
+                tensor.copy_(torch.empty(tensor.shape, dtype=torch.float32)
+                             .normal_(0.0, 0.02, generator=gen).to(tensor.dtype))
     model.eval()
     param_sha = hashlib.sha256()
     for name, p in sorted(model.state_dict().items()):
@@ -132,10 +149,12 @@ def main(argv=None) -> int:
         logits = model(inputs, targets)
 
     flat = logits.detach().float().cpu().contiguous()
+    if not torch.isfinite(flat).all():
+        raise SystemExit("non-finite logits; the probe is not measuring anything")
     digest = hashlib.sha256(flat.numpy().tobytes()).hexdigest()
 
     payload = {
-        "probe_version": 1,
+        "probe_version": 2,
         "logits_sha256": digest,
         "param_sha256": param_sha.hexdigest(),
         "logits_shape": list(flat.shape),
@@ -145,7 +164,7 @@ def main(argv=None) -> int:
         "logits_sum": float(flat.double().sum()),
         "settings": {"precision": args.precision, "batch_size": args.batch_size,
                      "device": device.type, "weight_seed": WEIGHT_SEED,
-                     "data_seed": DATA_SEED},
+                     "data_seed": DATA_SEED, "num_threads": torch.get_num_threads()},
         "model": STUDY_MODEL, "task": STUDY_TASK,
         "environment": {
             "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
