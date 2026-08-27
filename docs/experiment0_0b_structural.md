@@ -152,6 +152,56 @@ N=0  ep5      0.8314  0.7496  0.7088   0.7104    0.7500
 N=36 ep5      0.8257  0.6610  0.5975   0.5662    0.6626
 ```
 
+### Seed 44 replicates the N=36 arm (added 2026-08-24)
+
+The seed study's first completed N=36 replicate, run on `antigravity-ampere`
+(RTX 3070), `run_id` `cd865b1f9c9b1089`, cross-checked against an independent
+computation of the expected hash before the run was trusted:
+
+```text
+              near_0  near_1  near_2  near_3+   AUC all
+N=36 ep5      0.8257  0.6610  0.5975   0.5662    0.6626   seed 42
+N=36 ep5      0.7812  0.6208  0.5849   0.5593    0.6365   seed 44
+```
+
+Same shape, uniformly slightly lower. The load-bearing cell is `near_3+`:
+0.5593 against seed 42's 0.5662, both at chance, against N=0's 0.7104. Filler
+accuracy climbed smoothly with no jump - 0.552, 0.560, 0.5685, 0.581, 0.5875 -
+which is the N=36 signature rather than an acquisition trajectory.
+
+**Two of two N=36 seeds show no acquisition event.** That is the first evidence
+that the arm separation is not a one-seed lottery win in the N=36 direction. It
+is still two draws, and the sampling objection below stands until the full k=5
+per arm is in.
+
+Provenance for this replicate closed completely: `challenge_id
+e06f92897411fe2e` and `content_sha256 bef50bba1c80600d` both recompute from the
+frozen challenge file, and the remote copy of that file is byte-identical to the
+repo copy.
+
+Accuracy is not sufficient on these models: seed 44 predicts True for 78.2% of
+instances against a 33.3% base rate, so accuracy conflates discrimination with
+calibration in exactly the way that produced a wrong published reading of this
+data once already. The first artifact reported accuracy only, so the AUC above
+was computed here from its `per_instance` block (score = `margin`, tie-corrected
+ranks).
+
+`antigravity-ampere` then added AUC to their evaluator and re-published. Their
+independent implementation agrees exactly:
+
+```text
+stratum                          theirs      mine       delta
+corrupted_negative_near_0      0.781203  0.781203    0.00e+00
+corrupted_negative_near_1      0.620795  0.620795    0.00e+00
+corrupted_negative_near_2      0.584881  0.584881    0.00e+00
+corrupted_negative_near_3plus  0.559286  0.559286    0.00e+00
+auc_all                        0.636541  0.636541    0.00e+00
+```
+
+Two implementations, two machines, zero difference at six decimal places. The
+metric is now emitted in the artifact rather than reconstructed by the reader,
+and seeds 45 and 46 will carry `auc_summary` natively.
+
 ### Two readings this data does not support
 
 **"N=36 also had an acquisition event at epoch 4."** It had a threshold shift.

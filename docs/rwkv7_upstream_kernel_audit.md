@@ -316,8 +316,14 @@ authors' loss geometry — so a kernel hardcoding 65536 is not applicable even
 setting L2Wrap aside.
 
 The *architectural* idea is still worth taking: fusing the projection with the
-loss avoids materializing a full logits tensor. That is what Track B and Track H
-pursue with plain `linear + cross_entropy` semantics and no auxiliary term.
+loss avoids materializing a full logits tensor. That is **Track H**, with plain
+`linear + cross_entropy` semantics and no auxiliary term.
+
+Not Track B, which this document previously named here as well. Track B is the
+*masked* head projection — skipping unsupervised positions — and grouping closed
+it by reaching 100% supervised positions structurally. Track H is untouched by
+grouping and still open. Track letters are defined once, in
+`experiment0_grouped_execution.md` under "Track registry".
 
 ## The fused TimeMix and ChannelMix kernels
 

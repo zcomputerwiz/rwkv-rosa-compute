@@ -25,7 +25,12 @@ class Task3SumConfig:
     include_eos_target: bool = True
     generator_mode: str = SOURCE_GENERATOR
     corruption_rate: float = DEFAULT_CORRUPTION_RATE
-    seed: int = 42
+    # No seed field here, deliberately. Task data is regenerated per *training*
+    # seed, and that seed reaches run_id through evaluation.seeds_run. A seed on
+    # this config would be dead - nothing in the run_experiment path reads it -
+    # while looking authoritative, and wiring it in later would let two runs
+    # train on different data under one run_id. If a seed genuinely belongs here
+    # one day, add it and let it be hashed; do not add it and pop it.
     num_samples: int = 10000
 
     def __post_init__(self):

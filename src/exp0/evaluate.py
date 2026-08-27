@@ -2,8 +2,8 @@
 
 import hashlib
 import json
-from dataclasses import asdict
-from typing import Any, Dict, List
+from dataclasses import asdict, fields
+from typing import Any, Dict, List, get_args
 
 from exp0.config import (
     ModelConfig,
@@ -29,6 +29,33 @@ def _resolved_model_dict(
     return model_dict
 
 
+def _coerce_declared_floats(values: Dict[str, Any], cls: type) -> Dict[str, Any]:
+    """Force fields declared ``float`` to float before hashing.
+
+    ``json.dumps`` renders ``1`` and ``1.0`` differently, so an int where a float
+    is declared silently produces a different run_id for an identical
+    experiment. Argparse types make this unreachable through the CLI today, but
+    a programmatically built config or a dropped ``type=float`` in a refactor
+    would expose it. Coercing by the declared type closes the class rather than
+    the one instance.
+    """
+    def declared_float(annotation: Any) -> bool:
+        # Annotations arrive as real objects here, so Optional[float] is a
+        # typing alias rather than the string "Optional[float]" - comparing
+        # against strings silently matches nothing.
+        if annotation is float:
+            return True
+        if isinstance(annotation, str):
+            return annotation in ("float", "Optional[float]")
+        return float in get_args(annotation)
+
+    floats = {f.name for f in fields(cls) if declared_float(f.type)}
+    for name in floats & values.keys():
+        if isinstance(values[name], (int, float)) and not isinstance(values[name], bool):
+            values[name] = float(values[name])
+    return values
+
+
 def canonical_run_config(
     model_cfg: ModelConfig,
     train_cfg: TrainConfig,
@@ -42,10 +69,10 @@ def canonical_run_config(
     model_dict.pop("rwkv_checkpoint", None)
 
     train_dict = drop_identity_neutral_fields(asdict(train_cfg))
-    train_dict.pop("seed", None)
+    train_dict.pop("seed", None)   # reaches the hash via evaluation.seeds_run
+    train_dict = _coerce_declared_floats(train_dict, TrainConfig)
 
-    task_dict = asdict(task_cfg)
-    task_dict.pop("seed", None)
+    task_dict = _coerce_declared_floats(asdict(task_cfg), Task3SumConfig)
 
     return {
         "model": model_dict,
