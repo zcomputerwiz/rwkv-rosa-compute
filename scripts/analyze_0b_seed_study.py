@@ -25,6 +25,7 @@ import argparse
 import json
 import math
 import re
+import statistics
 from itertools import combinations
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -38,6 +39,9 @@ STUDY = {
 }
 STRATUM = "corrupted_negative_near_3plus"
 CHALLENGE_ID = "e06f92897411fe2e"
+# Section 4 pins the challenge by content, not only by id. Checking the id
+# alone would accept a regenerated set that happened to reuse the id.
+CONTENT_SHA256 = "bef50bba1c80600de6885bf60ef5f9fdfed1b37135715dce0b938cee6a1cb21b"
 TRANSITION_DELTA = 0.10
 # Pre-registration section 4: evaluation settings are part of the outcome
 # definition, because batch size shifts the reported AUC by ~0.003.
@@ -87,6 +91,8 @@ def read_auc(payload: dict) -> float:
     sc = payload["structural_challenge"]
     if sc.get("challenge_id") != CHALLENGE_ID:
         raise ValueError(f"wrong challenge: {sc.get('challenge_id')}")
+    if sc.get("content_sha256") != CONTENT_SHA256:
+        raise ValueError(f"wrong challenge content: {sc.get('content_sha256')}")
     summary = sc.get("auc_summary") or {}
     if STRATUM in summary:
         return float(summary[STRATUM])
@@ -125,7 +131,8 @@ def checkpoint_epoch(payload: dict) -> Optional[int]:
 
 
 def collect(eval_dirs: Sequence[Path]) -> Tuple[Dict[int, Dict[int, float]],
-                                                Dict[int, Dict[int, List[float]]]]:
+                                                Dict[int, Dict[int, List[float]]],
+                                                List[tuple]]:
     """Return (final-epoch AUC by arm/seed, per-epoch AUC series by arm/seed).
 
     Scans recursively: run_id is the filter, so where a file happens to live
@@ -135,6 +142,7 @@ def collect(eval_dirs: Sequence[Path]) -> Tuple[Dict[int, Dict[int, float]],
     final: Dict[int, Dict[int, float]] = {0: {}, 36: {}}
     series: Dict[int, Dict[int, List[float]]] = {0: {}, 36: {}}
     conflicts: List[tuple] = []
+    unpinned: List[tuple] = []
     wanted = {run_id: (arm, seed)
               for arm, seeds in STUDY.items() for seed, run_id in seeds.items()}
     # epoch -> auc, keyed per run, so a base file duplicating _e5 collapses
@@ -189,8 +197,22 @@ def collect(eval_dirs: Sequence[Path]) -> Tuple[Dict[int, Dict[int, float]],
     for run_id, by_epoch in found.items():
         arm, seed = wanted[run_id]
         series[arm][seed] = [by_epoch[e][0] for e in sorted(by_epoch)]
-        if PINNED_EPOCH in by_epoch:
-            final[arm][seed] = by_epoch[PINNED_EPOCH][0]
+        if PINNED_EPOCH not in by_epoch:
+            continue
+        auc, settings = by_epoch[PINNED_EPOCH]
+        # Section 4 makes the pinned settings part of the outcome definition,
+        # so an unpinned artifact is not a valid outcome even when it is the
+        # only one present. Preferring pinned artifacts on disagreement is a
+        # tie-break; this is the requirement the tie-break was serving.
+        if not is_pinned(settings):
+            unpinned.append((arm, seed, settings))
+            continue
+        final[arm][seed] = auc
+    if unpinned:
+        print("OUTCOME ARTIFACT NOT AT THE PINNED SETTINGS - excluded:")
+        for arm, seed, settings in unpinned:
+            print(f"  N={arm} seed {seed} epoch {PINNED_EPOCH}: {settings}")
+        print("  Re-evaluate at batch_size=128, precision=bf16." + chr(10))
     if conflicts:
         print("CONFLICTING EVALUATIONS - same checkpoint, different values:")
         for run_id, epoch, a, b, both_pinned in conflicts:
@@ -201,7 +223,7 @@ def collect(eval_dirs: Sequence[Path]) -> Tuple[Dict[int, Dict[int, float]],
                   f"(delta {abs(a-b):.6f}) - {why}")
         print("  Re-evaluate at the pinned settings; the result below is not "
               "well defined until this is resolved." + chr(10))
-    return final, series
+    return final, series, conflicts
 
 
 def mann_whitney_one_sided(x: Sequence[float], y: Sequence[float]) -> float:
@@ -264,7 +286,7 @@ def main() -> int:
                     help="directories scanned recursively; run_id is the filter")
     args = ap.parse_args()
 
-    final, series = collect([d for d in args.eval_dir if d.exists()])
+    final, series, conflicts = collect([d for d in args.eval_dir if d.exists()])
 
     print(f"per-seed near_3plus AUC at epoch {PINNED_EPOCH}\n")
     print(f"  {'arm':>5} {'seed':>5} {'run_id':>18} {'AUC':>8} {'epochs':>7} {'transition':>11}")
@@ -292,19 +314,26 @@ def main() -> int:
         print("\nnothing to test yet")
         return 0
 
-    if not complete:
+    if not complete or conflicts:
         # Section 8 promises the analyzer refuses to present a result while any
         # run is missing. Printing the p-value under a warning is not refusing:
         # the number is still quotable, and every interim run of this tool
         # reaches exactly this branch.
-        print("\nPRIMARY WITHHELD - the pre-registered test is defined on the "
-              "full set.\n  Per-seed values above are diagnostic. No p-value is "
-              "computed until the study completes.")
+        #
+        # An unresolved conflict is the same defect wearing different clothes.
+        # The conflict block above already says the result is not well defined;
+        # printing a p-value underneath it said otherwise, and the printed value
+        # would depend on which artifact the sorted scan reached first.
+        reason = ("the pre-registered test is defined on the full set"
+                  if not complete else
+                  "conflicting evaluations of the same checkpoint are unresolved")
+        print(f"\nPRIMARY WITHHELD - {reason}.\n  Per-seed values above are "
+              "diagnostic. No p-value is computed.")
     else:
         p = mann_whitney_one_sided(x, y)
         print("\nPRIMARY  one-sided exact Mann-Whitney U, alternative N=0 > N=36")
-        print(f"  N=0  n={len(x)} median {sorted(x)[len(x)//2]:.4f}")
-        print(f"  N=36 n={len(y)} median {sorted(y)[len(y)//2]:.4f}")
+        print(f"  N=0  n={len(x)} median {statistics.median(x):.4f}")
+        print(f"  N=36 n={len(y)} median {statistics.median(y):.4f}")
         print(f"  p = {p:.4f}   {'REJECT' if p <= ALPHA else 'no rejection'} at alpha={ALPHA}")
         print(f"  minimum achievable p at this design: {1/math.comb(len(x)+len(y), len(x)):.4f}")
 
@@ -337,6 +366,21 @@ def _self_check() -> None:
     assert is_pinned({"batch_size": 128, "precision": "bf16", "device": "cuda"})
     assert not is_pinned({"batch_size": 64, "precision": "bf16"})
     assert not is_pinned(None)
+    # The challenge is pinned by content, not only by id: a regenerated set that
+    # reused the id must be rejected rather than silently accepted.
+    good = {"challenge_id": CHALLENGE_ID, "content_sha256": CONTENT_SHA256,
+            "auc_summary": {STRATUM: 0.5}}
+    assert read_auc({"structural_challenge": good}) == 0.5
+    for bad in ({**good, "content_sha256": "0" * 64},
+                {**good, "challenge_id": "deadbeef"}):
+        try:
+            read_auc({"structural_challenge": bad})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted a mismatched challenge: {bad}")
+    # An even-sized arm has a real median, not its upper-middle observation.
+    assert abs(statistics.median([0.5474, 0.5585, 0.5588, 0.5671]) - 0.55865) < 1e-9
     # ties are corrected, not broken arbitrarily
     assert abs(auc_from_per_instance([
         {"margin": 1.0, "realized_label": True, "stratum": "positive_arm_positive"},
