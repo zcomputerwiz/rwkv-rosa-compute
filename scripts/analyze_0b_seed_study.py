@@ -42,7 +42,18 @@ TRANSITION_DELTA = 0.10
 # Pre-registration section 4: evaluation settings are part of the outcome
 # definition, because batch size shifts the reported AUC by ~0.003.
 PINNED_SETTINGS = {"batch_size": 128, "precision": "bf16"}
+# Section 4 pins the outcome to epoch 5. Taking the highest epoch *present*
+# instead would let a seed that is still training contribute its epoch-4 value
+# as if it were final, and would make the completeness count report a mid-flight
+# study as complete.
+PINNED_EPOCH = 5
 ALPHA = 0.05
+
+
+def is_pinned(settings: Optional[dict]) -> bool:
+    """True when both pinned keys match, whatever else the block carries."""
+    return settings is not None and all(
+        settings.get(k) == v for k, v in PINNED_SETTINGS.items())
 
 
 def auc_from_per_instance(per_instance: Sequence[dict]) -> float:
@@ -161,44 +172,67 @@ def collect(eval_dirs: Sequence[Path]) -> Tuple[Dict[int, Dict[int, float]],
                 # keeping whichever the glob reached last would make the result
                 # depend on filename order. Prefer the one whose settings match the
                 # pre-registered pinning; if neither does, record the conflict.
-                prior_ok = prior[1] == PINNED_SETTINGS
-                this_ok = settings is not None and (
-                    settings.get("batch_size") == PINNED_SETTINGS["batch_size"]
-                    and settings.get("precision") == PINNED_SETTINGS["precision"])
+                # Compare the two pinned keys explicitly: eval_settings_of may
+                # return a block carrying extra keys (device, for one), and dict
+                # equality would then call a genuinely pinned artifact unpinned.
+                prior_ok = is_pinned(prior[1])
+                this_ok = is_pinned(settings)
                 if this_ok and not prior_ok:
                     pass                       # this one wins
                 elif prior_ok and not this_ok:
                     continue                   # keep the prior
                 else:
-                    conflicts.append((run_id, epoch, prior[0], auc))
+                    conflicts.append((run_id, epoch, prior[0], auc, prior_ok))
                     continue
             found[run_id][epoch] = (auc, settings)
 
     for run_id, by_epoch in found.items():
         arm, seed = wanted[run_id]
         series[arm][seed] = [by_epoch[e][0] for e in sorted(by_epoch)]
-        final[arm][seed] = by_epoch[max(by_epoch)][0]
+        if PINNED_EPOCH in by_epoch:
+            final[arm][seed] = by_epoch[PINNED_EPOCH][0]
     if conflicts:
         print("CONFLICTING EVALUATIONS - same checkpoint, different values:")
-        for run_id, epoch, a, b in conflicts:
+        for run_id, epoch, a, b, both_pinned in conflicts:
             arm, seed = wanted[run_id]
+            why = ("both carry the pinned settings and still disagree"
+                   if both_pinned else "neither carries the pinned settings")
             print(f"  N={arm} seed {seed} epoch {epoch}: {a:.6f} vs {b:.6f} "
-                  f"(delta {abs(a-b):.6f}) - neither carries the pinned settings")
+                  f"(delta {abs(a-b):.6f}) - {why}")
         print("  Re-evaluate at the pinned settings; the result below is not "
               "well defined until this is resolved." + chr(10))
     return final, series
 
 
 def mann_whitney_one_sided(x: Sequence[float], y: Sequence[float]) -> float:
-    """P(rank-sum of x >= observed) by exact enumeration. Alternative: x > y."""
-    n1 = len(x)
+    """P(rank-sum of x >= observed) by exact enumeration. Alternative: x > y.
+
+    Ranks are tie-corrected, as section 4 requires. The previous implementation
+    keyed ranks by value (``{v: i + 1}``), which collapsed duplicate margins
+    onto one arbitrary position while the null enumeration summed *positional*
+    indices. The two agree only when no ties exist; all-tied inputs returned
+    p = 0, which is not merely wrong but the opposite tail.
+    """
     pooled = sorted(list(x) + list(y))
-    rank = {v: i + 1 for i, v in enumerate(pooled)}
-    observed = sum(rank[v] for v in x)
+    n = len(pooled)
+    ranks = [0.0] * n
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and pooled[j + 1] == pooled[i]:
+            j += 1
+        average = (i + j) / 2 + 1
+        for k in range(i, j + 1):
+            ranks[k] = average
+        i = j + 1
+    rank_of = {}
+    for k, value in enumerate(pooled):
+        rank_of.setdefault(value, ranks[k])
+    observed = sum(rank_of[v] for v in x)
     total = hits = 0
-    for combo in combinations(range(len(pooled)), n1):
+    for combo in combinations(range(n), len(x)):
         total += 1
-        if sum(i + 1 for i in combo) >= observed:
+        if sum(ranks[i] for i in combo) >= observed - 1e-12:
             hits += 1
     return hits / total
 
@@ -232,35 +266,47 @@ def main() -> int:
 
     final, series = collect([d for d in args.eval_dir if d.exists()])
 
-    print("per-seed near_3plus AUC at final epoch\n")
+    print(f"per-seed near_3plus AUC at epoch {PINNED_EPOCH}\n")
     print(f"  {'arm':>5} {'seed':>5} {'run_id':>18} {'AUC':>8} {'epochs':>7} {'transition':>11}")
     for arm in (0, 36):
         for seed, run_id in STUDY[arm].items():
+            seen = len(series[arm].get(seed, ()))
             if seed in final[arm]:
                 tr = transitioned(series[arm][seed])
                 tr_s = "-" if tr is None else ("yes" if tr else "no")
                 print(f"  {arm:5d} {seed:5d} {run_id:>18} {final[arm][seed]:8.4f} "
-                      f"{len(series[arm][seed]):7d} {tr_s:>11}")
+                      f"{seen:7d} {tr_s:>11}")
             else:
-                print(f"  {arm:5d} {seed:5d} {run_id:>18} {'MISSING':>8} {'-':>7} {'-':>11}")
+                # PARTIAL and MISSING are different states: one is a run in
+                # flight, the other is a run with no artifacts at all.
+                state = "PARTIAL" if seen else "MISSING"
+                print(f"  {arm:5d} {seed:5d} {run_id:>18} {state:>8} "
+                      f"{seen if seen else '-':>7} {'-':>11}")
 
     x, y = list(final[0].values()), list(final[36].values())
     n_expected = (len(STUDY[0]), len(STUDY[36]))
     print(f"\nobserved {len(x)} of {n_expected[0]} (N=0), "
           f"{len(y)} of {n_expected[1]} (N=36)")
-    if len(x) < n_expected[0] or len(y) < n_expected[1]:
-        print("INCOMPLETE - the pre-registered test is defined on the full set.\n"
-              "Values below are diagnostic only and must not be reported as the result.")
+    complete = len(x) == n_expected[0] and len(y) == n_expected[1]
     if not x or not y:
         print("\nnothing to test yet")
         return 0
 
-    p = mann_whitney_one_sided(x, y)
-    print("\nPRIMARY  one-sided exact Mann-Whitney U, alternative N=0 > N=36")
-    print(f"  N=0  n={len(x)} median {sorted(x)[len(x)//2]:.4f}")
-    print(f"  N=36 n={len(y)} median {sorted(y)[len(y)//2]:.4f}")
-    print(f"  p = {p:.4f}   {'REJECT' if p <= ALPHA else 'no rejection'} at alpha={ALPHA}")
-    print(f"  minimum achievable p at this design: {1/math.comb(len(x)+len(y), len(x)):.4f}")
+    if not complete:
+        # Section 8 promises the analyzer refuses to present a result while any
+        # run is missing. Printing the p-value under a warning is not refusing:
+        # the number is still quotable, and every interim run of this tool
+        # reaches exactly this branch.
+        print("\nPRIMARY WITHHELD - the pre-registered test is defined on the "
+              "full set.\n  Per-seed values above are diagnostic. No p-value is "
+              "computed until the study completes.")
+    else:
+        p = mann_whitney_one_sided(x, y)
+        print("\nPRIMARY  one-sided exact Mann-Whitney U, alternative N=0 > N=36")
+        print(f"  N=0  n={len(x)} median {sorted(x)[len(x)//2]:.4f}")
+        print(f"  N=36 n={len(y)} median {sorted(y)[len(y)//2]:.4f}")
+        print(f"  p = {p:.4f}   {'REJECT' if p <= ALPHA else 'no rejection'} at alpha={ALPHA}")
+        print(f"  minimum achievable p at this design: {1/math.comb(len(x)+len(y), len(x)):.4f}")
 
     t0 = [transitioned(series[0][s]) for s in final[0]]
     t36 = [transitioned(series[36][s]) for s in final[36]]
@@ -281,6 +327,16 @@ def _self_check() -> None:
     assert abs(fisher_two_sided(4, 1, 1, 4) - 0.2063) < 5e-5
     assert abs(mann_whitney_one_sided([3, 4, 5], [0, 1, 2]) - 1 / 20) < 1e-12
     assert abs(mann_whitney_one_sided([0, 1, 2], [3, 4, 5]) - 1.0) < 1e-12
+    # Ties in the Mann-Whitney path. The earlier asserts were all tie-free, so
+    # they exercised only the inputs the broken implementation got right - the
+    # all-tied case returned p = 0, the impossible value.
+    assert abs(mann_whitney_one_sided([0.5, 0.5], [0.5]) - 1.0) < 1e-12
+    assert abs(mann_whitney_one_sided([0.5, 0.5], [0.5, 0.5]) - 1.0) < 1e-12
+    assert abs(mann_whitney_one_sided([0.7, 0.5], [0.5, 0.3]) - 1 / 3) < 1e-12
+    # a pinned block is still pinned when it carries extra keys
+    assert is_pinned({"batch_size": 128, "precision": "bf16", "device": "cuda"})
+    assert not is_pinned({"batch_size": 64, "precision": "bf16"})
+    assert not is_pinned(None)
     # ties are corrected, not broken arbitrarily
     assert abs(auc_from_per_instance([
         {"margin": 1.0, "realized_label": True, "stratum": "positive_arm_positive"},
