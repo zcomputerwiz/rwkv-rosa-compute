@@ -148,16 +148,35 @@ def main(argv=None) -> int:
     with torch.no_grad(), _autocast_context(device, args.precision):
         logits = model(inputs, targets)
 
+    # Identity of everything that feeds the digest, so a reproducer can tell a
+    # hardware difference from a stale checkout or different inputs. Without
+    # these, input and code identity are asserted by the run procedure rather
+    # than proved by the artifact.
+    input_sha = hashlib.sha256(inputs.detach().cpu().contiguous().numpy().tobytes())
+    input_sha.update(targets.detach().cpu().contiguous().numpy().tobytes())
+    script_sha = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    try:
+        import subprocess
+        commit = subprocess.run(["git", "-C", str(Path(__file__).resolve().parents[1]),
+                                 "rev-parse", "HEAD"], capture_output=True,
+                                text=True, timeout=10)
+        commit = commit.stdout.strip() if commit.returncode == 0 else "UNAVAILABLE"
+    except Exception:
+        commit = "UNAVAILABLE"
+
     flat = logits.detach().float().cpu().contiguous()
     if not torch.isfinite(flat).all():
         raise SystemExit("non-finite logits; the probe is not measuring anything")
     digest = hashlib.sha256(flat.numpy().tobytes()).hexdigest()
 
     payload = {
-        "probe_version": 2,
+        "probe_version": 3,
         "logits_sha256": digest,
         "param_sha256": param_sha.hexdigest(),
         "logits_shape": list(flat.shape),
+        "input_sha256": input_sha.hexdigest(),
+        "script_sha256": script_sha,
+        "commit": commit,
         # A few exact values, so two artifacts can be compared by eye and a
         # difference can be sized without re-running anything.
         "logits_sample": [round(float(v), 8) for v in flat.flatten()[:8]],
