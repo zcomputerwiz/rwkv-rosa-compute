@@ -1,5 +1,23 @@
 # Experiment 0 to Experiment 1 transition plan
 
+> **Status, 2026-08-27: historical record. Both forward-looking items below are
+> closed.** This document is accurate as of the day it was written and is kept
+> as a handoff record, not as current direction.
+>
+> - *"Finish the planned seed replication"* — **done.** The 0B seed study
+>   completed at 5 (N=0) versus 4 (N=36) with complete separation; the
+>   pre-registered one-sided exact Mann-Whitney rejects at `p = 0.0079`, the
+>   design's minimum achievable value. The seed-42 table below is therefore now
+>   one row of a completed study rather than the `n=1` Bernoulli draw it
+>   correctly called itself at the time.
+> - *"H2 remains the core question"* — **not answerable on the apparatus this
+>   document assumes.** The generator it points at is solvable by a strictly
+>   streaming interpreter, so silent tokens arrive with no computation left to
+>   do; and a layer-scaling probe showed the learnability wall between `D=3` and
+>   `D=4` does not move when layers are doubled, so the failure is not
+>   representational depth. H2 continues on the query-deferred pointer chase
+>   instead.
+
 Reviewer handoff, 2026-08-23, with three additions from `claude-ada` marked
 inline. Experiment 0 stops being the main research target: 0A validated the
 apparatus, 0B produced H1 and optimization findings, and H2 remains the core
