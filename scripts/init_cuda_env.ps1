@@ -9,7 +9,8 @@
 
       1. Resolves the repository root by absolute path and sets the working
          directory to it.
-      2. Prefers .venv\Scripts\python.exe; falls back to PATH python.
+      2. Prefers .venv\Scripts\python.exe; falls back to PATH python, and
+         verifies that the selected interpreter can start.
       3. Locates Visual Studio via vswhere and activates the newest installed
          64-bit MSVC toolset (EXP0_MSVC_TOOLSET overrides).
       4. Optionally requires the CUDA toolkit (EXP0_REQUIRE_RWKV_CUDA=1).
@@ -61,6 +62,17 @@ if (Test-Path -LiteralPath $venvPython) {
     }
     $PythonExe = $found.Source
     Write-Host "No .venv found; using $PythonExe" -ForegroundColor Yellow
+}
+
+try {
+    $pythonVersion = (& $PythonExe --version 2>&1 | Out-String).Trim()
+    $pythonExitCode = $LASTEXITCODE
+} catch {
+    throw "Python interpreter cannot start: $PythonExe`n$($_.Exception.Message)"
+}
+if ($pythonExitCode -ne 0) {
+    throw ("Python interpreter failed its --version check (exit " +
+           "$pythonExitCode): $PythonExe`n$pythonVersion")
 }
 
 # --- MSVC environment -------------------------------------------------------
@@ -160,4 +172,4 @@ Write-Host ("  {0,-9}: {1}" -f "toolset", $(if ($toolset) { $toolset } else { "d
 Show-Tool "cl.exe" "cl"
 Show-Tool "nvcc" "nvcc"
 Show-Tool "ninja" "ninja"
-Write-Host ("  {0,-9}: {1}" -f "python", $PythonExe)
+Write-Host ("  {0,-9}: {1}  ({2})" -f "python", $PythonExe, $pythonVersion)

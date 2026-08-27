@@ -40,10 +40,12 @@
     without an intermediate shell.
 
 .EXAMPLE (submission happens on the operator/agent side)
-    pueue add --group gpu0 -- powershell -NoProfile -File ^
-      D:\GitHub\rwkv-rosa-compute\scripts\pueue_wrap.ps1 ^
-      -RepoRoot D:\GitHub\rwkv-rosa-compute -RequireCuda ^
-      -- .\scripts\run_experiment.py --architecture rwkv ...
+    $command = 'powershell.exe -NoProfile -NonInteractive ' +
+      '-ExecutionPolicy Bypass -File "D:\repo\scripts\pueue_wrap.ps1" ' +
+      '-RepoRoot "D:\repo" -RequireCuda'
+    $id = pueue add --group gpu0 --stashed --print-task-id $command
+    pueue env set $id PUEUE_TASK_JSON '["python","-u","scripts/x.py"]'
+    pueue enqueue $id
 
 .EXAMPLE (CPU-only self check)
     powershell -NoProfile -File .\scripts\pueue_wrap.ps1 -SelfCheck -- echo hi
@@ -100,14 +102,26 @@ Set-Location -LiteralPath $RepoRoot
 # --- 2. Provenance: commit + dirty state (explicit failure states) ----------
 $commit = "UNAVAILABLE (git rev-parse failed)"
 $dirty = "UNKNOWN"
-git -C $RepoRoot rev-parse HEAD *> $null
-if ($LASTEXITCODE -eq 0) {
-    $commit = git -C $RepoRoot rev-parse HEAD
-    git -C $RepoRoot status --porcelain *> $null
-    if ($LASTEXITCODE -eq 0) {
-        $dirty = [bool]((git -C $RepoRoot status --porcelain | Measure-Object).Count)
-    } else {
-        $dirty = "UNKNOWN (git status failed)"
+if (Get-Command git -ErrorAction SilentlyContinue) {
+    $previousErrorAction = $ErrorActionPreference
+    try {
+        # Windows PowerShell promotes native stderr to ErrorRecord objects.
+        # Keep an expected git failure in provenance instead of aborting the job.
+        $ErrorActionPreference = "Continue"
+        $commitOutput = @(git -C $RepoRoot rev-parse HEAD 2>$null)
+        $commitExitCode = $LASTEXITCODE
+        if ($commitExitCode -eq 0 -and $commitOutput.Count -eq 1) {
+            $commit = [string]$commitOutput[0]
+            $statusOutput = @(git -C $RepoRoot status --porcelain 2>$null)
+            $statusExitCode = $LASTEXITCODE
+            if ($statusExitCode -eq 0) {
+                $dirty = [bool]$statusOutput.Count
+            } else {
+                $dirty = "UNKNOWN (git status failed)"
+            }
+        }
+    } finally {
+        $ErrorActionPreference = $previousErrorAction
     }
 }
 
@@ -144,7 +158,6 @@ if ($SelfCheck) {
         # Discovery IS validation for kernel-compiling jobs: fail closed,
         # naming every missing tool.
         $missing = @()
-        if (-not (Test-Path -LiteralPath $PythonExe)) { $missing += "python(.venv)" }
         foreach ($t in "cl", "nvcc", "ninja") {
             if (-not (Get-Command $t -ErrorAction SilentlyContinue)) { $missing += $t }
         }

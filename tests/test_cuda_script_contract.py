@@ -18,3 +18,16 @@ def test_runner_uses_shared_bootstrap():
     script = Path("scripts/run_cuda_tests.ps1").read_text(encoding="utf-8")
     assert "init_cuda_env.ps1" in script
     assert "-RequireCuda" in script
+
+
+def test_bootstrap_requires_callable_python():
+    bootstrap = Path("scripts/init_cuda_env.ps1").read_text(encoding="utf-8")
+    assert "& $PythonExe --version" in bootstrap
+    assert "$pythonExitCode -ne 0" in bootstrap
+
+
+def test_wrapper_has_checked_in_execution_regression():
+    regression = Path("tests/test_pueue_wrap.ps1").read_text(encoding="utf-8")
+    for contract in ("exit 7", "one-element", "scalar JSON",
+                     "mismatched repository", "uncallable venv Python"):
+        assert contract in regression
