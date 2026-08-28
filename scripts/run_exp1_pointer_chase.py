@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import torch
 
 from exp0.config import ModelConfig, TrainConfig
-from exp0.train import create_model
+from exp0.train import create_model, set_seed
 from exp1.dataset import PointerChaseDataset
 from exp1.pointer_chase import ChaseSpec, generate_dataset, make_neutral_vector
 from exp1.train import train_model
@@ -94,6 +94,7 @@ def main(argv=None) -> int:
         rwkv_kernel="reference" if device.type == "cpu" else "cuda",
     )
 
+    set_seed(args.seed)
     model = create_model(
         model_cfg,
         d_input=spec.d_input,

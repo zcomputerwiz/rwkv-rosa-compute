@@ -194,3 +194,138 @@ def test_training_resumes_from_checkpoint(tmp_path):
 
     # Check that another checkpoint was saved
     assert (checkpoint_dir / "epoch_002.pt").exists()
+
+def test_model_initialization_seeding():
+    spec = ChaseSpec(num_nodes=M, num_maps=K, max_depth=8)
+    model_cfg = ModelConfig(
+        architecture="rwkv",
+        hidden_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        head_dim=64,
+        vocab_size=M,
+        rwkv_kernel="reference",
+    )
+
+    import hashlib
+
+    from exp0.train import set_seed
+
+    def hash_model(seed):
+        set_seed(seed)
+        m = create_model(model_cfg, d_input=spec.d_input, compact_reduced_features=False)
+        sha = hashlib.sha256()
+        for name, p in sorted(m.state_dict().items()):
+            sha.update(name.encode())
+            sha.update(p.detach().cpu().contiguous().numpy().tobytes())
+        return sha.hexdigest()
+
+    h1 = hash_model(42)
+    h2 = hash_model(42)
+    h3 = hash_model(43)
+
+    assert h1 == h2, "Model parameters are not identical for the same seed"
+    assert h1 != h3, "Model parameters identical across different seeds"
+
+def test_exact_resume_and_history_preservation(tmp_path):
+    """Defect 3: Resume must preserve history and be functionally exact to an uninterrupted run."""
+    spec = ChaseSpec(num_nodes=M, num_maps=K, max_depth=8)
+    train_data = generate_dataset(4, 4, depth=4, seed=1, num_nodes=M, num_maps=K)
+    val_data = generate_dataset(2, 4, depth=4, seed=2, num_nodes=M, num_maps=K)
+
+    train_ds = PointerChaseDataset(train_data, spec)
+    val_ds = PointerChaseDataset(val_data, spec)
+
+    model_cfg = ModelConfig(
+        architecture="rwkv",
+        hidden_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        head_dim=64,
+        vocab_size=M,
+        rwkv_kernel="reference",
+    )
+
+    train_cfg_full = TrainConfig(seed=42, batch_size=4, precision="fp32", num_workers=0, epochs=2, learning_rate=1e-3)
+    device = torch.device("cpu")
+
+    # 1. Train 2 epochs uninterrupted
+    from exp0.train import set_seed
+    set_seed(42)
+    model_full = create_model(model_cfg, d_input=spec.d_input, compact_reduced_features=False)
+
+    model_full, history_full = train_model(
+        model_full, train_ds, val_ds, spec, model_cfg, train_cfg_full, device
+    )
+
+    # 2. Train 1 epoch, save, resume for 1 more epoch
+    set_seed(42)
+    model_part = create_model(model_cfg, d_input=spec.d_input, compact_reduced_features=False)
+
+    checkpoint_dir = tmp_path / "checkpoints_exact"
+    checkpoint_dir.mkdir()
+
+    model_part, history_part1 = train_model(
+        model_part, train_ds, val_ds, spec, model_cfg, train_cfg_full, device, checkpoint_path=checkpoint_dir, max_epochs=1
+    )
+
+    latest_ckpt = checkpoint_dir / "latest.pt"
+
+    # Notice we pass `epochs=2` here because `train_model` handles start_epoch up to epochs.
+    # We must construct a fresh model to prove resume works from disk.
+    set_seed(999) # different seed to ensure we rely on loaded weights
+    model_resumed = create_model(model_cfg, d_input=spec.d_input, compact_reduced_features=False)
+
+    model_resumed, history_resumed = train_model(
+        model_resumed, train_ds, val_ds, spec, model_cfg, train_cfg_full, device,
+        checkpoint_path=checkpoint_dir, resume_from_checkpoint=latest_ckpt
+    )
+
+    # Assert histories match
+    assert history_full["epoch_train_losses"] == history_resumed["epoch_train_losses"], "Train losses diverge after resume"
+    assert history_full["epoch_val_accuracies"] == history_resumed["epoch_val_accuracies"], "Val accuracies diverge after resume"
+    assert history_full["best_val_accuracy"] == history_resumed["best_val_accuracy"], "Best val acc differs"
+
+    # Assert parameters match exactly
+    for (name1, p1), (name2, p2) in zip(model_full.state_dict().items(), model_resumed.state_dict().items()):
+        assert name1 == name2
+        assert torch.equal(p1, p2), f"Parameter {name1} diverges after resume"
+
+def test_step_periodic_checkpointing(tmp_path):
+    """Defect 4: Ensure checkpointing works per-step with a sample offset."""
+    spec = ChaseSpec(num_nodes=M, num_maps=K, max_depth=8)
+    train_data = generate_dataset(4, 4, depth=4, seed=1, num_nodes=M, num_maps=K)
+    val_data = generate_dataset(2, 4, depth=4, seed=2, num_nodes=M, num_maps=K)
+
+    train_ds = PointerChaseDataset(train_data, spec)
+    val_ds = PointerChaseDataset(val_data, spec)
+
+    model_cfg = ModelConfig(
+        architecture="rwkv",
+        hidden_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        head_dim=64,
+        vocab_size=M,
+        rwkv_kernel="reference",
+    )
+
+    train_cfg = TrainConfig(seed=42, batch_size=4, precision="fp32", num_workers=0, epochs=1, learning_rate=1e-3)
+    device = torch.device("cpu")
+
+    from exp0.train import set_seed
+    set_seed(42)
+    model = create_model(model_cfg, d_input=spec.d_input, compact_reduced_features=False)
+
+    checkpoint_dir = tmp_path / "checkpoints_steps"
+    checkpoint_dir.mkdir()
+
+    # Train and checkpoint every 2 steps
+    train_model(
+        model, train_ds, val_ds, spec, model_cfg, train_cfg, device,
+        checkpoint_path=checkpoint_dir, checkpoint_every_steps=2
+    )
+
+    assert (checkpoint_dir / "step_000002.pt").exists()
+    assert (checkpoint_dir / "step_000004.pt").exists()
+    assert (checkpoint_dir / "epoch_001.pt").exists()

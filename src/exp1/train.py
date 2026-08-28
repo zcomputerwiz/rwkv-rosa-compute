@@ -4,7 +4,7 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import torch.nn.functional as F
 
-from exp0.checkpointing import atomic_copy
+from exp0.checkpointing import ResumableRandomSampler, atomic_copy, epoch_shuffle_seed
 from exp0.config import ModelConfig, TrainConfig
 from exp0.train import (
     _autocast_context,
@@ -75,12 +75,11 @@ def train_model(
     *,
     checkpoint_path: Optional[Path] = None,
     resume_from_checkpoint: Optional[Path] = None,
+    checkpoint_every_steps: Optional[int] = None,
+    max_epochs: Optional[int] = None,
 ) -> Tuple[torch.nn.Module, Dict[str, Any]]:
     """Train loop specifically for the Experiment 1 pointer-chase task."""
     set_seed(train_cfg.seed)
-
-    loader = _create_loader(train_dataset, train_cfg, device, shuffle=True)
-    loader.collate_fn = exp1_collate_fn
 
     if train_cfg.fused_adamw and device.type == "cuda":
         optimizer = torch.optim.AdamW(
@@ -98,8 +97,14 @@ def train_model(
             betas=(train_cfg.adam_beta1, train_cfg.adam_beta2),
         )
 
+    # Simplified single-seed setup
     epochs = train_cfg.epochs
-    total_steps = len(loader) * epochs
+
+    # We must calculate total_steps carefully since batch size may vary the length of loader.
+    # We will build a dummy loader just to get the length.
+    dummy_loader = _create_loader(train_dataset, train_cfg, device, shuffle=True)
+    batches_per_epoch = len(dummy_loader)
+    total_steps = batches_per_epoch * epochs
     lr_scheduler = _make_lr_scheduler(optimizer, train_cfg, total_steps)
     scaler = torch.amp.GradScaler(device.type) if train_cfg.precision == "fp16" else None
 
@@ -109,6 +114,8 @@ def train_model(
     start_epoch = 0
     optimizer_steps = 0
     best_val_acc = 0.0
+    resume_samples = 0
+    resume_epoch_seed = None
 
     if resume_from_checkpoint:
         prog_state, init_state = _load_training_checkpoint_into_state(
@@ -120,22 +127,59 @@ def train_model(
             scaler=scaler,
             device=device,
         )
-        start_epoch = prog_state.get("epoch", 0)
-        optimizer_steps = prog_state.get("optimizer_steps", 0)
-        best_val_acc = prog_state.get("completed", {}).get("best_val_acc", 0.0)
 
-    epoch_train_losses = []
-    epoch_val_accuracies = []
+        # If it was a mid-epoch checkpoint, prog_state has partial_epoch info
+        if "partial_epoch" in prog_state and prog_state["partial_epoch"] is not None:
+            partial = prog_state["partial_epoch"]
+            start_epoch = partial["epoch"]
+            resume_samples = partial["samples_consumed"]
+            resume_epoch_seed = partial["epoch_seed"]
+            optimizer_steps = prog_state.get("optimizer_steps", 0)
+            comp = prog_state.get("completed", {})
+            best_val_acc = comp.get("best_val_acc", 0.0)
+            epoch_train_losses = comp.get("epoch_train_losses", [])
+            epoch_val_accuracies = comp.get("epoch_val_accuracies", [])
+        else:
+            start_epoch = prog_state.get("epoch", 0)
+            optimizer_steps = prog_state.get("optimizer_steps", 0)
+            comp = prog_state.get("completed", {})
+            best_val_acc = comp.get("best_val_acc", 0.0)
+            epoch_train_losses = comp.get("epoch_train_losses", [])
+            epoch_val_accuracies = comp.get("epoch_val_accuracies", [])
+    else:
+        epoch_train_losses = []
+        epoch_val_accuracies = []
 
-    for epoch in range(start_epoch, epochs):
+    stop_at_epoch = epochs if max_epochs is None else start_epoch + max_epochs
+
+    for epoch in range(start_epoch, stop_at_epoch):
         model.train()
         total_loss = 0.0
 
-        for batch in loader:
+        if resume_samples > 0:
+            epoch_seed = resume_epoch_seed
+        else:
+            epoch_seed = epoch_shuffle_seed(train_cfg.seed, epoch)
+
+        sampler = ResumableRandomSampler(
+            train_dataset,
+            epoch_seed=epoch_seed,
+            start_index=resume_samples,
+        )
+        loader = _create_loader(
+            train_dataset,
+            train_cfg,
+            device,
+            sampler=sampler,
+        )
+        loader.collate_fn = exp1_collate_fn
+
+        for batch_idx, batch in enumerate(loader):
             optimizer.zero_grad()
 
             inputs = batch["input_tuples"].to(device, non_blocking=True)
             targets = batch["targets"].to(device, non_blocking=True)
+            batch_size = targets.shape[0]
 
             with _autocast_context(device, train_cfg.precision):
                 tuple_embeds = model._tuple_hidden(inputs)
@@ -161,6 +205,38 @@ def train_model(
 
             total_loss += loss.item()
             optimizer_steps += 1
+            resume_samples += batch_size
+
+            if checkpoint_every_steps and optimizer_steps % checkpoint_every_steps == 0:
+                if checkpoint_path is not None:
+                    prog = _checkpoint_progress(
+                        epoch=epoch, # In progress epoch
+                        epoch_seed=epoch_seed,
+                        samples_consumed_in_epoch=resume_samples,
+                        optimizer_steps=optimizer_steps,
+                        completed={
+                            "best_val_acc": best_val_acc,
+                            "epoch_train_losses": epoch_train_losses,
+                            "epoch_val_accuracies": epoch_val_accuracies,
+                        },
+                        partial_epoch={
+                            "epoch": epoch,
+                            "samples_consumed": resume_samples,
+                            "epoch_seed": epoch_seed,
+                        },
+                    )
+                    step_checkpoint = checkpoint_path / f"step_{optimizer_steps:06d}.pt"
+                    _save_training_checkpoint(
+                        step_checkpoint,
+                        signature=signature,
+                        model=model,
+                        optimizer=optimizer,
+                        lr_scheduler=lr_scheduler,
+                        scaler=scaler,
+                        initialization={},
+                        progress=prog,
+                    )
+                    atomic_copy(step_checkpoint, checkpoint_path / "latest.pt")
 
         epoch_loss = total_loss / len(loader)
         epoch_train_losses.append(epoch_loss)
@@ -177,7 +253,11 @@ def train_model(
                 epoch_seed=None,
                 samples_consumed_in_epoch=0,
                 optimizer_steps=optimizer_steps,
-                completed={"best_val_acc": best_val_acc},
+                completed={
+                    "best_val_acc": best_val_acc,
+                    "epoch_train_losses": epoch_train_losses,
+                    "epoch_val_accuracies": epoch_val_accuracies,
+                },
                 partial_epoch=None,
             )
             epoch_checkpoint = checkpoint_path / f"epoch_{epoch + 1:03d}.pt"
@@ -193,13 +273,16 @@ def train_model(
             )
             atomic_copy(epoch_checkpoint, checkpoint_path / "latest.pt")
 
+        resume_samples = 0
+        resume_epoch_seed = None
+
         print(f"Epoch {epoch+1}/{epochs} | Loss: {epoch_loss:.4f} | Val Acc: {val_acc:.4f}")
 
     history = {
         "epoch_train_losses": epoch_train_losses,
         "epoch_val_accuracies": epoch_val_accuracies,
         "best_val_accuracy": best_val_acc,
-        "epochs_trained": epochs - start_epoch,
+        "epochs_trained": (epochs if max_epochs is None else stop_at_epoch) - start_epoch,
     }
 
     return model, history
