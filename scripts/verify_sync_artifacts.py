@@ -6,6 +6,38 @@ import os
 import re
 import sys
 
+hex_pattern = re.compile(r'^[a-fA-F0-9]{64}$')
+
+def classify(target, sidecar, has_artifact, has_sidecar):
+    if not has_artifact and has_sidecar:
+        return "orphaned sidecar"
+    elif has_artifact and not has_sidecar:
+        return "no sidecar"
+    elif has_artifact and has_sidecar:
+        try:
+            with open(sidecar, "r", encoding="utf-8") as f:
+                first_line = f.readline().strip()
+
+            expected_digest = first_line[:64]
+            if not hex_pattern.match(expected_digest):
+                return "malformed sidecar"
+
+            h = hashlib.sha256()
+            with open(target, "rb") as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+            actual_digest = h.hexdigest()
+
+            if actual_digest.lower() == expected_digest.lower():
+                return "verified"
+            else:
+                return "MISMATCH"
+        except OSError:
+            return "unreadable"
+
 def main():
     parser = argparse.ArgumentParser(description="Verify sha256 sidecar files. By default excludes .stversions and .stfolder.")
     parser.add_argument("directories", nargs="*", default=["."], help="Directories to verify")
@@ -57,52 +89,21 @@ def main():
     output_records = []
     has_failure = False
 
-    hex_pattern = re.compile(r'^[a-fA-F0-9]{64}$')
-
     for target in sorted(all_targets):
         sidecar = target + ".sha256"
         has_artifact = target in artifacts
         has_sidecar = sidecar in sidecars
 
-        status = None
+        status = classify(target, sidecar, has_artifact, has_sidecar)
+
         record_file = target
-
-        if not has_artifact and has_sidecar:
-            status = "orphaned sidecar"
+        if status == "orphaned sidecar":
             record_file = sidecar
+
+        if status in ("MISMATCH", "malformed sidecar", "unreadable", "orphaned sidecar"):
             has_failure = True
-        elif has_artifact and not has_sidecar:
-            status = "no sidecar"
-        elif has_artifact and has_sidecar:
-            try:
-                with open(sidecar, "r", encoding="utf-8") as f:
-                    first_line = f.readline().strip()
 
-                expected_digest = first_line[:64]
-                if not hex_pattern.match(expected_digest):
-                    status = "malformed sidecar"
-                    has_failure = True
-                else:
-                    h = hashlib.sha256()
-                    with open(target, "rb") as f:
-                        while True:
-                            chunk = f.read(65536)
-                            if not chunk:
-                                break
-                            h.update(chunk)
-                    actual_digest = h.hexdigest()
-
-                    if actual_digest.lower() == expected_digest.lower():
-                        status = "verified"
-                    else:
-                        status = "MISMATCH"
-                        has_failure = True
-            except OSError:
-                status = "unreadable"
-                has_failure = True
-
-        if status:
-            output_records.append({"file": record_file, "status": status})
+        output_records.append({"file": record_file, "status": status})
 
     if args.json:
         print(json.dumps(output_records, indent=2))
