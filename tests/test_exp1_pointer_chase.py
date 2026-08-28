@@ -12,9 +12,15 @@ from collections import Counter
 import pytest
 import torch
 
-from exp1.pointer_chase import (ChaseSpec, encode_batch, execute,
-                                generate_dataset, generate_instance,
-                                generate_memory, make_neutral_vector)
+from exp1.pointer_chase import (
+    ChaseSpec,
+    encode_batch,
+    execute,
+    generate_dataset,
+    generate_instance,
+    generate_memory,
+    make_neutral_vector,
+)
 
 M, K = 16, 4
 

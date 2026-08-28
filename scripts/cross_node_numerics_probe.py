@@ -44,7 +44,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from exp0.checkpoint_analysis import _config_from_mapping  # noqa: E402
 from exp0.config import ModelConfig, Task3SumConfig  # noqa: E402
-from exp0.dataset import Task3SumDataset, build_default_vocab, pad_collate_fn  # noqa: E402
+from exp0.dataset import (  # noqa: E402
+    Task3SumDataset,
+    build_default_vocab,
+    pad_collate_fn,
+)
 from exp0.diagnostics import _autocast_context  # noqa: E402
 from exp0.generation import generate_protocol_packed_instances  # noqa: E402
 from exp0.train import create_model  # noqa: E402
