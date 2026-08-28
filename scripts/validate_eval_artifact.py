@@ -7,7 +7,6 @@ import os
 import sys
 from pathlib import Path
 
-
 ALIASES = {
     # Expected fields can be mapped to a list of possible json paths (dot separated).
     # e.g., 'a.b.c' will look for {"a": {"b": {"c": value}}}
@@ -22,7 +21,8 @@ ALIASES = {
     "content_hash": ["structural_challenge.content_sha256", "input_sha256"],
 
     # code
-    "commit_or_script_hash": ["commit", "script_sha256"],
+    "commit": ["commit"],
+    "script_hash": ["script_sha256"],
 
     # checkpoint
     "checkpoint": ["checkpoint", "model.rwkv_checkpoint_sha256"],
@@ -36,7 +36,7 @@ ALIASES = {
     "compute_capability": ["environment.gpu_compute_capability", "environment.capability"]
 }
 
-def resolve_alias(data, paths, enforce_hash=False):
+def resolve_alias(data, paths, enforce_hash=False, hash_len=64):
     for path in paths:
         parts = path.split('.')
         curr = data
@@ -51,7 +51,7 @@ def resolve_alias(data, paths, enforce_hash=False):
         # Must be present and not explicitly an empty collection/string
         if found and curr is not None and curr != "" and curr != [] and curr != {}:
             if enforce_hash:
-                if isinstance(curr, str) and len(curr) == 64 and all(c in "0123456789abcdefABCDEF" for c in curr):
+                if isinstance(curr, str) and len(curr) == hash_len and all(c in "0123456789abcdefABCDEF" for c in curr):
                     return True
                 # Not a valid hash, check next alias
                 continue
@@ -132,8 +132,10 @@ def main(argv=None) -> int:
             missing.append("challenge or dataset identifier AND its content hash")
 
         # Code group
-        if not resolve_alias(data, ALIASES["commit_or_script_hash"]):
-            missing.append("commit and/or script hash")
+        if not resolve_alias(data, ALIASES["commit"], enforce_hash=True, hash_len=40):
+            missing.append("commit")
+        if not resolve_alias(data, ALIASES["script_hash"]):
+            missing.append("script hash")
 
         # Checkpoint group
         if not resolve_alias(data, ALIASES["checkpoint"]):

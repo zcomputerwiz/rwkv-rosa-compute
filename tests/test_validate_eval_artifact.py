@@ -1,12 +1,12 @@
 import json
-import pytest
-from pathlib import Path
 import sys
+from pathlib import Path
 
 # Add the scripts directory to the path so we can import the script directly
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from validate_eval_artifact import main
+
 
 def write_json(path, data):
     with open(path, "w", encoding="utf-8") as f:
@@ -19,7 +19,8 @@ def valid_payload():
         "epochs": 5,
         "task_config": {"name": "test"},
         "input_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "commit": "1234567",
+        "commit": "cccccccccccccccccccccccccccccccccccccccc",
+        "script_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
         "checkpoint": "my_checkpoint.pt",
         "settings": {
             "batch_size": 32,
@@ -60,7 +61,7 @@ def test_missing_inputs_group(tmp_path, capsys):
     captured = capsys.readouterr()
     assert "missing challenge or dataset identifier AND its content hash" in captured.out
 
-def test_missing_code_group(tmp_path, capsys):
+def test_missing_commit(tmp_path, capsys):
     fpath = tmp_path / "missing_commit.json"
     payload = valid_payload()
     del payload["commit"]
@@ -68,7 +69,29 @@ def test_missing_code_group(tmp_path, capsys):
 
     assert main([str(fpath)]) == 0
     captured = capsys.readouterr()
-    assert "missing commit and/or script hash" in captured.out
+    assert "missing commit" in captured.out
+    assert "script hash" not in captured.out
+
+def test_missing_script_hash(tmp_path, capsys):
+    fpath = tmp_path / "missing_script_hash.json"
+    payload = valid_payload()
+    del payload["script_sha256"]
+    write_json(fpath, payload)
+
+    assert main([str(fpath)]) == 0
+    captured = capsys.readouterr()
+    assert "missing script hash" in captured.out
+    assert "missing commit" not in captured.out
+
+def test_short_commit_rejected(tmp_path, capsys):
+    fpath = tmp_path / "short_commit.json"
+    payload = valid_payload()
+    payload["commit"] = "12345678"
+    write_json(fpath, payload)
+
+    assert main([str(fpath)]) == 0
+    captured = capsys.readouterr()
+    assert "missing commit" in captured.out
 
 def test_missing_checkpoint_group(tmp_path, capsys):
     fpath = tmp_path / "missing_checkpoint.json"
@@ -189,7 +212,7 @@ def test_real_artifact_shape(tmp_path, capsys):
     assert main([str(fpath)]) == 0
     captured = capsys.readouterr()
 
-    assert "missing commit and/or script hash" in captured.out
+    assert "missing commit, script hash" in captured.out
     assert "device name and compute capability" in captured.out
 
     # Make sure we don't accidentally report other fields missing
