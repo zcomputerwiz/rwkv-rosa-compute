@@ -33,6 +33,8 @@ def main(argv=None) -> int:
     parser.add_argument("--num-silent", type=int, default=0)
     parser.add_argument("--silent-kind", type=str, default=None)
     parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--checkpoint-path", type=Path, default=None)
+    parser.add_argument("--resume-from-checkpoint", type=Path, default=None)
 
     args = parser.parse_args(argv)
 
@@ -114,6 +116,8 @@ def main(argv=None) -> int:
         model_cfg,
         train_cfg,
         device,
+        checkpoint_path=args.checkpoint_path,
+        resume_from_checkpoint=args.resume_from_checkpoint,
     )
 
     print(f"Done! Best Val Acc: {history['best_val_accuracy']:.4f}")

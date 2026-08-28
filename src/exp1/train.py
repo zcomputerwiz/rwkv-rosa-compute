@@ -4,11 +4,15 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import torch.nn.functional as F
 
+from exp0.checkpointing import atomic_copy
 from exp0.config import ModelConfig, TrainConfig
 from exp0.train import (
     _autocast_context,
+    _checkpoint_progress,
     _create_loader,
+    _load_training_checkpoint_into_state,
     _make_lr_scheduler,
+    _save_training_checkpoint,
     set_seed,
 )
 from exp1.dataset import PointerChaseDataset, exp1_collate_fn
@@ -94,23 +98,36 @@ def train_model(
             betas=(train_cfg.adam_beta1, train_cfg.adam_beta2),
         )
 
-    # Simplified single-seed setup
     epochs = train_cfg.epochs
     total_steps = len(loader) * epochs
     lr_scheduler = _make_lr_scheduler(optimizer, train_cfg, total_steps)
     scaler = torch.amp.GradScaler(device.type) if train_cfg.precision == "fp16" else None
 
+    # Dummy signature to satisfy checkpoint loader strictness if needed
+    signature = {"task": "exp1_pointer_chase"}
+
+    start_epoch = 0
+    optimizer_steps = 0
+    best_val_acc = 0.0
 
     if resume_from_checkpoint:
-        pass
+        prog_state, init_state = _load_training_checkpoint_into_state(
+            resume_from_checkpoint,
+            signature=signature,
+            model=model,
+            optimizer=optimizer,
+            lr_scheduler=lr_scheduler,
+            scaler=scaler,
+            device=device,
+        )
+        start_epoch = prog_state.get("epoch", 0)
+        optimizer_steps = prog_state.get("optimizer_steps", 0)
+        best_val_acc = prog_state.get("completed", {}).get("best_val_acc", 0.0)
 
     epoch_train_losses = []
     epoch_val_accuracies = []
 
-    best_val_acc = 0.0
-    optimizer_steps = 0
-
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         model.train()
         total_loss = 0.0
 
@@ -154,13 +171,35 @@ def train_model(
         if val_acc > best_val_acc:
             best_val_acc = val_acc
 
+        if checkpoint_path is not None:
+            prog = _checkpoint_progress(
+                epoch=epoch + 1,
+                epoch_seed=None,
+                samples_consumed_in_epoch=0,
+                optimizer_steps=optimizer_steps,
+                completed={"best_val_acc": best_val_acc},
+                partial_epoch=None,
+            )
+            epoch_checkpoint = checkpoint_path / f"epoch_{epoch + 1:03d}.pt"
+            _save_training_checkpoint(
+                epoch_checkpoint,
+                signature=signature,
+                model=model,
+                optimizer=optimizer,
+                lr_scheduler=lr_scheduler,
+                scaler=scaler,
+                initialization={},
+                progress=prog,
+            )
+            atomic_copy(epoch_checkpoint, checkpoint_path / "latest.pt")
+
         print(f"Epoch {epoch+1}/{epochs} | Loss: {epoch_loss:.4f} | Val Acc: {val_acc:.4f}")
 
     history = {
         "epoch_train_losses": epoch_train_losses,
         "epoch_val_accuracies": epoch_val_accuracies,
         "best_val_accuracy": best_val_acc,
-        "epochs_trained": epochs,
+        "epochs_trained": epochs - start_epoch,
     }
 
     return model, history
