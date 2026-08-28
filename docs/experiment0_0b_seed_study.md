@@ -1,8 +1,11 @@
 # Experiment 0B seed study: result
 
-**Status**: complete. Pre-registered, confirmed, independently reviewed.
+**Status**: complete. Pre-registered, independently reviewed. The reported
+statistic is confirmed for the collected artifacts; **causal attribution to
+filler tokens remains unresolved** while arm and evaluating device are
+perfectly confounded — see Limitations.
 **Analysis**: [`scripts/analyze_0b_seed_study.py`](../scripts/analyze_0b_seed_study.py)
-**Pre-registration**: [`experiment0_0b_preregistration.md`](experiment0_0b_preregistration.md),
+**Pre-registration**: [`PREREGISTRATION_0B_SEED_STUDY.md`](PREREGISTRATION_0B_SEED_STUDY.md),
 frozen 2026-08-24, before the remaining seeds were evaluated.
 
 Does the RWKV-7 filler-token effect replicate across seeds? Nine runs: five at
@@ -62,8 +65,15 @@ partial one.
 ### Evaluation hardware is confounded with arm
 
 All five `N=0` evaluations ran on an RTX 4060 Ti (`sm_89`) and all four `N=36`
-on an RTX 3070 Laptop (`sm_86`), with no checkpoint evaluated on both. This was
-disclosed before any outcome was observed and is not removable retrospectively.
+on an RTX 3070 Laptop (`sm_86`), with no checkpoint evaluated on both.
+
+**Arm and device are perfectly confounded, and this study cannot distinguish a
+filler-token effect from a device-specific evaluation effect.** That is the
+limitation in its strongest honest form. It is not removable retrospectively.
+
+The confound was disclosed in the pre-registration, which was written after four
+of the nine endpoints had been evaluated — section 2 of that document lists them
+— and before the remaining five were run.
 
 The effect is real, not hypothetical. With bit-identical parameters and inputs,
 three devices produce three different bf16 logit digests:
@@ -118,10 +128,13 @@ essentially equals it. That is why no bound on the hardware term's effect is
 claimed: any such bound would have to survive this tie structure, and a cheap
 one does not.
 
-This does not weaken the result. Ties are resolved identically for both arms by
-a rule fixed in advance; the numbers above describe an adversary who is free to
-choose, which is not the situation. They are recorded because a reader
-evaluating how much slack the metric has deserves to see them.
+A fixed averaged-rank rule removes analyst discretion: nobody chose how these
+ties fell. It does not make the metric robust. Because arm and device are
+perfectly confounded, device-specific numerics can move rows into and out of
+ties, and a tie that breaks differently changes cross-arm ordering. The
+adversarial column is not a claim that an adversary exists; it bounds how much
+room the metric leaves, and for two endpoints that room exceeds the separation
+being reported.
 
 ## Reproducing it
 
@@ -132,18 +145,22 @@ seconds on CPU:
 python scripts/analyze_0b_seed_study.py --eval-dir <artifact directory>
 ```
 
-Evaluation artifacts are **not in this repository**: `results/` is gitignored,
-and the per-epoch artifacts are roughly 1.9 MB each. They are distributed
-through the project's shared folder under `exp0_0b_seed_study/`, 45 files
-covering both arms at epochs 1-5, each with a `.sha256` sidecar.
+Evaluation artifacts are **not in this repository and not publicly
+distributed**: `results/` is gitignored and the per-epoch artifacts are roughly
+1.9 MB each. They exist in the project's private replicated working folder
+(45 files, both arms, epochs 1-5, each with a `.sha256` sidecar), which is
+**outside the repository and unavailable to an ordinary clone**. A reader
+cloning this repository cannot currently reproduce the number from published
+inputs. Publishing a filename plus SHA-256 manifest is the intended next step.
 
 Pass `--eval-dir` pointing only at that directory. The default also searches a
 local `results/`, and anything there stops the run being a reproduction from
 published inputs.
 
-## Claims withdrawn during review
+## WITHDRAWN — DO NOT CITE
 
-Recorded because earlier drafts circulated and should not be quoted:
+These claims circulated in earlier drafts and are **retracted**. A canonical
+retraction is safer than leaving circulated claims without one:
 
 - a bound of `0.002` on the hardware term's effect on the outcome metric;
 - the derived claim that the term was "26x too small to matter";
@@ -151,12 +168,13 @@ Recorded because earlier drafts circulated and should not be quoted:
 
 The bound applied a bf16 ULP to the already-formed margin rather than to the two
 logits before subtraction. That understates the perturbation by roughly two
-orders of magnitude, and it assigns zero possible movement to every row whose
-margin is exactly zero — 189 of the 3,000 rows entering seed 42's AUC, where
-`true_logit = false_logit = 23.125` and the per-logit ULP is `0.125`, so the
-margin could in fact move by up to `0.25`. It also presented a Monte Carlo
-maximum as an adversarial bound. The confirmed result never depended on any of
-it.
+orders of magnitude, and it assigns **zero** possible movement to every row
+whose margin is exactly zero — 189 of the 3,000 rows entering seed 42's AUC.
+A zero margin does not imply zero perturbation: those rows carry 66 distinct
+equal-logit values spanning `15.5` to `25.875`, and at the upper end a single
+per-logit step moves the margin by as much as `0.25`. It also presented a Monte
+Carlo maximum as an adversarial bound. The reported statistic never depended on
+any of it.
 
 ## Review history
 
