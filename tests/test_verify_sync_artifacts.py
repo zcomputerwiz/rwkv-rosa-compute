@@ -127,3 +127,24 @@ def test_cli_json_output(tmp_path):
     assert len(data) == 1
     assert data[0]["status"] == "verified"
     assert "test.txt" in data[0]["file"]
+
+
+def test_too_long_digest_reports_malformed(tmp_path):
+    # Tests a digest that starts with the correct 64 chars but is 65 chars long.
+    artifact, sidecar = create_artifact_and_sidecar(tmp_path, "test.txt")
+
+    # Read and modify the sidecar to make the first token 65 characters
+    with open(sidecar, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # E.g. `<64chars>  filename` -> `<64chars>X  filename`
+    tokens = content.split(maxsplit=1)
+    if len(tokens) == 2:
+        modified_content = tokens[0] + "X " + tokens[1]
+    else:
+        modified_content = tokens[0] + "X"
+
+    with open(sidecar, "w", encoding="utf-8") as f:
+        f.write(modified_content)
+
+    assert classify(artifact, sidecar, has_artifact=True, has_sidecar=True) == "malformed sidecar"

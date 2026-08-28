@@ -18,8 +18,13 @@ def classify(target, sidecar, has_artifact, has_sidecar):
             with open(sidecar, "r", encoding="utf-8") as f:
                 first_line = f.readline().strip()
 
-            expected_digest = first_line[:64]
-            if not hex_pattern.match(expected_digest):
+            # Split by whitespace and grab the first token
+            tokens = first_line.split()
+            if not tokens:
+                return "malformed sidecar"
+
+            expected_digest = tokens[0]
+            if not hex_pattern.fullmatch(expected_digest):
                 return "malformed sidecar"
 
             h = hashlib.sha256()
