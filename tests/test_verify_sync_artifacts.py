@@ -11,10 +11,11 @@ def run_script(args, cwd=None):
     result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
     return result
 
-def create_artifact_and_sidecar(tmp_path, filename, content=b"hello world", sidecar_fmt="{}  {}", newline="\n"):
+def create_artifact_and_sidecar(tmp_path, filename, content=b"hello world", sidecar_fmt="{}  {}", newline="\n", custom_digest=None):
     artifact = tmp_path / filename
+    artifact.parent.mkdir(parents=True, exist_ok=True)
     artifact.write_bytes(content)
-    digest = hashlib.sha256(content).hexdigest()
+    digest = custom_digest if custom_digest is not None else hashlib.sha256(content).hexdigest()
     sidecar = tmp_path / f"{filename}.sha256"
     sidecar_content = sidecar_fmt.format(digest, filename) + newline
     # Note: writing as binary to strictly control line endings
@@ -84,3 +85,54 @@ def test_different_working_directory(tmp_path):
     assert result.returncode == 0
     assert "verified" in result.stdout
     assert "test.txt" in result.stdout
+
+def test_empty_sidecar_reports_malformed(tmp_path):
+    artifact = tmp_path / "test.txt"
+    artifact.write_bytes(b"payload")
+    sidecar = tmp_path / "test.txt.sha256"
+    sidecar.write_bytes(b"")
+    result = run_script([str(tmp_path)])
+    assert result.returncode != 0
+    assert "malformed sidecar" in result.stdout
+
+def test_truncated_digest_reports_malformed(tmp_path):
+    artifact = tmp_path / "test.txt"
+    artifact.write_bytes(b"payload")
+    sidecar = tmp_path / "test.txt.sha256"
+    sidecar.write_bytes(b"9f86d081")
+    result = run_script([str(tmp_path)])
+    assert result.returncode != 0
+    assert "malformed sidecar" in result.stdout
+
+def test_non_hex_digest_reports_malformed(tmp_path):
+    create_artifact_and_sidecar(tmp_path, "test.txt", custom_digest="z" * 64)
+    result = run_script([str(tmp_path)])
+    assert result.returncode != 0
+    assert "malformed sidecar" in result.stdout
+
+def test_unreadable_reports_unreadable(tmp_path):
+    artifact, sidecar = create_artifact_and_sidecar(tmp_path, "test.txt")
+
+    # Restrict read permissions to force OSError (unreadable)
+    os.chmod(artifact, 0o000)
+    try:
+        result = run_script([str(tmp_path)])
+        assert result.returncode != 0
+        assert "unreadable" in result.stdout
+    finally:
+        os.chmod(artifact, 0o644)
+
+def test_exclude_stversions_default_and_no_default_excludes(tmp_path):
+    # Test exclusion logic
+    stversions_dir = tmp_path / ".stversions"
+    create_artifact_and_sidecar(stversions_dir, "test.txt")
+
+    result = run_script([str(tmp_path)])
+    assert result.returncode == 0
+    assert "test.txt" not in result.stdout
+
+    # Using no-default-excludes should include it
+    result_no_default = run_script(["--no-default-excludes", str(tmp_path)])
+    assert result_no_default.returncode == 0
+    assert "verified" in result_no_default.stdout
+    assert "test.txt" in result_no_default.stdout

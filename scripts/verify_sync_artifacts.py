@@ -3,25 +3,51 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 
 def main():
-    parser = argparse.ArgumentParser(description="Verify sha256 sidecar files.")
+    parser = argparse.ArgumentParser(description="Verify sha256 sidecar files. By default excludes .stversions and .stfolder.")
     parser.add_argument("directories", nargs="*", default=["."], help="Directories to verify")
     parser.add_argument("--json", action="store_true", help="Output in JSON format")
+    parser.add_argument("--exclude", action="append", default=[], help="Path components to exclude (repeatable)")
+    parser.add_argument("--no-default-excludes", action="store_true", help="Do not apply default excludes (.stversions, .stfolder)")
     args = parser.parse_args()
+
+    excludes = args.exclude.copy()
+    if not args.no_default_excludes:
+        if ".stversions" not in excludes:
+            excludes.append(".stversions")
+        if ".stfolder" not in excludes:
+            excludes.append(".stfolder")
+
+    def path_is_excluded(path_str):
+        parts = path_str.split(os.sep)
+        if os.altsep:
+            new_parts = []
+            for p in parts:
+                new_parts.extend(p.split(os.altsep))
+            parts = new_parts
+
+        for part in parts:
+            if part in excludes:
+                return True
+        return False
 
     files = set()
     for directory in args.directories:
         if os.path.isfile(directory):
-            files.add(os.path.normpath(directory))
+            norm = os.path.normpath(directory)
+            if not path_is_excluded(norm):
+                files.add(norm)
         elif os.path.isdir(directory):
-            for root, _, filenames in os.walk(directory):
+            for root, dirs, filenames in os.walk(directory):
+                dirs[:] = [d for d in dirs if d not in excludes]
+
                 for filename in filenames:
-                    files.add(os.path.normpath(os.path.join(root, filename)))
-        else:
-            # For non-existent files or directories we'll just ignore or let it be empty
-            pass
+                    filepath = os.path.normpath(os.path.join(root, filename))
+                    if not path_is_excluded(filepath):
+                        files.add(filepath)
 
     artifacts = {f for f in files if not f.endswith(".sha256")}
     sidecars = {f for f in files if f.endswith(".sha256")}
@@ -30,6 +56,8 @@ def main():
 
     output_records = []
     has_failure = False
+
+    hex_pattern = re.compile(r'^[a-fA-F0-9]{64}$')
 
     for target in sorted(all_targets):
         sidecar = target + ".sha256"
@@ -47,33 +75,30 @@ def main():
             status = "no sidecar"
         elif has_artifact and has_sidecar:
             try:
-                # Read with binary first if we want to be super explicit about CRLF handling,
-                # though python's universal newlines handle it if encoding="utf-8"
                 with open(sidecar, "r", encoding="utf-8") as f:
                     first_line = f.readline().strip()
 
-                # The sidecar can contain "<digest>  <bare filename>" or "<digest> *<name>"
-                # So we just extract the first 64 characters.
-                expected_digest = ""
-                if len(first_line) >= 64:
-                    expected_digest = first_line[:64]
-
-                h = hashlib.sha256()
-                with open(target, "rb") as f:
-                    while True:
-                        chunk = f.read(65536)
-                        if not chunk:
-                            break
-                        h.update(chunk)
-                actual_digest = h.hexdigest()
-
-                if expected_digest and actual_digest.lower() == expected_digest.lower():
-                    status = "verified"
-                else:
-                    status = "MISMATCH"
+                expected_digest = first_line[:64]
+                if not hex_pattern.match(expected_digest):
+                    status = "malformed sidecar"
                     has_failure = True
-            except Exception:
-                status = "MISMATCH"
+                else:
+                    h = hashlib.sha256()
+                    with open(target, "rb") as f:
+                        while True:
+                            chunk = f.read(65536)
+                            if not chunk:
+                                break
+                            h.update(chunk)
+                    actual_digest = h.hexdigest()
+
+                    if actual_digest.lower() == expected_digest.lower():
+                        status = "verified"
+                    else:
+                        status = "MISMATCH"
+                        has_failure = True
+            except OSError:
+                status = "unreadable"
                 has_failure = True
 
         if status:
