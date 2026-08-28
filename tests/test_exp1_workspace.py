@@ -15,7 +15,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from exp1.workspace import Workspace, orthonormal_offsets  # noqa: E402
+from exp1.workspace import Workspace, canonical_offsets  # noqa: E402
 
 D_MODEL = 32
 CELLS = [(1, 1), (1, 8), (8, 1), (8, 8)]
@@ -58,13 +58,31 @@ def test_small_arm_is_a_strict_prefix_of_the_large_arm():
     assert torch.equal(one.initial(state)[:, 0], eight.initial(state)[:, 0])
 
 
-def test_offsets_are_orthonormal_and_reproducible():
-    table = orthonormal_offsets(8, D_MODEL, seed=1234)
-    gram = table @ table.T
-    assert torch.allclose(gram, torch.eye(8), atol=1e-5)
-    assert torch.allclose(table.norm(dim=1), torch.ones(8), atol=1e-5)
-    assert torch.equal(table, orthonormal_offsets(8, D_MODEL, seed=1234))
-    assert not torch.equal(table, orthonormal_offsets(8, D_MODEL, seed=1235))
+def test_offsets_are_exactly_orthonormal():
+    """Exactly, not approximately. The table is part of the model's identity
+    across machines, so it must not carry decomposition round-off."""
+    table = canonical_offsets(8, D_MODEL)
+    assert torch.equal(table @ table.T, torch.eye(8))
+    assert torch.equal(table.norm(dim=1), torch.ones(8))
+    # Every entry is exactly 0.0 or 1.0, so no platform can round it differently.
+    assert set(table.unique().tolist()) == {0.0, 1.0}
+
+
+def test_offsets_are_built_without_any_rng():
+    """An earlier version derived the table from seeded noise via
+    ``torch.linalg.qr``. That made a LAPACK build part of the fleet's model
+    identity: pinning the sign against ``diag(R)`` removes the sign ambiguity
+    but not floating-point differences between builds, so two nodes could hold
+    tables differing in their low bits while both believing the table was fixed.
+
+    The construction must not consult the RNG at all, so global seed state
+    cannot influence it.
+    """
+    torch.manual_seed(0)
+    first = canonical_offsets(8, D_MODEL)
+    torch.manual_seed(12345)
+    _ = torch.randn(1000)
+    assert torch.equal(first, canonical_offsets(8, D_MODEL))
 
 
 def test_offsets_do_not_depend_on_the_torch_thread_count():
@@ -74,19 +92,53 @@ def test_offsets_do_not_depend_on_the_torch_thread_count():
     ``normal_`` can produce different values at different thread counts. A
     cross-node numerics probe in this project shipped with exactly that defect:
     two machines built different weights while asserting they had not. The
-    offsets are small enough that the parallel path should not engage, but
-    "should not" is what that probe assumed too.
+    construction no longer uses the RNG, but the property is worth pinning.
     """
     original = torch.get_num_threads()
     try:
         tables = []
         for threads in (1, 2, 4, 8):
             torch.set_num_threads(threads)
-            tables.append(orthonormal_offsets(8, 256, seed=99))
+            tables.append(canonical_offsets(8, 256))
         for table in tables[1:]:
             assert torch.equal(tables[0], table)
     finally:
         torch.set_num_threads(original)
+
+
+@pytest.mark.parametrize("num_slots", [1, 2, 4, 8])
+def test_readout_has_no_M_dependent_offset_term(num_slots):
+    """The readout must not carry a systematic term that moves with M.
+
+    The mean of the first M offsets differs between M=1 and M=8, so a plain
+    mean over slots would make the cells differ in their input statistics as
+    well as in their slot count -- a confound underneath the parameter-count
+    one. With the constant correction applied, an identity refinement leaves
+    the readout equal to the state it was seeded from, for every M.
+    """
+    ws = Workspace(D_MODEL, num_slots=num_slots, num_steps=1)
+    state = torch.randn(3, D_MODEL, generator=torch.Generator().manual_seed(7))
+    z0 = ws.initial(state)
+    readout_of_initial = z0.mean(dim=1) - ws.offsets[:num_slots].mean(dim=0)
+    assert torch.allclose(readout_of_initial, state, atol=1e-6)
+
+
+def test_routing_is_learned_and_parameter_invariant():
+    """Cross-slot routing is learned, and its projections do not scale with M.
+
+    An earlier revision used a parameter-free mean, justified by the claim that
+    learned routing would make parameter count scale with M. That claim was
+    wrong: attention projections are d_model x d_model however many slots
+    attend through them. A global mean is also a real information bottleneck,
+    and a screen built on it risks a negative result that says more about the
+    coupling than about the hypothesis.
+    """
+    one = Workspace(D_MODEL, num_slots=1, num_steps=1)
+    eight = Workspace(D_MODEL, num_slots=8, num_steps=1)
+    for name in ("q_proj", "k_proj", "v_proj", "o_proj"):
+        assert getattr(one, name).weight.shape == (D_MODEL, D_MODEL)
+        assert getattr(one, name).weight.shape == getattr(eight, name).weight.shape
+    assert _learned(one) == _learned(eight)
 
 
 @pytest.mark.parametrize("num_slots,num_steps", CELLS)
@@ -128,4 +180,4 @@ def test_rejects_impossible_configurations():
     with pytest.raises(ValueError):
         Workspace(D_MODEL, num_steps=0)
     with pytest.raises(ValueError):
-        orthonormal_offsets(64, 32)
+        canonical_offsets(64, 32)
