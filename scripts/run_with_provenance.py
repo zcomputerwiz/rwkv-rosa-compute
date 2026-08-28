@@ -6,8 +6,11 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
-from src.rosa_compute.diagnostics import get_environment_info
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from rosa_compute.diagnostics import get_environment_info  # noqa: E402
 
 
 def get_git_commit() -> str:
@@ -119,10 +122,8 @@ def main():
             with open(args.artifact, "r", encoding="utf-8") as f:
                 artifact_data = json.load(f)
         except json.JSONDecodeError:
-            # We can't parse it. We can't inject provenance. We shouldn't overwrite it either!
-            # We'll fail here.
             print("Error: Artifact exists but is not valid JSON.", file=sys.stderr)
-            sys.exit(exit_code) # exit with script's exit code, leaving file as is
+            sys.exit(exit_code)
 
     if "provenance" in artifact_data:
         print("Error: Artifact already contains a 'provenance' key.", file=sys.stderr)

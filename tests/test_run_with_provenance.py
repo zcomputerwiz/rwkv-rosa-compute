@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from unittest.mock import patch
@@ -206,6 +207,27 @@ def test_pre_existing_artifact_rejected(repo_dir, monkeypatch):
         run_with_provenance.main()
 
     assert exc.value.code != 0
+
+def test_script_runs_as_subprocess_from_outside_repo(repo_dir, tmp_path):
+    # This test verifies that the script can be invoked as a subprocess
+    # from outside the repository root, ensuring the sys.path modification works.
+
+    # We will use the main repository directory, not the mock repo_dir,
+    # to run the script, since we want to test its actual path resolution.
+    script_path = os.path.abspath("scripts/run_with_provenance.py")
+
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+
+    result = subprocess.run(
+        [sys.executable, script_path, "--help"],
+        cwd=outside_dir,
+        capture_output=True,
+        text=True
+    )
+
+    assert result.returncode == 0
+    assert "Run a script and stamp its output artifact with provenance" in result.stdout
 
 def test_dirty_checkout_rejected(repo_dir, monkeypatch):
     producer = repo_dir / "producer.py"
