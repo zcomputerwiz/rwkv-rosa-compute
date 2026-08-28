@@ -18,7 +18,7 @@ def valid_payload():
         "seed": 42,
         "epochs": 5,
         "task_config": {"name": "test"},
-        "input_sha256": "abcdef",
+        "input_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "commit": "1234567",
         "checkpoint": "my_checkpoint.pt",
         "settings": {
@@ -172,7 +172,7 @@ def test_real_artifact_shape(tmp_path, capsys):
         },
         "structural_challenge": {
             "challenge_id": "challenge_test_0",
-            "content_sha256": "abcd1234abcd"
+            "content_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         },
         "canonical_validation": {
             "eval_seed": 9999
@@ -197,3 +197,41 @@ def test_real_artifact_shape(tmp_path, capsys):
     assert "evaluation batch size and precision" not in captured.out
     assert "challenge or dataset identifier AND its content hash" not in captured.out
     assert "checkpoint identifier or hash" not in captured.out
+
+def test_missing_strict_exit_on_malformed(tmp_path):
+    fpath = tmp_path / "malformed2.json"
+    fpath.write_text("{")
+    assert main([str(fpath), "--strict"]) == 1
+
+def test_missing_strict_exit_on_empty_dir(tmp_path):
+    assert main([str(tmp_path), "--strict"]) == 1
+
+def test_empty_value_is_missing(tmp_path, capsys):
+    fpath = tmp_path / "empty_epoch.json"
+    payload = valid_payload()
+    payload["epochs"] = ""
+    write_json(fpath, payload)
+
+    assert main([str(fpath)]) == 0
+    captured = capsys.readouterr()
+    assert "missing the evaluated epoch" in captured.out
+
+def test_invalid_hash_is_missing(tmp_path, capsys):
+    fpath = tmp_path / "invalid_hash.json"
+    payload = valid_payload()
+    payload["input_sha256"] = "abcdef" # only 6 chars, invalid hash length
+    write_json(fpath, payload)
+
+    assert main([str(fpath)]) == 0
+    captured = capsys.readouterr()
+    assert "missing challenge or dataset identifier AND its content hash" in captured.out
+
+def test_valid_hash_passes(tmp_path, capsys):
+    fpath = tmp_path / "valid_hash.json"
+    payload = valid_payload()
+    payload["input_sha256"] = "a" * 64
+    write_json(fpath, payload)
+
+    assert main([str(fpath)]) == 0
+    captured = capsys.readouterr()
+    assert "missing challenge or dataset identifier AND its content hash" not in captured.out

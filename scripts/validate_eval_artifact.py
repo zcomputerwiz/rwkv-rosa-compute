@@ -25,18 +25,18 @@ ALIASES = {
     "commit_or_script_hash": ["commit", "script_sha256"],
 
     # checkpoint
-    "checkpoint": ["checkpoint", "model.rwkv_checkpoint_sha256", "initialization.checkpoint_sha256"],
+    "checkpoint": ["checkpoint", "model.rwkv_checkpoint_sha256"],
 
     # settings
     "batch_size": ["evaluation_settings.batch_size", "settings.batch_size", "training_protocol.batch_size"],
     "precision": ["evaluation_settings.precision", "settings.precision", "precision"],
 
     # device
-    "device_name": ["environment.gpu", "model.device"],
-    "compute_capability": ["environment.capability"]
+    "device_name": ["environment.gpu_name", "environment.gpu"],
+    "compute_capability": ["environment.gpu_compute_capability", "environment.capability"]
 }
 
-def resolve_alias(data, paths):
+def resolve_alias(data, paths, enforce_hash=False):
     for path in paths:
         parts = path.split('.')
         curr = data
@@ -47,7 +47,14 @@ def resolve_alias(data, paths):
             else:
                 found = False
                 break
-        if found and curr is not None:
+
+        # Must be present and not explicitly an empty collection/string
+        if found and curr is not None and curr != "" and curr != [] and curr != {}:
+            if enforce_hash:
+                if isinstance(curr, str) and len(curr) == 64 and all(c in "0123456789abcdefABCDEF" for c in curr):
+                    return True
+                # Not a valid hash, check next alias
+                continue
             return True
     return False
 
@@ -92,7 +99,7 @@ def main(argv=None) -> int:
 
     if not json_files:
         print("No JSON files found to validate.", file=sys.stderr)
-        return 0
+        return 1 if args.strict else 0
 
     results = {}
     any_missing = False
@@ -103,6 +110,7 @@ def main(argv=None) -> int:
                 data = json.load(f)
         except Exception as e:
             results[str(fpath)] = {"error": f"Failed to parse JSON: {e}"}
+            any_missing = True
             continue
 
         if not check_identity_is_eval(data):
@@ -120,7 +128,7 @@ def main(argv=None) -> int:
             missing.append("the evaluated epoch")
 
         # Inputs group
-        if not (resolve_alias(data, ALIASES["challenge_or_dataset"]) and resolve_alias(data, ALIASES["content_hash"])):
+        if not (resolve_alias(data, ALIASES["challenge_or_dataset"]) and resolve_alias(data, ALIASES["content_hash"], enforce_hash=True)):
             missing.append("challenge or dataset identifier AND its content hash")
 
         # Code group
