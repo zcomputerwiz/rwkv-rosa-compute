@@ -22,7 +22,14 @@ ALIASES = {
 
     # code
     "commit": ["provenance.repository_commit", "commit"],
-    "script_hash": ["provenance.producer_script_sha256", "script_sha256"],
+
+    # new script provenance
+    "producer_script_path": ["provenance.producer_script_path"],
+    "producer_script_hash": ["provenance.producer_script_git_blob_sha256"],
+    "producer_script_hash_basis": ["provenance.producer_script_hash_basis"],
+
+    # legacy script hash
+    "legacy_script_hash": ["script_sha256"],
 
     # checkpoint
     "checkpoint_id": ["checkpoint", "model.checkpoint", "model.rwkv_checkpoint", "initialization.checkpoint_path"],
@@ -32,15 +39,15 @@ ALIASES = {
     "batch_size": ["evaluation_settings.batch_size", "settings.batch_size", "training_protocol.batch_size"],
     "precision": ["evaluation_settings.precision", "settings.precision", "precision"],
 
-    # device and environment
-    "device_name": ["environment.gpu_name", "environment.gpu"],
-    "compute_capability": ["environment.gpu_compute_capability", "environment.capability"],
-    "env_python": ["environment.python"],
-    "env_torch": ["environment.torch"],
-    "env_cuda": ["environment.cuda"]
+    # device and environment (with new provenance.device.* fields)
+    "device_name": ["provenance.device.gpu_name", "environment.gpu_name", "environment.gpu"],
+    "compute_capability": ["provenance.device.gpu_compute_capability", "environment.gpu_compute_capability", "environment.capability"],
+    "env_python": ["provenance.device.python_version", "environment.python_version", "environment.python"],
+    "env_torch": ["provenance.device.torch_version", "environment.torch_version", "environment.torch"],
+    "env_cuda": ["provenance.device.cuda_version", "environment.cuda_version", "environment.cuda"]
 }
 
-def resolve_alias(data, paths, enforce_hash=False, hash_len=64):
+def get_alias_value(data, paths):
     for path in paths:
         parts = path.split('.')
         curr = data
@@ -52,14 +59,20 @@ def resolve_alias(data, paths, enforce_hash=False, hash_len=64):
                 found = False
                 break
 
-        # Must be present and not explicitly an empty collection/string
         if found and curr is not None and curr != "" and curr != [] and curr != {}:
-            if enforce_hash:
-                if isinstance(curr, str) and len(curr) == hash_len and all(c in "0123456789abcdefABCDEF" for c in curr):
+            return curr
+    return None
+
+def resolve_alias(data, paths, enforce_hash=False, hash_len=64, lowercase_only=False):
+    val = get_alias_value(data, paths)
+    if val is not None:
+        if enforce_hash:
+            if isinstance(val, str) and len(val) == hash_len:
+                valid_chars = "0123456789abcdef" if lowercase_only else "0123456789abcdefABCDEF"
+                if all(c in valid_chars for c in val):
                     return True
-                # Not a valid hash, check next alias
-                continue
-            return True
+            return False
+        return True
     return False
 
 def check_identity_is_eval(data):
@@ -138,8 +151,28 @@ def main(argv=None) -> int:
         # Code group
         if not resolve_alias(data, ALIASES["commit"], enforce_hash=True, hash_len=40):
             missing.append("commit")
-        if not resolve_alias(data, ALIASES["script_hash"], enforce_hash=True, hash_len=64):
-            missing.append("script hash")
+
+        script_missing = False
+        legacy_script = get_alias_value(data, ALIASES["legacy_script_hash"])
+        if legacy_script:
+            if not resolve_alias(data, ALIASES["legacy_script_hash"], enforce_hash=True, hash_len=64):
+                missing.append("script hash")
+            else:
+                missing.append("legacy working-tree script hash (not platform-independent)")
+        else:
+            path_val = get_alias_value(data, ALIASES["producer_script_path"])
+            if not path_val or not isinstance(path_val, str) or path_val.startswith('/'):
+                script_missing = True
+
+            if not resolve_alias(data, ALIASES["producer_script_hash"], enforce_hash=True, hash_len=64, lowercase_only=True):
+                script_missing = True
+
+            basis_val = get_alias_value(data, ALIASES["producer_script_hash_basis"])
+            if basis_val != "git_blob_at_repository_commit":
+                script_missing = True
+
+            if script_missing:
+                missing.append("script hash (requires repository-relative path, lowercase 64-hex blob hash, and correct basis string)")
 
         # Checkpoint group
         if not (resolve_alias(data, ALIASES["checkpoint_id"]) and resolve_alias(data, ALIASES["checkpoint_hash"], enforce_hash=True, hash_len=64)):

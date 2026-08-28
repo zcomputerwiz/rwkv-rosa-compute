@@ -19,20 +19,24 @@ def valid_payload():
         "epochs": 5,
         "task_config": {"name": "test"},
         "input_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "commit": "cccccccccccccccccccccccccccccccccccccccc",
-        "script_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
         "checkpoint": "my_checkpoint.pt",
         "checkpoint_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
         "settings": {
             "batch_size": 32,
             "precision": "bf16"
         },
-        "environment": {
-            "gpu": "RTX 3090",
-            "capability": [8, 6],
-            "python": "3.12.0",
-            "torch": "2.4.0",
-            "cuda": "12.1"
+        "provenance": {
+            "repository_commit": "cccccccccccccccccccccccccccccccccccccccc",
+            "producer_script_path": "scripts/evaluate.py",
+            "producer_script_git_blob_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "producer_script_hash_basis": "git_blob_at_repository_commit",
+            "device": {
+                "gpu_name": "RTX 3090",
+                "gpu_compute_capability": [8, 6],
+                "python_version": "3.12.0",
+                "torch_version": "2.4.0",
+                "cuda_version": "12.1"
+            }
         }
     }
 
@@ -68,7 +72,7 @@ def test_missing_inputs_group(tmp_path, capsys):
 def test_missing_commit(tmp_path, capsys):
     fpath = tmp_path / "missing_commit.json"
     payload = valid_payload()
-    del payload["commit"]
+    del payload["provenance"]["repository_commit"]
     write_json(fpath, payload)
 
     assert main([str(fpath)]) == 0
@@ -79,7 +83,7 @@ def test_missing_commit(tmp_path, capsys):
 def test_missing_script_hash(tmp_path, capsys):
     fpath = tmp_path / "missing_script_hash.json"
     payload = valid_payload()
-    del payload["script_sha256"]
+    del payload["provenance"]["producer_script_git_blob_sha256"]
     write_json(fpath, payload)
 
     assert main([str(fpath)]) == 0
@@ -90,7 +94,7 @@ def test_missing_script_hash(tmp_path, capsys):
 def test_short_commit_rejected(tmp_path, capsys):
     fpath = tmp_path / "short_commit.json"
     payload = valid_payload()
-    payload["commit"] = "12345678"
+    payload["provenance"]["repository_commit"] = "12345678"
     write_json(fpath, payload)
 
     assert main([str(fpath)]) == 0
@@ -120,7 +124,7 @@ def test_missing_settings_group(tmp_path, capsys):
 def test_missing_device_group(tmp_path, capsys):
     fpath = tmp_path / "missing_capability.json"
     payload = valid_payload()
-    del payload["environment"]["capability"]
+    del payload["provenance"]["device"]["gpu_compute_capability"]
     write_json(fpath, payload)
 
     assert main([str(fpath)]) == 0
@@ -206,8 +210,8 @@ def test_real_artifact_shape(tmp_path, capsys):
         },
         "environment": {
             "gpu": "RTX 3070"
-            # Note: compute_capability and commit are intentionally missing
-            # to match real artifacts as requested
+            # Note: compute_capability, python/torch/cuda, and commit are intentionally missing
+            # to match old real artifacts as requested
         }
     }
 
@@ -269,7 +273,7 @@ def test_valid_hash_passes(tmp_path, capsys):
 def test_short_script_hash_rejected(tmp_path, capsys):
     fpath = tmp_path / "short_script.json"
     payload = valid_payload()
-    payload["script_sha256"] = "12345678"
+    payload["provenance"]["producer_script_git_blob_sha256"] = "12345678"
     write_json(fpath, payload)
 
     assert main([str(fpath)]) == 0
@@ -279,7 +283,7 @@ def test_short_script_hash_rejected(tmp_path, capsys):
 def test_missing_environment_versions(tmp_path, capsys):
     fpath = tmp_path / "missing_env_versions.json"
     payload = valid_payload()
-    del payload["environment"]["python"]
+    del payload["provenance"]["device"]["python_version"]
     write_json(fpath, payload)
 
     assert main([str(fpath)]) == 0
@@ -315,10 +319,7 @@ def test_wrapper_produced_integration_fixture(tmp_path, capsys):
         "epochs": 5,
         "task_config": {"name": "test"},
         "input_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "provenance": {
-            "repository_commit": "cccccccccccccccccccccccccccccccccccccccc",
-            "producer_script_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-        },
+
         "model": {
             "checkpoint": "my_checkpoint.pt",
             "rwkv_checkpoint_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
@@ -327,12 +328,20 @@ def test_wrapper_produced_integration_fixture(tmp_path, capsys):
             "batch_size": 32,
             "precision": "bf16"
         },
-        "environment": {
+        "provenance": {
+            "repository_commit": "cccccccccccccccccccccccccccccccccccccccc",
+            "producer_script_path": "scripts/evaluate.py",
+            "producer_script_git_blob_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "producer_script_hash_basis": "git_blob_at_repository_commit",
+            "device": {
             "gpu_name": "RTX 3090",
             "gpu_compute_capability": [8, 6],
             "python": "3.12.0",
             "torch": "2.4.0",
-            "cuda": "12.1"
+            "cuda_version": "12.1",
+            "python_version": "3.12.0",
+            "torch_version": "2.4.0"
+        }
         }
     }
     write_json(fpath, payload)
@@ -340,3 +349,44 @@ def test_wrapper_produced_integration_fixture(tmp_path, capsys):
     assert main([str(fpath)]) == 0
     captured = capsys.readouterr()
     assert captured.out == ""
+
+def test_legacy_script_hash_warning(tmp_path, capsys):
+    fpath = tmp_path / "legacy.json"
+    payload = valid_payload()
+    del payload["provenance"]
+    payload["script_sha256"] = "a" * 64
+    write_json(fpath, payload)
+
+    assert main([str(fpath)]) == 0
+    captured = capsys.readouterr()
+    assert "legacy working-tree script hash (not platform-independent)" in captured.out
+
+def test_script_hash_uppercase_rejected(tmp_path, capsys):
+    fpath = tmp_path / "uppercase_hash.json"
+    payload = valid_payload()
+    payload["provenance"]["producer_script_git_blob_sha256"] = "A" * 64
+    write_json(fpath, payload)
+
+    assert main([str(fpath)]) == 0
+    captured = capsys.readouterr()
+    assert "script hash (requires repository-relative path, lowercase 64-hex blob hash, and correct basis string)" in captured.out
+
+def test_script_hash_wrong_basis_rejected(tmp_path, capsys):
+    fpath = tmp_path / "wrong_basis.json"
+    payload = valid_payload()
+    payload["provenance"]["producer_script_hash_basis"] = "something_else"
+    write_json(fpath, payload)
+
+    assert main([str(fpath)]) == 0
+    captured = capsys.readouterr()
+    assert "script hash (requires repository-relative path, lowercase 64-hex blob hash, and correct basis string)" in captured.out
+
+def test_script_hash_absolute_path_rejected(tmp_path, capsys):
+    fpath = tmp_path / "absolute_path.json"
+    payload = valid_payload()
+    payload["provenance"]["producer_script_path"] = "/absolute/path/to/script.py"
+    write_json(fpath, payload)
+
+    assert main([str(fpath)]) == 0
+    captured = capsys.readouterr()
+    assert "script hash (requires repository-relative path, lowercase 64-hex blob hash, and correct basis string)" in captured.out
