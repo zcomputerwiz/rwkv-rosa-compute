@@ -156,3 +156,44 @@ def test_missing_run_id_group(tmp_path, capsys):
     assert main([str(fpath)]) == 0
     captured = capsys.readouterr()
     assert "missing run id" in captured.out
+
+def test_real_artifact_shape(tmp_path, capsys):
+    fpath = tmp_path / "real_eval_artifact.json"
+
+    # Realistic shape based on prompt feedback
+    real_payload = {
+        "run_id": "test_real_123",
+        "seed": 43,
+        "epochs": 5,
+        "checkpoint": "n0_checkpoint.pt",
+        "evaluation_settings": {
+            "batch_size": 128,
+            "precision": "bf16"
+        },
+        "structural_challenge": {
+            "challenge_id": "challenge_test_0",
+            "content_sha256": "abcd1234abcd"
+        },
+        "canonical_validation": {
+            "eval_seed": 9999
+        },
+        "environment": {
+            "gpu": "RTX 3070"
+            # Note: compute_capability and commit are intentionally missing
+            # to match real artifacts as requested
+        }
+    }
+
+    write_json(fpath, real_payload)
+
+    assert main([str(fpath)]) == 0
+    captured = capsys.readouterr()
+
+    assert "missing commit and/or script hash" in captured.out
+    assert "device name and compute capability" in captured.out
+
+    # Make sure we don't accidentally report other fields missing
+    assert "the evaluated epoch" not in captured.out
+    assert "evaluation batch size and precision" not in captured.out
+    assert "challenge or dataset identifier AND its content hash" not in captured.out
+    assert "checkpoint identifier or hash" not in captured.out

@@ -13,23 +13,23 @@ ALIASES = {
     # e.g., 'a.b.c' will look for {"a": {"b": {"c": value}}}
 
     # identity
-    "run_id": ["run_id", "probe_version"],
-    "seed": ["seed", "seeds_run", "evaluation.seeds_run"],
+    "run_id": ["run_id"],
+    "seed": ["seed", "seeds_run", "canonical_validation.eval_seed", "evaluation.seeds_run"],
     "epoch": ["epochs", "training_protocol.epochs", "eval_epoch"],
 
     # inputs
-    "challenge_or_dataset": ["task", "task_config", "challenge", "dataset"],
-    "content_hash_or_seed": ["input_sha256", "data_seed", "eval_seed", "evaluation.eval_seed"],
+    "challenge_or_dataset": ["structural_challenge.challenge_id", "task", "task_config", "challenge", "dataset"],
+    "content_hash": ["structural_challenge.content_sha256", "input_sha256"],
 
     # code
     "commit_or_script_hash": ["commit", "script_sha256"],
 
     # checkpoint
-    "checkpoint": ["param_sha256", "model.rwkv_checkpoint_sha256", "initialization.checkpoint_sha256", "checkpoint"],
+    "checkpoint": ["checkpoint", "model.rwkv_checkpoint_sha256", "initialization.checkpoint_sha256"],
 
     # settings
-    "batch_size": ["settings.batch_size", "training_protocol.batch_size"],
-    "precision": ["settings.precision", "precision"],
+    "batch_size": ["evaluation_settings.batch_size", "settings.batch_size", "training_protocol.batch_size"],
+    "precision": ["evaluation_settings.precision", "settings.precision", "precision"],
 
     # device
     "device_name": ["environment.gpu", "model.device"],
@@ -120,7 +120,7 @@ def main(argv=None) -> int:
             missing.append("the evaluated epoch")
 
         # Inputs group
-        if not (resolve_alias(data, ALIASES["challenge_or_dataset"]) and resolve_alias(data, ALIASES["content_hash_or_seed"])):
+        if not (resolve_alias(data, ALIASES["challenge_or_dataset"]) and resolve_alias(data, ALIASES["content_hash"])):
             missing.append("challenge or dataset identifier AND its content hash")
 
         # Code group
