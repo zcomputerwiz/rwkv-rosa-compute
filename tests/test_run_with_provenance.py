@@ -78,7 +78,7 @@ def test_git_blob_digest_stable_across_line_endings(repo_dir, monkeypatch):
     subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True)
 
     monkeypatch.chdir(repo_dir)
-    commit = run_with_provenance.get_git_commit()
+    commit, _ = run_with_provenance.get_git_commit()
     blob_sha256_lf = run_with_provenance.get_git_blob_sha256(commit, "producer.py")
 
     # Rewrite working tree with CRLF
@@ -228,6 +228,25 @@ def test_script_runs_as_subprocess_from_outside_repo(repo_dir, tmp_path):
 
     assert result.returncode == 0
     assert "Run a script and stamp its output artifact with provenance" in result.stdout
+
+def test_fails_when_run_outside_git_repository(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", [
+        "run_with_provenance.py",
+        "--artifact", "out.json",
+        "--producer", "producer.py",
+        "--",
+        "echo", "hello"
+    ])
+
+    # Run the script from tmp_path which is not a git repository
+    with pytest.raises(SystemExit) as exc:
+        run_with_provenance.main()
+
+    assert exc.value.code != 0
+    captured = capsys.readouterr()
+    assert "not inside a git repository" in captured.err
+    assert str(tmp_path) in captured.err
 
 def test_dirty_checkout_rejected(repo_dir, monkeypatch):
     producer = repo_dir / "producer.py"

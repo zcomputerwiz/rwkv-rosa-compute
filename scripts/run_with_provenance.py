@@ -13,11 +13,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from rosa_compute.diagnostics import get_environment_info  # noqa: E402
 
 
-def get_git_commit() -> str:
-    res = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True)
+def get_git_commit() -> tuple[str, bool]:
+    try:
+        res = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True)
+    except FileNotFoundError:
+        return "", False
     if res.returncode != 0:
-        return ""
-    return res.stdout.strip()
+        return "", False
+    return res.stdout.strip(), True
 
 def is_clean_checkout() -> bool:
     res = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
@@ -36,7 +39,10 @@ def get_git_blob_sha256(commit: str, path: str) -> str:
     return hashlib.sha256(res.stdout).hexdigest()
 
 def main():
-    parser = argparse.ArgumentParser(description="Run a script and stamp its output artifact with provenance.")
+    parser = argparse.ArgumentParser(
+        description="Run a script and stamp its output artifact with provenance. "
+                    "Must be run from inside the git repository checkout containing the producer script."
+    )
     parser.add_argument("--artifact", required=True, help="Path to output JSON artifact")
     parser.add_argument("--producer", required=True, help="Repo-relative path to producer script")
     parser.add_argument("command", nargs=argparse.REMAINDER, help="Command to run")
@@ -49,7 +55,12 @@ def main():
         command = command[1:]
 
     # Fail closed pre-flight checks
-    commit = get_git_commit()
+    commit, success = get_git_commit()
+    if not success:
+        cwd = os.getcwd()
+        print(f"Error: not inside a git repository (cwd: {cwd})", file=sys.stderr)
+        sys.exit(1)
+
     if len(commit) != 40 or not all(c in "0123456789abcdef" for c in commit.lower()):
         print("Error: git rev-parse HEAD does not yield exactly 40 lowercase hexadecimal characters.", file=sys.stderr)
         sys.exit(1)
@@ -99,8 +110,8 @@ def main():
     finished = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
 
     # Post-flight check
-    post_commit = get_git_commit()
-    if commit != post_commit:
+    post_commit, post_success = get_git_commit()
+    if not post_success or commit != post_commit:
         print("Error: Git commit changed during execution.", file=sys.stderr)
         sys.exit(1)
 
