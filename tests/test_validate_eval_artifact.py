@@ -22,13 +22,17 @@ def valid_payload():
         "commit": "cccccccccccccccccccccccccccccccccccccccc",
         "script_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
         "checkpoint": "my_checkpoint.pt",
+        "checkpoint_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
         "settings": {
             "batch_size": 32,
             "precision": "bf16"
         },
         "environment": {
             "gpu": "RTX 3090",
-            "capability": [8, 6]
+            "capability": [8, 6],
+            "python": "3.12.0",
+            "torch": "2.4.0",
+            "cuda": "12.1"
         }
     }
 
@@ -101,7 +105,7 @@ def test_missing_checkpoint_group(tmp_path, capsys):
 
     assert main([str(fpath)]) == 0
     captured = capsys.readouterr()
-    assert "missing checkpoint identifier or hash" in captured.out
+    assert "missing evaluated checkpoint identifier and 64-hex hash" in captured.out
 
 def test_missing_settings_group(tmp_path, capsys):
     fpath = tmp_path / "missing_batch_size.json"
@@ -212,14 +216,16 @@ def test_real_artifact_shape(tmp_path, capsys):
     assert main([str(fpath)]) == 0
     captured = capsys.readouterr()
 
-    assert "missing commit, script hash" in captured.out
+    assert "missing commit" in captured.out
+    assert "script hash" in captured.out
     assert "device name and compute capability" in captured.out
+    assert "environment Python, Torch, and CUDA versions" in captured.out
 
     # Make sure we don't accidentally report other fields missing
     assert "the evaluated epoch" not in captured.out
     assert "evaluation batch size and precision" not in captured.out
     assert "challenge or dataset identifier AND its content hash" not in captured.out
-    assert "checkpoint identifier or hash" not in captured.out
+    assert "evaluated checkpoint identifier and 64-hex hash" in captured.out
 
 def test_missing_strict_exit_on_malformed(tmp_path):
     fpath = tmp_path / "malformed2.json"
@@ -258,3 +264,79 @@ def test_valid_hash_passes(tmp_path, capsys):
     assert main([str(fpath)]) == 0
     captured = capsys.readouterr()
     assert "missing challenge or dataset identifier AND its content hash" not in captured.out
+
+
+def test_short_script_hash_rejected(tmp_path, capsys):
+    fpath = tmp_path / "short_script.json"
+    payload = valid_payload()
+    payload["script_sha256"] = "12345678"
+    write_json(fpath, payload)
+
+    assert main([str(fpath)]) == 0
+    captured = capsys.readouterr()
+    assert "missing script hash" in captured.out
+
+def test_missing_environment_versions(tmp_path, capsys):
+    fpath = tmp_path / "missing_env_versions.json"
+    payload = valid_payload()
+    del payload["environment"]["python"]
+    write_json(fpath, payload)
+
+    assert main([str(fpath)]) == 0
+    captured = capsys.readouterr()
+    assert "missing environment Python, Torch, and CUDA versions" in captured.out
+
+def test_missing_checkpoint_hash(tmp_path, capsys):
+    fpath = tmp_path / "missing_checkpoint_hash.json"
+    payload = valid_payload()
+    del payload["checkpoint_sha256"]
+    write_json(fpath, payload)
+
+    assert main([str(fpath)]) == 0
+    captured = capsys.readouterr()
+    assert "missing evaluated checkpoint identifier and 64-hex hash" in captured.out
+
+def test_short_checkpoint_hash_rejected(tmp_path, capsys):
+    fpath = tmp_path / "short_checkpoint_hash.json"
+    payload = valid_payload()
+    payload["checkpoint_sha256"] = "12345"
+    write_json(fpath, payload)
+
+    assert main([str(fpath)]) == 0
+    captured = capsys.readouterr()
+    assert "missing evaluated checkpoint identifier and 64-hex hash" in captured.out
+
+def test_wrapper_produced_integration_fixture(tmp_path, capsys):
+    fpath = tmp_path / "wrapper_artifact.json"
+    # An artifact shaped like what PR 73 wrapper produces
+    payload = {
+        "run_id": "test_wrapper_123",
+        "seed": 42,
+        "epochs": 5,
+        "task_config": {"name": "test"},
+        "input_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "provenance": {
+            "repository_commit": "cccccccccccccccccccccccccccccccccccccccc",
+            "producer_script_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "model": {
+            "checkpoint": "my_checkpoint.pt",
+            "rwkv_checkpoint_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "settings": {
+            "batch_size": 32,
+            "precision": "bf16"
+        },
+        "environment": {
+            "gpu_name": "RTX 3090",
+            "gpu_compute_capability": [8, 6],
+            "python": "3.12.0",
+            "torch": "2.4.0",
+            "cuda": "12.1"
+        }
+    }
+    write_json(fpath, payload)
+
+    assert main([str(fpath)]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""

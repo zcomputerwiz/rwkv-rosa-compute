@@ -21,19 +21,23 @@ ALIASES = {
     "content_hash": ["structural_challenge.content_sha256", "input_sha256"],
 
     # code
-    "commit": ["commit"],
-    "script_hash": ["script_sha256"],
+    "commit": ["provenance.repository_commit", "commit"],
+    "script_hash": ["provenance.producer_script_sha256", "script_sha256"],
 
     # checkpoint
-    "checkpoint": ["checkpoint", "model.rwkv_checkpoint_sha256"],
+    "checkpoint_id": ["checkpoint", "model.checkpoint", "model.rwkv_checkpoint", "initialization.checkpoint_path"],
+    "checkpoint_hash": ["model.rwkv_checkpoint_sha256", "initialization.checkpoint_sha256", "checkpoint_sha256"],
 
     # settings
     "batch_size": ["evaluation_settings.batch_size", "settings.batch_size", "training_protocol.batch_size"],
     "precision": ["evaluation_settings.precision", "settings.precision", "precision"],
 
-    # device
+    # device and environment
     "device_name": ["environment.gpu_name", "environment.gpu"],
-    "compute_capability": ["environment.gpu_compute_capability", "environment.capability"]
+    "compute_capability": ["environment.gpu_compute_capability", "environment.capability"],
+    "env_python": ["environment.python"],
+    "env_torch": ["environment.torch"],
+    "env_cuda": ["environment.cuda"]
 }
 
 def resolve_alias(data, paths, enforce_hash=False, hash_len=64):
@@ -134,12 +138,12 @@ def main(argv=None) -> int:
         # Code group
         if not resolve_alias(data, ALIASES["commit"], enforce_hash=True, hash_len=40):
             missing.append("commit")
-        if not resolve_alias(data, ALIASES["script_hash"]):
+        if not resolve_alias(data, ALIASES["script_hash"], enforce_hash=True, hash_len=64):
             missing.append("script hash")
 
         # Checkpoint group
-        if not resolve_alias(data, ALIASES["checkpoint"]):
-            missing.append("checkpoint identifier or hash")
+        if not (resolve_alias(data, ALIASES["checkpoint_id"]) and resolve_alias(data, ALIASES["checkpoint_hash"], enforce_hash=True, hash_len=64)):
+            missing.append("evaluated checkpoint identifier and 64-hex hash")
 
         # Settings group
         if not (resolve_alias(data, ALIASES["batch_size"]) and resolve_alias(data, ALIASES["precision"])):
@@ -148,6 +152,8 @@ def main(argv=None) -> int:
         # Device group
         if not (resolve_alias(data, ALIASES["device_name"]) and resolve_alias(data, ALIASES["compute_capability"])):
             missing.append("device name and compute capability")
+        if not (resolve_alias(data, ALIASES["env_python"]) and resolve_alias(data, ALIASES["env_torch"]) and resolve_alias(data, ALIASES["env_cuda"])):
+            missing.append("environment Python, Torch, and CUDA versions")
 
         if missing:
             any_missing = True
