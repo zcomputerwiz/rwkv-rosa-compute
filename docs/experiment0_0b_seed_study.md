@@ -45,7 +45,10 @@ showed a transition against 0 of 4 at `N=36`, Fisher two-sided `p = 0.0476`.
 ## What "pre-registered" means here
 
 The analysis script was committed before the remaining seeds were evaluated, so
-it could not be tuned to the data. It pins, and refuses to proceed without:
+it could not be tuned to the remaining five endpoints. It could not be blind to
+the first four: section 2 of the pre-registration lists them, with their AUCs,
+as what was already known at the time of writing. It pins, and refuses to
+proceed without:
 
 - the outcome **stratum** and the **epoch** (5) — not "the best epoch present",
   which would let a still-training seed contribute a mid-flight value;
@@ -171,10 +174,11 @@ logits before subtraction. That understates the perturbation by roughly two
 orders of magnitude, and it assigns **zero** possible movement to every row
 whose margin is exactly zero — 189 of the 3,000 rows entering seed 42's AUC.
 A zero margin does not imply zero perturbation: those rows carry 66 distinct
-equal-logit values spanning `15.5` to `25.875`, and at the upper end a single
-per-logit step moves the margin by as much as `0.25`. It also presented a Monte
-Carlo maximum as an adversarial bound. The reported statistic never depended on
-any of it.
+equal-logit values spanning `15.5` to `25.875`. At the upper end one bf16 step
+is `0.125`, so a single logit moving one step shifts the margin by that much,
+and independent one-step changes to the two logits in opposite directions can
+move it by as much as `0.25`. It also presented a Monte Carlo maximum as an
+adversarial bound. The reported statistic never depended on any of it.
 
 ## Review history
 
