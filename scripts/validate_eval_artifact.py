@@ -15,14 +15,16 @@ ALIASES = {
     # e.g., 'a.b.c' will look for {"a": {"b": {"c": value}}}
 
     # identity
-    "artifact_kind": ["artifact_kind", "kind"],
-    "schema_version": ["schema_version", "version"],
+    "artifact_kind": ["artifact_kind"],
+    "schema_version": ["schema_version"],
     "run_id": ["run_id"],
-    "seed": ["seed", "seeds_run", "evaluation.seeds_run"],
+    "seed": ["seed"],
     "epoch": ["evaluated_epoch", "eval_epoch"],
 
     # inputs
-    "challenge_or_dataset": ["structural_challenge.challenge_id", "task", "task_config", "challenge", "dataset"],
+    "challenge_or_dataset": [
+        "structural_challenge.challenge_id", "task", "challenge", "dataset"
+    ],
     "content_hash": ["structural_challenge.content_sha256", "input_sha256"],
 
     # code
@@ -37,8 +39,8 @@ ALIASES = {
     "legacy_script_hash": ["script_sha256"],
 
     # checkpoint
-    "checkpoint_id": ["checkpoint", "model.checkpoint", "model.rwkv_checkpoint", "initialization.checkpoint_path"],
-    "checkpoint_hash": ["model.rwkv_checkpoint_sha256", "initialization.checkpoint_sha256", "checkpoint_sha256"],
+    "checkpoint_id": ["checkpoint", "model.checkpoint"],
+    "checkpoint_hash": ["checkpoint_sha256", "model.checkpoint_sha256"],
 
     # settings
     "batch_size": ["evaluation_settings.batch_size", "settings.batch_size", "training_protocol.batch_size"],
@@ -68,6 +70,7 @@ def get_alias_value(data, paths):
             return curr
     return None
 
+
 def resolve_alias(data, paths, enforce_hash=False, hash_len=64, lowercase_only=False):
     val = get_alias_value(data, paths)
     if val is not None:
@@ -79,6 +82,24 @@ def resolve_alias(data, paths, enforce_hash=False, hash_len=64, lowercase_only=F
             return False
         return True
     return False
+
+
+def resolve_string(data, paths):
+    return isinstance(get_alias_value(data, paths), str)
+
+
+def resolve_int(data, paths, *, minimum=0):
+    value = get_alias_value(data, paths)
+    return isinstance(value, int) and not isinstance(value, bool) and value >= minimum
+
+
+def resolve_schema_version(data, paths):
+    value = get_alias_value(data, paths)
+    return (
+        isinstance(value, str)
+        or (isinstance(value, int) and not isinstance(value, bool) and value >= 1)
+    )
+
 
 def check_identity_is_eval(data):
     return (resolve_alias(data, ALIASES["run_id"]) or
@@ -143,23 +164,29 @@ def main(argv=None) -> int:
         missing = []
 
         # Identity group
-        if not resolve_alias(data, ALIASES["artifact_kind"]):
+        if get_alias_value(data, ALIASES["artifact_kind"]) != "evaluation":
             missing.append("artifact kind")
-        if not resolve_alias(data, ALIASES["schema_version"]):
+        if not resolve_schema_version(data, ALIASES["schema_version"]):
             missing.append("schema version")
-        if not resolve_alias(data, ALIASES["run_id"]):
+        if not resolve_string(data, ALIASES["run_id"]):
             missing.append("run id")
-        if not resolve_alias(data, ALIASES["seed"]):
+        if not resolve_int(data, ALIASES["seed"]):
             missing.append("seed")
-        if not resolve_alias(data, ALIASES["epoch"]):
+        if not resolve_int(data, ALIASES["epoch"]):
             missing.append("the evaluated epoch")
 
         # Inputs group
-        if not (resolve_alias(data, ALIASES["challenge_or_dataset"]) and resolve_alias(data, ALIASES["content_hash"], enforce_hash=True)):
+        if not (
+            resolve_string(data, ALIASES["challenge_or_dataset"])
+            and resolve_alias(data, ALIASES["content_hash"], enforce_hash=True)
+        ):
             missing.append("challenge or dataset identifier AND its content hash")
 
         # Code group
-        if not resolve_alias(data, ALIASES["commit"], enforce_hash=True, hash_len=40):
+        if not resolve_alias(
+            data, ALIASES["commit"], enforce_hash=True, hash_len=40,
+            lowercase_only=True,
+        ):
             missing.append("commit")
 
         script_missing = False
@@ -176,7 +203,7 @@ def main(argv=None) -> int:
             else:
                 p_posix = PurePosixPath(path_val)
                 p_win = PureWindowsPath(path_val)
-                if p_posix.is_absolute() or p_win.is_absolute():
+                if p_posix.is_absolute() or p_win.is_absolute() or p_win.drive:
                     script_missing = True
                 elif ".." in p_posix.parts or ".." in p_win.parts:
                     script_missing = True
@@ -192,17 +219,31 @@ def main(argv=None) -> int:
                 missing.append("script hash (requires repository-relative path, lowercase 64-hex blob hash, and correct basis string)")
 
         # Checkpoint group
-        if not (resolve_alias(data, ALIASES["checkpoint_id"]) and resolve_alias(data, ALIASES["checkpoint_hash"], enforce_hash=True, hash_len=64)):
+        if not (
+            resolve_string(data, ALIASES["checkpoint_id"])
+            and resolve_alias(
+                data, ALIASES["checkpoint_hash"], enforce_hash=True, hash_len=64
+            )
+        ):
             missing.append("evaluated checkpoint identifier and 64-hex hash")
 
         # Settings group
-        if not (resolve_alias(data, ALIASES["batch_size"]) and resolve_alias(data, ALIASES["precision"])):
+        if not (
+            resolve_int(data, ALIASES["batch_size"], minimum=1)
+            and resolve_string(data, ALIASES["precision"])
+        ):
             missing.append("evaluation batch size and precision")
 
         # Device group
-        if not (resolve_alias(data, ALIASES["device_name"]) and resolve_alias(data, ALIASES["compute_capability"])):
+        if not (
+            resolve_string(data, ALIASES["device_name"])
+            and resolve_alias(data, ALIASES["compute_capability"])
+        ):
             missing.append("device name and compute capability")
-        if not (resolve_alias(data, ALIASES["env_python"]) and resolve_alias(data, ALIASES["env_torch"]) and resolve_alias(data, ALIASES["env_cuda"])):
+        if not all(
+            resolve_string(data, ALIASES[name])
+            for name in ("env_python", "env_torch", "env_cuda")
+        ):
             missing.append("environment Python, Torch, and CUDA versions")
 
         if missing:
