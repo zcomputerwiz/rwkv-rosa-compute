@@ -12,9 +12,15 @@ from collections import Counter
 import pytest
 import torch
 
-from exp1.pointer_chase import (ChaseSpec, encode_batch, execute,
-                                generate_dataset, generate_instance,
-                                generate_memory, make_neutral_vector)
+from exp1.pointer_chase import (
+    ChaseSpec,
+    encode_batch,
+    execute,
+    generate_dataset,
+    generate_instance,
+    generate_memory,
+    make_neutral_vector,
+)
 
 M, K = 16, 4
 
@@ -141,3 +147,19 @@ def test_num_silent_requires_a_kind():
     data = generate_dataset(1, 1, depth=2, seed=7, num_nodes=M, num_maps=K)
     with pytest.raises(ValueError):
         encode_batch(data, spec, num_silent=4)
+
+def test_data_generation_depth_invariance():
+    """Defect 2: Changing depth must not change the sampled memories, starts, or selector prefixes."""
+    seed = 42
+    d2 = generate_dataset(2, 4, depth=2, seed=seed)
+    d4 = generate_dataset(2, 4, depth=4, seed=seed)
+    d8 = generate_dataset(2, 4, depth=8, seed=seed)
+
+    for i in range(len(d2)):
+        assert d2[i].memory == d4[i].memory == d8[i].memory, "Memories differ across depths"
+        assert d2[i].start == d4[i].start == d8[i].start, "Starts differ across depths"
+
+        # d2 selectors should be prefix of d4
+        assert d4[i].selectors[:2] == d2[i].selectors
+        # d4 selectors should be prefix of d8
+        assert d8[i].selectors[:4] == d4[i].selectors
