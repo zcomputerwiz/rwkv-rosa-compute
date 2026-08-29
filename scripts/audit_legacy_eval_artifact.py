@@ -123,29 +123,41 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="Exit with non-zero code if any required field is missing",
+        help="No-op alias for backwards compatibility. The script now fails closed by default.",
+    )
+    parser.add_argument(
+        "--report-only",
+        action="store_true",
+        help="Always exit 0 regardless of findings, for interactive use.",
     )
     args = parser.parse_args(argv)
 
+    results = {}
+    any_missing = False
+
     json_files = []
+
+    def on_walk_error(e):
+        nonlocal any_missing
+        results[str(e.filename)] = {"error": f"Failed to traverse directory: {e.strerror}"}
+        any_missing = True
+
     for p in args.paths:
         if p.is_file():
             if p.suffix == ".json":
                 json_files.append(p)
         elif p.is_dir():
-            for root, _, files in os.walk(p):
+            for root, _, files in os.walk(p, onerror=on_walk_error):
                 for f in files:
                     if f.endswith(".json"):
                         json_files.append(Path(root) / f)
         else:
-            print(f"Warning: {p} not found or not a valid path", file=sys.stderr)
+            results[str(p)] = {"error": "not found or not a valid path"}
+            any_missing = True
 
-    if not json_files:
+    if not json_files and not any_missing:
         print("No JSON files found to validate.", file=sys.stderr)
-        return 1 if args.strict else 0
-
-    results = {}
-    any_missing = False
+        return 0 if args.report_only else 1
 
     for fpath in json_files:
         try:
@@ -262,7 +274,7 @@ def main(argv=None) -> int:
             else:
                 pass # Silent on pass unless requested, or maybe print ok? We will just print if there are missing
 
-    if args.strict and any_missing:
+    if any_missing and not args.report_only:
         return 1
     return 0
 
