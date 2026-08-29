@@ -100,22 +100,21 @@ scripts/init_cuda_env.ps1     the actual bootstrap. Dot-source it, never run
                               A child process cannot modify its parent, which
                               is why the copy is necessary.
 scripts/run_cuda_tests.ps1    dot-sources it, then runs the CUDA suite.
-scripts/pueue_wrap.ps1        dot-sources it with -RequireCuda, so every job
-                              submitted to the machine-local queue already has
-                              cl, nvcc, and ninja. Its -SelfCheck mode fails
-                              closed naming any that are missing, without
-                              running the job.
+scripts/pueue_wrap.ps1        dot-sources it and forwards -RequireCuda when the
+                              queued command requests CUDA. With -SelfCheck and
+                              -RequireCuda it fails closed naming any missing
+                              cl, nvcc, or ninja, without running the job.
 ```
 
-The practical consequence: a queued CUDA job needs no special handling, and a
-hand-run one needs all of it.
+The practical consequence: a CUDA job submitted through `pueue_wrap.ps1` with
+`-RequireCuda` needs no bootstrap inside the task. A hand-run job still does.
 
 ### Invoking python directly bypasses all of the above
 
-Every path here is PowerShell, and that is not incidental. `vcvars64.bat` is a
-cmd batch file whose whole purpose is mutating the environment of the shell
-that calls it, so there is no way to get the MSVC toolchain into a Git Bash
-session by adding something to `PATH`. `ninja` alone is not enough:
+Every bootstrap path here is PowerShell, and that is not incidental.
+`vcvars64.bat` is a cmd batch file whose whole purpose is mutating its caller's
+environment. Adding a compiler directory to `PATH` in a plain Git Bash session
+does not reproduce that environment, and `ninja` alone is not enough:
 
 ```text
 Error checking compiler version for cl
@@ -124,8 +123,9 @@ RuntimeError: Failed to compile/load the RWKV-7 CUDA kernel
 ```
 
 The second line names `ninja`, which reads as a missing pip package. It is
-usually not: `ninja` ships in `.venv\Scripts` already, and the real cause is the
-first line. Installing anything in response to that message changes nothing.
+usually already in `.venv\Scripts`; the bypassed bootstrap left both that
+directory and the MSVC environment unavailable, as the first line signals.
+Installing another copy of Ninja does not initialize MSVC.
 
 If a direct invocation is genuinely necessary, go through cmd:
 
@@ -238,9 +238,9 @@ pytest -m "exp0 and cuda and slow" -v
 
 ### bash
 
-Linux only. On Windows this form fails before it tests anything, because a bash
-session cannot inherit the MSVC environment — see "Invoking python directly
-bypasses all of the above". Use the PowerShell form or `run_cuda_tests.ps1`.
+Linux only as written. A plain Windows Git Bash session does not initialize the
+MSVC environment — see "Invoking python directly bypasses all of the above".
+Use the PowerShell form or `run_cuda_tests.ps1`.
 
 ```bash
 EXP0_REQUIRE_RWKV_CUDA=1 pytest -m "exp0 and cuda and slow" -v
