@@ -127,9 +127,12 @@ def execute(memory: Memory, start: int, selectors: Sequence[int]) -> int:
     return x
 
 
-def generate_instance(rng: random.Random, memory: Memory, *, depth: int) -> ChaseInstance:
+def generate_instance(rng: random.Random, memory: Memory, *, depth: int, max_depth: int = 64) -> ChaseInstance:
     start = rng.randrange(memory.num_nodes)
-    selectors = tuple(rng.randrange(memory.num_maps) for _ in range(depth))
+    if depth > max_depth:
+        raise ValueError(f"depth {depth} exceeds max_depth {max_depth}")
+    all_selectors = tuple(rng.randrange(memory.num_maps) for _ in range(max_depth))
+    selectors = all_selectors[:depth]
     return ChaseInstance(memory, start, selectors, execute(memory, start, selectors))
 
 
