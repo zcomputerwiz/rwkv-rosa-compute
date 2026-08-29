@@ -12,9 +12,15 @@ Layout, one run per archive:
       model_epoch_001.pt
       model_epoch_005.pt
 
-Identity verification checks that the checkpoint's signature matches the caller's
-claimed run_id and seed. The canonical content digest ensures the weights
-themselves are uniquely identified and stable across re-serializations.
+Identity has two halves. The archive verifies that the checkpoint's own
+signature matches the run_id and seed the caller claims, so weights cannot be
+published under another run's name by a command-line slip. Separately, the
+content digest is canonical over the tensors themselves rather than over
+Torch's container bytes, so re-serialization by a different Torch version does
+not change a snapshot's identity. That digest commits to every key, dtype, and
+shape directly rather than delegating to a separate schema field, because
+correctness must not depend on a reader remembering to check a second field
+first.
 """
 from __future__ import annotations
 
@@ -207,7 +213,6 @@ def export_snapshots(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     entries = []
-    all_identities_verified = True
     all_identities_verified = True
     for epoch in sorted(source_checkpoints):
         if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 0:
