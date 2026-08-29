@@ -1,9 +1,13 @@
 # Experiment 0B seed study: result
 
-**Status**: complete. Pre-registered, independently reviewed. The reported
-statistic is confirmed for the collected artifacts; **causal attribution to
-filler tokens remains unresolved** while arm and evaluating device are
-perfectly confounded — see Limitations.
+**Status**: **closed.** Statistically successful and scientifically useful;
+mechanistically inconclusive. No further 0B training is planned.
+
+Pre-registered and independently reviewed. The reported statistic is confirmed
+for the collected artifacts. Evaluation-device numerics have since been measured
+and are too small to explain the separation; **training-path and seed-by-device
+attribution remains unresolved** — see Limitations.
+
 **Analysis**: [`scripts/analyze_0b_seed_study.py`](../scripts/analyze_0b_seed_study.py)
 **Pre-registration**: [`PREREGISTRATION_0B_SEED_STUDY.md`](PREREGISTRATION_0B_SEED_STUDY.md),
 frozen 2026-08-24, before the remaining seeds were evaluated.
@@ -65,14 +69,16 @@ partial one.
 
 ## Limitations
 
-### Evaluation hardware is confounded with arm
+### Hardware is confounded with arm
 
-All five `N=0` evaluations ran on an RTX 4060 Ti (`sm_89`) and all four `N=36`
-on an RTX 3070 Laptop (`sm_86`), with no checkpoint evaluated on both.
+All five `N=0` runs were trained and evaluated on an RTX 4060 Ti (`sm_89`) and
+all four `N=36` on an RTX 3070 Laptop (`sm_86`), with no registered checkpoint
+crossing devices. Arm is confounded with hardware in both training and
+evaluation.
 
-**Arm and device are perfectly confounded, and this study cannot distinguish a
-filler-token effect from a device-specific evaluation effect.** That is the
-limitation in its strongest honest form. It is not removable retrospectively.
+Post-registered work has since separated those two halves. The evaluation half
+is measured and small. The training half is not removable retrospectively and
+remains the operative limitation.
 
 The confound was disclosed in the pre-registration, which was written after four
 of the nine endpoints had been evaluated — section 2 of that document lists them
@@ -89,10 +95,67 @@ RTX 2070          75     e9f8f20b...    0502d55b...
 ```
 
 [`scripts/cross_node_numerics_probe.py`](../scripts/cross_node_numerics_probe.py)
-reproduces this in seconds per node and requires no data transfer. **The
-magnitude on trained checkpoints was not measured**, and no bound on it is
-claimed — see the tie density below for why one could not be constructed
-cheaply.
+reproduces this in seconds per node and requires no data transfer.
+
+**The magnitude on a trained checkpoint has since been measured.** One fixed
+`N=0` seed-44 epoch-5 checkpoint, evaluated on all three devices under the
+pinned protocol:
+
+```text
+RTX 4060 Ti  sm_89    0.74928125    reference
+RTX 3070     sm_86    0.75039850    +0.00111725
+RTX 2070     sm_75    0.74879975    -0.00048150
+                      range          0.00159875
+```
+
+That is an observed range for this checkpoint, challenge and protocol — not a
+universal numerical bound. Per-instance outputs are **not** invariant: 105 of
+6,000 structural predictions flip between two of the devices. The rank-based
+endpoint absorbs that; individual predictions do not. Evaluation-device
+numerics therefore cannot account for the registered separation, which is a
+narrower and stronger statement than the earlier "not measured".
+
+### Training hardware remains confounded, and is the live limitation
+
+Evaluation is settled; training is not. The registered study mapped training
+device one-to-one onto arm, and no amount of post-hoc evaluation fixes that.
+
+Two post-registered within-device comparisons exist, both on **seed 44 only**:
+
+```text
+device                N=0 AUC     N=36 AUC    arm difference
+RTX 3070  sm_86      0.7315830   0.5587728      +0.1728103
+RTX 4060 Ti sm_89    0.7492813   0.4620020      +0.2872793
+```
+
+Both were produced after the registration and are **one-seed diagnostics**.
+They reject GPU identity as the sole explanation for seed 44's separation, and
+the sm_89 pair shows the effect emerging during training rather than existing at
+the first checkpoint. They do not retroactively randomize training device across
+the nine registered runs, and they are not a substitute for a paired-seed
+extension.
+
+Three qualifications belong with those numbers.
+
+**The sm_89 pair is same-device but not same hardware state.** The registered
+`N=0` run trained at this machine's original memory clock; the `N=36` run
+trained at a clock reduced by 300 MHz. It is a same-device, different-clock
+comparison.
+
+**A first `N=36` attempt at the original clock diverged.** It reached epoch 2
+with 114,981,888 of 115,031,808 parameters non-finite and was discarded. The
+completed run is a second attempt at the reduced clock. A transient fault or an
+overclock-related cause is **plausible, not proven**: the training path does not
+enable deterministic algorithms, and two runs of one seed on this machine were
+measured to differ — 400 of 403 tensors, largest delta `5.98e-03` — so a
+recipe-level instability would not necessarily have reproduced either.
+
+**Same-arm training outcomes differ materially across nodes.** `N=36` seed 44
+scores `0.4620` here and `0.5588` on the RTX 3070: the same arm, seed and
+recipe, `0.0968` apart. Since run-to-run variation on one machine has not been
+separated from device variation, that gap bounds neither term individually. It
+is the reason a paired design — both arms of a seed on one machine — is worth
+more than an unpaired seed expansion.
 
 **A replicator should avoid creating this confound rather than measure it.**
 Evaluate both arms on the same device. Where multiple devices are needed, keep
@@ -187,3 +250,21 @@ by `codex-shannon` and `opencode-dijkstra`. Review found and fixed seven defects
 in the analysis script, including tie handling, epoch pinning, and the
 conflicting-evaluation gate. The hardware limitation above is the disposition
 reached after a proposed stopping argument was rejected and withdrawn.
+
+
+## Closure
+
+Experiment 0B is closed. The registered statistic stands, the evaluation-device
+confound is measured and small, and the training-device confound is disclosed
+and not removable from the collected population.
+
+Further paired 0B seeds would sharpen a causal claim about this specific filler
+recipe at high cost, and would not establish the latent-workspace or
+post-query-computation mechanism the programme is actually asking about.
+Expected information per GPU hour is now higher in Experiment 1.
+
+**Reopening requires one of:** an external requirement for a population-level
+causal claim about the 0B filler arm; an Experiment 1 failure that a narrowly
+defined 0B experiment can diagnose; or explicit operator authorization of the
+pre-registered paired-seed extension. Absent one of those, new 0B training is
+out of scope, and no existing 0B task document should be read as authorizing it.
