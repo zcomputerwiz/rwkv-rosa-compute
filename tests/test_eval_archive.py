@@ -3,10 +3,11 @@
 These are the five checks required by REVIEW_CHECKPOINT_ARCHIVE_FORMAT_SHANNON:
 round-trip identity, fail-closed on four corruptions, the evaluation loader
 accepting a snapshot, the training-resume loader refusing one, and the archive
-not reading as READY until the manifest lands last.
+not reading as READY until the manifest and its sidecar land last.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -21,7 +22,6 @@ from rosa_compute.eval_archive import (
     export_snapshots,
     load_snapshot,
     read_manifest,
-    schema_sha256,
     verify_archive,
 )
 
@@ -41,7 +41,13 @@ def make_state() -> dict[str, torch.Tensor]:
     }
 
 
-def write_source(path: Path, state: dict[str, torch.Tensor]) -> Path:
+def write_source(
+    path: Path,
+    state: dict[str, torch.Tensor],
+    *,
+    run_id: str = RUN.run_id,
+    seeds: tuple[int, ...] = (RUN.seed,),
+) -> Path:
     """A full training checkpoint, complete with the state export must drop."""
     torch.save(
         {
@@ -53,11 +59,27 @@ def write_source(path: Path, state: dict[str, torch.Tensor]) -> Path:
             "rng_state": {"python": None},
             "progress": {"epoch": 5},
             "initialization": {},
-            "signature": {"run_id": RUN.run_id},
+            "signature": {
+                "run_id": run_id,
+                "evaluation": {"seeds_run": list(seeds)},
+            },
         },
         path,
     )
     return path
+
+
+def rewrite_sidecar(path: Path) -> None:
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    path.with_name(path.name + ".sha256").write_text(
+        f"{digest}  {path.name}\n", encoding="utf-8"
+    )
+
+
+def rewrite_manifest(out: Path, manifest: dict) -> None:
+    path = out / "MANIFEST.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    rewrite_sidecar(path)
 
 
 @pytest.fixture
@@ -118,7 +140,7 @@ def test_flipped_stored_byte_fails_closed(archive):
     raw = bytearray(target.read_bytes())
     raw[len(raw) // 2] ^= 0x01
     target.write_bytes(bytes(raw))
-    with pytest.raises(ArchiveError, match="stored digest"):
+    with pytest.raises(ArchiveError, match="sidecar digest"):
         load_snapshot(out, 5)
 
 
@@ -139,11 +161,11 @@ def test_wrong_schema_fails_closed(archive):
     manifest = json.loads((out / "MANIFEST.json").read_text(encoding="utf-8"))
     # Re-point the stored digest so the schema check is what fires, not the
     # file digest.
-    import hashlib
     manifest["entries"][0]["stored_sha256"] = hashlib.sha256(
         target.read_bytes()).hexdigest()
     manifest["entries"][0]["stored_bytes"] = target.stat().st_size
-    (out / "MANIFEST.json").write_text(json.dumps(manifest), encoding="utf-8")
+    rewrite_sidecar(target)
+    rewrite_manifest(out, manifest)
     with pytest.raises(ArchiveError, match="schema digest"):
         load_snapshot(out, 5)
 
@@ -171,7 +193,7 @@ def test_manifest_path_traversal_is_rejected(archive):
     out, _, _ = archive
     manifest = json.loads((out / "MANIFEST.json").read_text(encoding="utf-8"))
     manifest["entries"][0]["path"] = "../escape.pt"
-    (out / "MANIFEST.json").write_text(json.dumps(manifest), encoding="utf-8")
+    rewrite_manifest(out, manifest)
     with pytest.raises(ArchiveError, match="plain filename"):
         verify_archive(out)
 
@@ -222,13 +244,22 @@ def test_manifest_declares_evaluation_only(archive):
 # 5. publication order
 
 
-def test_archive_is_not_ready_until_the_manifest_lands(archive):
+@pytest.mark.parametrize("missing", ["MANIFEST.json", "MANIFEST.json.sha256"])
+def test_archive_is_not_ready_until_the_manifest_pair_lands(archive, missing):
     out, _, _ = archive
-    (out / "MANIFEST.json").unlink()
+    (out / missing).unlink()
     # The data entry and its sidecar are still there; without the manifest the
-    # directory must not read as an archive at all.
+    # directory must not read as an archive at all. The sidecar is part of the
+    # READY signal, so a manifest without its sidecar is also incomplete.
     assert (out / "model_epoch_005.pt").is_file()
     assert (out / "model_epoch_005.pt.sha256").is_file()
+    with pytest.raises(ArchiveError, match="not READY"):
+        verify_archive(out)
+
+
+def test_archive_is_not_ready_without_an_entry_sidecar(archive):
+    out, _, _ = archive
+    (out / "model_epoch_005.pt.sha256").unlink()
     with pytest.raises(ArchiveError, match="not READY"):
         verify_archive(out)
 
@@ -241,7 +272,6 @@ def test_every_published_file_has_a_sidecar(archive):
         assert sidecar.is_file(), payload.name
         recorded, name = sidecar.read_text(encoding="utf-8").split()
         assert name == payload.name
-        import hashlib
         assert recorded == hashlib.sha256(payload.read_bytes()).hexdigest()
 
 
@@ -260,6 +290,24 @@ def test_export_leaves_the_source_checkpoint_untouched(archive):
     payload = torch.load(source, map_location="cpu", weights_only=False)
     assert "optimizer_state_dict" in payload
     assert payload["progress"] == {"epoch": 5}
+
+
+def test_export_refuses_a_checkpoint_from_another_run(tmp_path):
+    source = write_source(
+        tmp_path / "epoch_005.pt", make_state(), run_id="another-run"
+    )
+    with pytest.raises(ArchiveError, match="belongs to run"):
+        export_snapshots(
+            source_checkpoints={5: source}, out_dir=tmp_path / "arch", run=RUN
+        )
+
+
+def test_export_refuses_a_checkpoint_from_another_seed(tmp_path):
+    source = write_source(tmp_path / "epoch_005.pt", make_state(), seeds=(45,))
+    with pytest.raises(ArchiveError, match="does not record seed"):
+        export_snapshots(
+            source_checkpoints={5: source}, out_dir=tmp_path / "arch", run=RUN
+        )
 
 
 def test_multiple_epochs_are_independently_loadable(tmp_path):

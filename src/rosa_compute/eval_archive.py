@@ -155,6 +155,21 @@ def _write_sidecar(path: Path) -> str:
     return digest
 
 
+def _verify_sidecar(path: Path) -> str:
+    sidecar = path.with_name(path.name + ".sha256")
+    if not sidecar.is_file():
+        raise ArchiveError(f"archive is not READY: missing sidecar for {path.name}")
+    fields = sidecar.read_text(encoding="utf-8").split()
+    if len(fields) != 2 or fields[1] != path.name:
+        raise ArchiveError(f"malformed sidecar for {path.name}")
+    actual = sha256_file(path)
+    if fields[0] != actual:
+        raise ArchiveError(
+            f"{path.name}: sidecar digest {fields[0]} does not match {actual}"
+        )
+    return actual
+
+
 @dataclass(frozen=True)
 class SourceRun:
     """Provenance of the training run a snapshot came from."""
@@ -181,8 +196,8 @@ def export_snapshots(
     and the local full checkpoint remains the only resumable copy.
 
     Entries are staged privately, published with their sidecars, and only then
-    is ``MANIFEST.json`` written. A reader that finds the manifest therefore
-    finds every entry it names.
+    are ``MANIFEST.json`` and its sidecar written. A reader that verifies the
+    manifest pair therefore finds every entry it names.
     """
     if not source_checkpoints:
         raise ArchiveError("refusing to write an archive with no entries")
@@ -194,6 +209,8 @@ def export_snapshots(
 
     entries = []
     for epoch in sorted(source_checkpoints):
+        if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 0:
+            raise ArchiveError(f"invalid checkpoint epoch {epoch!r}")
         source = Path(source_checkpoints[epoch])
         payload = torch.load(source, map_location="cpu", weights_only=False)
         if not isinstance(payload, Mapping) or "model_state_dict" not in payload:
@@ -202,6 +219,25 @@ def export_snapshots(
                 "no model_state_dict"
             )
         state = payload["model_state_dict"]
+        if not isinstance(state, Mapping):
+            raise ArchiveError(f"{source} model_state_dict is not a mapping")
+
+        signature = payload.get("signature")
+        if isinstance(signature, Mapping):
+            source_run_id = signature.get("run_id")
+            if source_run_id is not None and source_run_id != run.run_id:
+                raise ArchiveError(
+                    f"{source} belongs to run {source_run_id!r}, not {run.run_id!r}"
+                )
+            evaluation = signature.get("evaluation")
+            if isinstance(evaluation, Mapping):
+                seeds = evaluation.get("seeds_run")
+                if seeds is not None and (
+                    not isinstance(seeds, (list, tuple)) or run.seed not in seeds
+                ):
+                    raise ArchiveError(
+                        f"{source} does not record seed {run.seed} in seeds_run"
+                    )
 
         content = canonical_content_sha256(state)
         schema = schema_sha256(state)
@@ -255,7 +291,7 @@ def export_snapshots(
         "entries": entries,
     }
 
-    # Written last, so the manifest's existence is the READY signal.
+    # Written last; the manifest plus its sidecar are the READY signal.
     manifest_path = out_dir / "MANIFEST.json"
     manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -269,7 +305,13 @@ def read_manifest(archive_dir: Path) -> dict[str, Any]:
     manifest_path = archive_dir / "MANIFEST.json"
     if not manifest_path.is_file():
         raise ArchiveError(f"archive is not READY: no MANIFEST.json in {archive_dir}")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    _verify_sidecar(manifest_path)
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ArchiveError(f"invalid MANIFEST.json: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise ArchiveError("MANIFEST.json must contain an object")
     version = manifest.get("format_version")
     if version != FORMAT_VERSION:
         raise ArchiveError(
@@ -277,6 +319,8 @@ def read_manifest(archive_dir: Path) -> dict[str, Any]:
         )
     if manifest.get("purpose") != "evaluation_only" or manifest.get("resume_capable"):
         raise ArchiveError("manifest does not declare an evaluation-only archive")
+    if not isinstance(manifest.get("entries"), list) or not manifest["entries"]:
+        raise ArchiveError("manifest must contain at least one entry")
     return manifest
 
 
@@ -295,24 +339,50 @@ def verify_archive(archive_dir: Path) -> dict[str, Any]:
     """
     archive_dir = Path(archive_dir)
     manifest = read_manifest(archive_dir)
+    seen_epochs = set()
     for entry in manifest["entries"]:
-        name = entry["path"]
+        if not isinstance(entry, Mapping):
+            raise ArchiveError("manifest entry is not an object")
+        epoch = entry.get("epoch")
+        if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 0:
+            raise ArchiveError(f"manifest entry has invalid epoch {epoch!r}")
+        if epoch in seen_epochs:
+            raise ArchiveError(f"manifest contains duplicate epoch {epoch}")
+        seen_epochs.add(epoch)
+
+        name = entry.get("path")
+        if not isinstance(name, str):
+            raise ArchiveError(f"manifest entry path is not a string: {name!r}")
         if "/" in name or "\\" in name or name.startswith("."):
             raise ArchiveError(f"manifest entry path is not a plain filename: {name!r}")
         path = archive_dir / name
         if not path.is_file():
             raise ArchiveError(f"archive is not READY: missing entry {name}")
+        stored_bytes = entry.get("stored_bytes")
+        if (
+            not isinstance(stored_bytes, int)
+            or isinstance(stored_bytes, bool)
+            or stored_bytes < 0
+        ):
+            raise ArchiveError(f"{name}: invalid stored_bytes {stored_bytes!r}")
+        decoded_bytes = entry.get("decoded_bytes")
+        if (
+            not isinstance(decoded_bytes, int)
+            or isinstance(decoded_bytes, bool)
+            or decoded_bytes < 0
+        ):
+            raise ArchiveError(f"{name}: invalid decoded_bytes {decoded_bytes!r}")
         size = path.stat().st_size
-        if size != entry["stored_bytes"]:
+        if size != stored_bytes:
             raise ArchiveError(
                 f"{name}: stored size {size} does not match manifest "
-                f"{entry['stored_bytes']}"
+                f"{stored_bytes}"
             )
-        actual = sha256_file(path)
-        if actual != entry["stored_sha256"]:
+        actual = _verify_sidecar(path)
+        if actual != entry.get("stored_sha256"):
             raise ArchiveError(
                 f"{name}: stored digest {actual} does not match manifest "
-                f"{entry['stored_sha256']}"
+                f"{entry.get('stored_sha256')}"
             )
     return manifest
 
