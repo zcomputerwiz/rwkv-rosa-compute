@@ -114,14 +114,21 @@ def train_model(
     resume_from_checkpoint: Optional[Path] = None,
     checkpoint_every_steps: Optional[int] = None,
     max_epochs: Optional[int] = None,
-    depth: int = 0,
+    # Required. There is no correct default for any of these: a default is
+    # silently written into the resume signature, and two callers that both
+    # omitted the same argument would produce interchangeable checkpoints.
+    # That is the defect this signature exists to prevent, so it must not be
+    # reachable by omission.
+    depth: int,
+    train_data_seed: int,
+    val_data_seed: int,
+    train_size: int,
+    val_size: int,
+    # These have genuine defaults: no silent tokens, no silent kind, the
+    # generator's own queries-per-memory, and held-out evaluation.
     num_silent: int = 0,
     silent_kind: Optional[str] = None,
     queries_per_memory: int = 4,
-    train_data_seed: int = 0,
-    val_data_seed: int = 0,
-    train_size: int = 0,
-    val_size: int = 0,
     overfit_train_as_val: bool = False,
 ) -> Tuple[torch.nn.Module, Dict[str, Any]]:
     """Train loop specifically for the Experiment 1 pointer-chase task."""

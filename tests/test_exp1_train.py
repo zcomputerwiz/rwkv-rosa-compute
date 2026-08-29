@@ -446,3 +446,19 @@ def test_training_resumes_refused_on_signature_mismatch(tmp_path):
             resume_from_checkpoint=latest_ckpt,
             depth=4, train_data_seed=2, val_data_seed=2, train_size=4, val_size=2,
         )
+
+
+def test_identity_arguments_cannot_be_omitted():
+    """A default here would be written into the signature as if it were real.
+
+    Two callers that both forgot the same argument would then produce
+    checkpoints that validate against each other, which is exactly the
+    mislabeled-result failure the signature exists to prevent.
+    """
+    import inspect
+
+    params = inspect.signature(train_model).parameters
+    for name in ("depth", "train_data_seed", "val_data_seed",
+                 "train_size", "val_size"):
+        assert params[name].default is inspect.Parameter.empty, (
+            f"{name} has a default; an omitted caller would silently record it")
