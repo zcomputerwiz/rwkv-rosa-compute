@@ -127,18 +127,25 @@ def main():
         "device": device_info,
     }
 
-    artifact_data = {}
-    if os.path.exists(args.artifact):
-        try:
-            with open(args.artifact, "r", encoding="utf-8") as f:
-                artifact_data = json.load(f)
-        except json.JSONDecodeError:
-            print("Error: Artifact exists but is not valid JSON.", file=sys.stderr)
-            sys.exit(exit_code)
+    if not os.path.exists(args.artifact):
+        print(f"Error: Command finished but artifact '{args.artifact}' was not created.", file=sys.stderr)
+        # Use an exit code distinct from typical application exits
+        sys.exit(2)
+
+    try:
+        with open(args.artifact, "r", encoding="utf-8") as f:
+            artifact_data = json.load(f)
+    except json.JSONDecodeError:
+        print("Error: Artifact exists but is not valid JSON.", file=sys.stderr)
+        sys.exit(2)
+
+    if not isinstance(artifact_data, dict):
+        print("Error: Artifact is valid JSON but not a JSON object (dict).", file=sys.stderr)
+        sys.exit(2)
 
     if "provenance" in artifact_data:
         print("Error: Artifact already contains a 'provenance' key.", file=sys.stderr)
-        sys.exit(exit_code)
+        sys.exit(2)
 
     artifact_data["provenance"] = provenance
 
@@ -146,7 +153,7 @@ def main():
         artifact_str = json.dumps(artifact_data, indent=2)
     except TypeError as e:
         print(f"Error serializing artifact: {e}", file=sys.stderr)
-        sys.exit(1 if exit_code == 0 else exit_code)
+        sys.exit(2)
 
     temp_artifact = args.artifact + ".tmp"
     with open(temp_artifact, "w", encoding="utf-8") as f:

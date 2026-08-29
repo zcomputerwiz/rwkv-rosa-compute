@@ -208,6 +208,74 @@ def test_pre_existing_artifact_rejected(repo_dir, monkeypatch):
 
     assert exc.value.code != 0
 
+def test_missing_artifact_fails_wrapper(repo_dir):
+    script_path = os.path.abspath("scripts/run_with_provenance.py")
+    producer = repo_dir / "producer.py"
+    producer.write_text("import sys; sys.exit(0)", encoding="utf-8")
+    subprocess.run(["git", "add", "producer.py"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True)
+
+    result = subprocess.run(
+        [sys.executable, script_path, "--artifact", "out.json", "--producer", "producer.py", "--", sys.executable, "producer.py"],
+        cwd=repo_dir, capture_output=True, text=True
+    )
+
+    assert result.returncode == 2
+    assert "was not created" in result.stderr
+    assert not (repo_dir / "out.json").exists()
+    assert not (repo_dir / "out.json.sha256").exists()
+
+def test_invalid_json_artifact_fails_wrapper(repo_dir):
+    script_path = os.path.abspath("scripts/run_with_provenance.py")
+    producer = repo_dir / "producer.py"
+    producer.write_text("import sys\nwith open(sys.argv[1], 'w') as f:\n  f.write('invalid json')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "producer.py"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True)
+
+    result = subprocess.run(
+        [sys.executable, script_path, "--artifact", "out.json", "--producer", "producer.py", "--", sys.executable, "producer.py", "out.json"],
+        cwd=repo_dir, capture_output=True, text=True
+    )
+
+    assert result.returncode == 2
+    assert "not valid JSON" in result.stderr
+    assert (repo_dir / "out.json").read_text() == "invalid json"
+    assert not (repo_dir / "out.json.sha256").exists()
+
+def test_non_object_artifact_fails_wrapper(repo_dir):
+    script_path = os.path.abspath("scripts/run_with_provenance.py")
+    producer = repo_dir / "producer.py"
+    producer.write_text("import sys, json\nwith open(sys.argv[1], 'w') as f:\n  json.dump([], f)\n", encoding="utf-8")
+    subprocess.run(["git", "add", "producer.py"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True)
+
+    result = subprocess.run(
+        [sys.executable, script_path, "--artifact", "out.json", "--producer", "producer.py", "--", sys.executable, "producer.py", "out.json"],
+        cwd=repo_dir, capture_output=True, text=True
+    )
+
+    assert result.returncode == 2
+    assert "not a JSON object" in result.stderr
+    assert (repo_dir / "out.json").read_text() == "[]"
+    assert not (repo_dir / "out.json.sha256").exists()
+
+def test_existing_provenance_fails_wrapper(repo_dir):
+    script_path = os.path.abspath("scripts/run_with_provenance.py")
+    producer = repo_dir / "producer.py"
+    producer.write_text("import sys, json\nwith open(sys.argv[1], 'w') as f:\n  json.dump({'provenance': {}}, f)\n", encoding="utf-8")
+    subprocess.run(["git", "add", "producer.py"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True)
+
+    result = subprocess.run(
+        [sys.executable, script_path, "--artifact", "out.json", "--producer", "producer.py", "--", sys.executable, "producer.py", "out.json"],
+        cwd=repo_dir, capture_output=True, text=True
+    )
+
+    assert result.returncode == 2
+    assert "already contains a 'provenance' key" in result.stderr
+    assert json.loads((repo_dir / "out.json").read_text()) == {"provenance": {}}
+    assert not (repo_dir / "out.json.sha256").exists()
+
 def test_script_runs_as_subprocess_from_outside_repo(repo_dir, tmp_path):
     # This test verifies that the script can be invoked as a subprocess
     # from outside the repository root, ensuring the sys.path modification works.
