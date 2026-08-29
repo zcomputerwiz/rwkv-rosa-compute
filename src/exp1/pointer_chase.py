@@ -106,6 +106,31 @@ def generate_memory(rng: random.Random, *, num_nodes: int, num_maps: int,
     independent of the memory drawn. With arbitrary maps the floor is both
     elevated and memory-dependent, which would have to be measured per cell and
     would confound the D axis - the attractor effect strengthens with depth.
+
+    **A second, higher floor exists for a model that reads the query.** The
+    table above is the floor for ignoring the query entirely. Selectors are
+    drawn independently, so a query can repeat one; when every selector present
+    appears at least twice the composition is not uniform, and in the extreme
+    all-identical case it is ``pi^D``, whose expected fixed-point count is the
+    number of divisors of ``D``. Then ``P(answer == start) = d(D)/M``, measured
+    at ``0.1252`` for ``D=2`` against ``1/M = 0.0625``.
+
+    The boundary is exact: if any selector appears **exactly once**, condition
+    on every other map and that one uniform permutation randomizes the whole
+    product, so the composition is uniform. Degenerate iff every present
+    selector appears at least twice.
+
+    Measured excess over ``1/M`` for the query-aware floor::
+
+        D            2       4       8      12      16      32
+        excess  +0.0155 +0.0039 +0.0016  0.0000  0.0000  0.0000
+
+    At ``D >= 12`` almost every word is technically non-uniform - with ``K=4``
+    it is hard not to repeat a selector - yet the deviation has decayed to
+    nothing. Since the H2 informative region is ``D`` in 12..32, the artifact
+    is zero where the result is read, and the generator is deliberately left
+    alone. Comparisons at ``D <= 8`` should use the measured floor rather than
+    ``1/M``. See ``test_a_selector_used_exactly_once_forces_exact_uniformity``.
     """
     if permutations:
         maps = []

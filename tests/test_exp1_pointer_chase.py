@@ -163,3 +163,65 @@ def test_data_generation_depth_invariance():
         assert d4[i].selectors[:2] == d2[i].selectors
         # d4 selectors should be prefix of d8
         assert d8[i].selectors[:4] == d4[i].selectors
+
+
+def _p_answer_is_start(depth, n_memories, seed, keep=None):
+    """Fraction of instances whose answer equals the start node."""
+    inst = generate_dataset(n_memories, queries_per_memory=4, depth=depth,
+                            seed=seed, num_nodes=M, num_maps=K)
+    if keep is not None:
+        inst = [i for i in inst if keep(Counter(i.selectors))]
+    assert inst, "filter kept nothing"
+    return sum(1 for i in inst if i.answer == i.start) / len(inst), len(inst)
+
+
+def test_a_selector_used_exactly_once_forces_exact_uniformity():
+    """The query-aware floor, which is not the ignore-the-query floor above.
+
+    A repeated selector composes a permutation with itself, and powers of a
+    permutation have inflated fixed points: E[fix(pi^D)] is the number of
+    divisors of D, so P(answer == start) is d(D)/M rather than 1/M. That is a
+    second floor, reachable only by a model that reads the query and notices
+    the degenerate case.
+
+    The boundary is exact. If any selector value appears exactly once, then
+    conditioning on every other map leaves that one uniform permutation free,
+    and a uniform permutation composed with anything fixed is uniform. So the
+    composition is exactly uniform iff some selector appears exactly once.
+    """
+    # Every present selector appears at least twice: not uniform.
+    p_degenerate, _ = _p_answer_is_start(2, 20000, 1004,
+                                         keep=lambda c: min(c.values()) >= 2)
+    assert p_degenerate > 0.11, f"expected ~d(2)/M = 0.125, got {p_degenerate}"
+
+    # Some selector appears exactly once: uniform, and this is the exact claim.
+    p_uniform, n = _p_answer_is_start(2, 20000, 1004,
+                                      keep=lambda c: min(c.values()) == 1)
+    se = (0.0625 * 0.9375 / n) ** 0.5
+    assert abs(p_uniform - 1 / M) < 4 * se, (
+        f"a once-used selector must give exactly 1/M; got {p_uniform}")
+
+
+def test_the_query_aware_floor_is_negligible_where_H2_is_read():
+    """The artifact is confined to shallow depths.
+
+    Measured excess over 1/M: +0.0155 at D=2, +0.0039 at D=4, +0.0016 at D=8,
+    and statistically zero from D=12 up. The H2 informative region is D in
+    12..32, because a D-step chain unrolls across layers while D is within the
+    layer budget. So the floor artifact is zero exactly where the experiment
+    reads its result, and no generator change is warranted.
+
+    This test exists so that conclusion cannot rot silently: raising K, or
+    changing how selectors are drawn, would move these numbers.
+    """
+    shallow, _ = _p_answer_is_start(2, 15000, 1004)
+    assert shallow - 1 / M > 0.008, (
+        f"D=2 excess vanished ({shallow}); the generator changed, so the "
+        "published floor table and its justification are both stale")
+
+    for depth in (16, 32):
+        p, n = _p_answer_is_start(depth, 15000, 1004)
+        se = (0.0625 * 0.9375 / n) ** 0.5
+        assert abs(p - 1 / M) < 4 * se, (
+            f"D={depth} floor moved to {p}; H2 is read in this region and "
+            "depends on it being 1/M")
