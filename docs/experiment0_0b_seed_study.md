@@ -3,10 +3,11 @@
 **Status**: **closed.** Statistically successful and scientifically useful;
 mechanistically inconclusive. No further 0B training is planned.
 
-Pre-registered and independently reviewed. The reported statistic is confirmed
-for the collected artifacts. Evaluation-device numerics have since been measured
-and are too small to explain the separation; **training-path and seed-by-device
-attribution remains unresolved** — see Limitations.
+Pre-registered and reviewed, but not independently re-run by another node. The
+reported statistic is confirmed for the collected artifacts. Evaluation-device
+numerics have since been measured for one fixed seed-44 checkpoint and are too
+small to explain the observed seed-44 arm gap; **training-path and
+seed-by-device attribution remains unresolved** — see Limitations.
 
 **Analysis**: [`scripts/analyze_0b_seed_study.py`](../scripts/analyze_0b_seed_study.py)
 **Pre-registration**: [`PREREGISTRATION_0B_SEED_STUDY.md`](PREREGISTRATION_0B_SEED_STUDY.md),
@@ -76,9 +77,10 @@ all four `N=36` on an RTX 3070 Laptop (`sm_86`), with no registered checkpoint
 crossing devices. Arm is confounded with hardware in both training and
 evaluation.
 
-Post-registered work has since separated those two halves. The evaluation half
-is measured and small. The training half is not removable retrospectively and
-remains the operative limitation.
+Post-registered work has since separated those two halves for seed 44. The
+fixed-weight evaluation range is measured and small. The population-level
+training half is not removable retrospectively and remains the operative
+limitation.
 
 The confound was disclosed in the pre-registration, which was written after four
 of the nine endpoints had been evaluated — section 2 of that document lists them
@@ -112,13 +114,15 @@ That is an observed range for this checkpoint, challenge and protocol — not a
 universal numerical bound. Per-instance outputs are **not** invariant: 105 of
 6,000 structural predictions flip between two of the devices. The rank-based
 endpoint absorbs that; individual predictions do not. Evaluation-device
-numerics therefore cannot account for the registered separation, which is a
-narrower and stronger statement than the earlier "not measured".
+numerics therefore cannot account for the observed seed-44 arm separation.
+This does not establish that every registered checkpoint would have the same
+range if crossed across all three devices.
 
 ### Training hardware remains confounded, and is the live limitation
 
-Evaluation is settled; training is not. The registered study mapped training
-device one-to-one onto arm, and no amount of post-hoc evaluation fixes that.
+For the seed-44 localization, evaluation is settled; population-level training
+is not. The registered study mapped training device one-to-one onto arm, and no
+amount of post-hoc evaluation fixes that.
 
 Two post-registered within-device comparisons exist, both on **seed 44 only**:
 
@@ -146,9 +150,9 @@ comparison.
 with 114,981,888 of 115,031,808 parameters non-finite and was discarded. The
 completed run is a second attempt at the reduced clock. A transient fault or an
 overclock-related cause is **plausible, not proven**: the training path does not
-enable deterministic algorithms, and two runs of one seed on this machine were
-measured to differ — 400 of 403 tensors, largest delta `5.98e-03` — so a
-recipe-level instability would not necessarily have reproduced either.
+enable deterministic algorithms, and bitwise repeatability of the compiled CUDA
+training path has not been demonstrated. A recipe-level instability therefore
+would not necessarily have reproduced.
 
 **Same-arm training outcomes differ materially across nodes.** `N=36` seed 44
 scores `0.4620` here and `0.5588` on the RTX 3070: the same arm, seed and
@@ -245,18 +249,19 @@ adversarial bound. The reported statistic never depended on any of it.
 
 ## Review history
 
-The pre-registration, the analysis implementation, and this result were reviewed
-by `codex-shannon` and `opencode-dijkstra`. Review found and fixed seven defects
-in the analysis script, including tie handling, epoch pinning, and the
-conflicting-evaluation gate. The hardware limitation above is the disposition
-reached after a proposed stopping argument was rejected and withdrawn.
+The pre-registration, analysis implementation, and result were reviewed by
+`codex-shannon`; the assigned independent reanalysis was not delivered. Review
+found and fixed seven defects in the analysis script, including tie handling,
+epoch pinning, and the conflicting-evaluation gate. The hardware limitation
+above is the disposition reached after a proposed stopping argument was rejected
+and withdrawn.
 
 
 ## Closure
 
-Experiment 0B is closed. The registered statistic stands, the evaluation-device
-confound is measured and small, and the training-device confound is disclosed
-and not removable from the collected population.
+Experiment 0B is closed. The registered statistic stands, the fixed seed-44
+evaluation-device range is measured and small, and the training-device confound
+is disclosed and not removable from the collected population.
 
 Further paired 0B seeds would sharpen a causal claim about this specific filler
 recipe at high cost, and would not establish the latent-workspace or
