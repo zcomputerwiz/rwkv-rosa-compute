@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate that an evaluation artifact carries required provenance fields.
+"""Audit historical evaluation artifacts for known provenance fields.
 
 This is a legacy audit tool and must not be used as the Gate 0 acceptance gate.
 """

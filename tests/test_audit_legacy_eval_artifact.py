@@ -5,7 +5,7 @@ from pathlib import Path
 # Add the scripts directory to the path so we can import the script directly
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-from validate_eval_artifact import main
+from audit_legacy_eval_artifact import main
 
 
 def write_json(path, data):
