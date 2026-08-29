@@ -137,6 +137,16 @@ def train_model(
     if workspace is not None:
         workspace.to(device)
 
+    checkpoint_model = model
+    workspace_signature = None
+    if workspace is not None:
+        checkpoint_model = torch.nn.ModuleDict({"model": model, "workspace": workspace})
+        workspace_signature = {
+            "num_slots": workspace.num_slots,
+            "num_steps": workspace.num_steps,
+            "m_max": workspace.m_max,
+        }
+
     # Simplified single-seed setup
     epochs = train_cfg.epochs
 
@@ -148,8 +158,10 @@ def train_model(
     lr_scheduler = _make_lr_scheduler(optimizer, train_cfg, total_steps)
     scaler = torch.amp.GradScaler(device.type) if train_cfg.precision == "fp16" else None
 
-    # Dummy signature to satisfy checkpoint loader strictness if needed
-    signature = {"task": "exp1_pointer_chase"}
+    signature = {
+        "task": "exp1_pointer_chase",
+        "workspace": workspace_signature,
+    }
 
     start_epoch = 0
     optimizer_steps = 0
@@ -161,7 +173,7 @@ def train_model(
         prog_state, init_state = _load_training_checkpoint_into_state(
             resume_from_checkpoint,
             signature=signature,
-            model=model,
+            model=checkpoint_model,
             optimizer=optimizer,
             lr_scheduler=lr_scheduler,
             scaler=scaler,
@@ -268,7 +280,7 @@ def train_model(
                     _save_training_checkpoint(
                         step_checkpoint,
                         signature=signature,
-                        model=model,
+                        model=checkpoint_model,
                         optimizer=optimizer,
                         lr_scheduler=lr_scheduler,
                         scaler=scaler,
@@ -303,7 +315,7 @@ def train_model(
             _save_training_checkpoint(
                 epoch_checkpoint,
                 signature=signature,
-                model=model,
+                model=checkpoint_model,
                 optimizer=optimizer,
                 lr_scheduler=lr_scheduler,
                 scaler=scaler,

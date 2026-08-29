@@ -26,7 +26,12 @@ from exp0.config import ModelConfig, TrainConfig  # noqa: E402
 from exp0.train import create_model, set_seed  # noqa: E402
 from exp1.dataset import PointerChaseDataset  # noqa: E402
 from exp1.pointer_chase import ChaseSpec, generate_dataset  # noqa: E402
-from exp1.train import _trainable, evaluate_vway_accuracy, forward_logits  # noqa: E402
+from exp1.train import (  # noqa: E402
+    _trainable,
+    evaluate_vway_accuracy,
+    forward_logits,
+    train_model,
+)
 from exp1.workspace import Workspace  # noqa: E402
 
 V, K_MAPS, D_MODEL = 16, 4, 64
@@ -155,3 +160,46 @@ def test_K_changes_the_computation():
     torch.manual_seed(7)
     eight = Workspace(D_MODEL, num_slots=4, num_steps=8)
     assert not torch.allclose(one(state), eight(state)), "the K axis is inert"
+
+
+def test_workspace_checkpoint_round_trip_and_cell_identity(tmp_path):
+    model, spec = _model()
+    workspace = Workspace(D_MODEL, num_slots=2, num_steps=3)
+    data = generate_dataset(4, 2, depth=2, seed=5, num_nodes=V, num_maps=K_MAPS)
+    dataset = PointerChaseDataset(data, spec)
+    model_cfg = ModelConfig(
+        architecture="rwkv", hidden_size=D_MODEL, num_hidden_layers=1,
+        num_attention_heads=1, head_dim=D_MODEL, vocab_size=V,
+        rwkv_kernel="reference",
+    )
+    train_cfg = TrainConfig(
+        seed=42, batch_size=8, epochs=1, precision="fp32", num_workers=0
+    )
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    train_model(
+        model, dataset, dataset, spec, model_cfg, train_cfg, torch.device("cpu"),
+        workspace=workspace, checkpoint_path=checkpoint_dir,
+    )
+    checkpoint = checkpoint_dir / "epoch_001.pt"
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    assert "workspace.q_proj.weight" in payload["model_state_dict"]
+    expected = {key: value.clone() for key, value in workspace.state_dict().items()}
+
+    resumed_model, _ = _model()
+    resumed_workspace = Workspace(D_MODEL, num_slots=2, num_steps=3)
+    train_model(
+        resumed_model, dataset, dataset, spec, model_cfg, train_cfg,
+        torch.device("cpu"), workspace=resumed_workspace,
+        resume_from_checkpoint=checkpoint, max_epochs=0,
+    )
+    for key, value in expected.items():
+        assert torch.equal(resumed_workspace.state_dict()[key], value), key
+
+    wrong_cell = Workspace(D_MODEL, num_slots=1, num_steps=3)
+    with pytest.raises(ValueError, match="workspace"):
+        train_model(
+            resumed_model, dataset, dataset, spec, model_cfg, train_cfg,
+            torch.device("cpu"), workspace=wrong_cell,
+            resume_from_checkpoint=checkpoint, max_epochs=0,
+        )
