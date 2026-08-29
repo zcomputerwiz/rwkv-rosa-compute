@@ -13,6 +13,7 @@ from exp0.train import create_model, set_seed
 from exp1.dataset import PointerChaseDataset
 from exp1.pointer_chase import ChaseSpec, generate_dataset, make_neutral_vector
 from exp1.train import train_model
+from exp1.workspace import Workspace
 
 
 def main(argv=None) -> int:
@@ -33,6 +34,16 @@ def main(argv=None) -> int:
     parser.add_argument("--num-silent", type=int, default=0)
     parser.add_argument("--silent-kind", type=str, default=None)
     parser.add_argument("--device", type=str, default="cpu")
+    # The 2x2 screen. M=1,K=1 is the baseline CELL, not a no-workspace run:
+    # it still routes and refines, and is parameter-matched to every other cell.
+    parser.add_argument("--num-slots", type=int, default=1,
+                        help="M: workspace slots (2x2 screen uses 1 and 8)")
+    parser.add_argument("--num-steps", type=int, default=1,
+                        help="K: refinement steps (2x2 screen uses 1 and 8)")
+    parser.add_argument("--m-max", type=int, default=8,
+                        help="offset table size; slots take its first M rows")
+    parser.add_argument("--no-workspace", action="store_true",
+                        help="run without a workspace at all; NOT a 2x2 cell")
     parser.add_argument("--checkpoint-path", type=Path, default=None)
     parser.add_argument("--resume-from-checkpoint", type=Path, default=None)
 
@@ -108,6 +119,18 @@ def main(argv=None) -> int:
         epochs=args.epochs,
     )
 
+    workspace = None
+    if not args.no_workspace:
+        workspace = Workspace(
+            model_cfg.hidden_size,
+            num_slots=args.num_slots,
+            num_steps=args.num_steps,
+            m_max=args.m_max,
+        )
+        learned = sum(p.numel() for p in workspace.parameters() if p.requires_grad)
+        print(f"workspace: M={args.num_slots} K={args.num_steps} "
+              f"learned={learned:,} (invariant across the 2x2)")
+
     print("Training...")
     model, history = train_model(
         model,
@@ -117,6 +140,7 @@ def main(argv=None) -> int:
         model_cfg,
         train_cfg,
         device,
+        workspace=workspace,
         checkpoint_path=args.checkpoint_path,
         resume_from_checkpoint=args.resume_from_checkpoint,
     )

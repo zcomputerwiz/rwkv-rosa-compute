@@ -19,11 +19,48 @@ from exp1.dataset import PointerChaseDataset, exp1_collate_fn
 from exp1.pointer_chase import ChaseSpec
 
 
+def _trainable(model, workspace=None):
+    """Parameters the optimizer must see.
+
+    The workspace holds the learned routing and refinement weights. Omitting it
+    here would leave M and K varying an untrained module -- every cell would
+    still run, and the 2x2 would compare four frozen random workspaces.
+    """
+    params = list(model.parameters())
+    if workspace is not None:
+        params += list(workspace.parameters())
+    return params
+
+
+def forward_logits(model, inputs, workspace=None):
+    """The single forward path for Experiment 1, shared by training and evaluation.
+
+    This exists because the path was duplicated. With two copies, inserting the
+    workspace into one and not the other would train one architecture and
+    evaluate a different one -- and every metric would still look plausible,
+    because both halves run without error. The 2x2 measures a difference between
+    cells, so a train/eval mismatch would not announce itself as a bug; it would
+    announce itself as a result.
+
+    ``workspace`` is applied to the final hidden state before the head. Passing
+    ``None`` is the no-workspace path and is not one of the 2x2 cells: the
+    baseline cell is ``M=1, K=1``, which still runs routing and refinement and
+    is parameter-matched to every other cell.
+    """
+    tuple_embeds = model._tuple_hidden(inputs)
+    hidden_states = model.backbone(inputs_embeds=tuple_embeds)
+    last_hidden = hidden_states[:, -1, :]
+    if workspace is not None:
+        last_hidden = workspace(last_hidden)
+    return model.head(last_hidden)
+
+
 def evaluate_vway_accuracy(
     model: torch.nn.Module,
     val_dataset: PointerChaseDataset,
     train_cfg: TrainConfig,
     device: torch.device,
+    workspace: Optional[torch.nn.Module] = None,
 ) -> float:
     """Evaluate V-way accuracy by performing argmax over node-token logits.
 
@@ -32,6 +69,8 @@ def evaluate_vway_accuracy(
     The prediction is made at the final position of the input sequence.
     """
     model.eval()
+    if workspace is not None:
+        workspace.to(device).eval()
     correct = 0
     total = 0
 
@@ -49,10 +88,7 @@ def evaluate_vway_accuracy(
             targets = batch["targets"].to(device, non_blocking=True)
 
             with _autocast_context(device, train_cfg.precision):
-                tuple_embeds = model._tuple_hidden(inputs)
-                hidden_states = model.backbone(inputs_embeds=tuple_embeds)
-                last_hidden = hidden_states[:, -1, :]
-                logits = model.head(last_hidden)
+                logits = forward_logits(model, inputs, workspace)
 
                 num_nodes = val_dataset.spec.num_nodes
                 node_logits = logits[:, :num_nodes]
@@ -73,6 +109,7 @@ def train_model(
     train_cfg: TrainConfig,
     device: torch.device,
     *,
+    workspace: Optional[torch.nn.Module] = None,
     checkpoint_path: Optional[Path] = None,
     resume_from_checkpoint: Optional[Path] = None,
     checkpoint_every_steps: Optional[int] = None,
@@ -83,7 +120,7 @@ def train_model(
 
     if train_cfg.fused_adamw and device.type == "cuda":
         optimizer = torch.optim.AdamW(
-            model.parameters(),
+            _trainable(model, workspace),
             lr=train_cfg.learning_rate,
             weight_decay=train_cfg.weight_decay,
             betas=(train_cfg.adam_beta1, train_cfg.adam_beta2),
@@ -91,11 +128,14 @@ def train_model(
         )
     else:
         optimizer = torch.optim.AdamW(
-            model.parameters(),
+            _trainable(model, workspace),
             lr=train_cfg.learning_rate,
             weight_decay=train_cfg.weight_decay,
             betas=(train_cfg.adam_beta1, train_cfg.adam_beta2),
         )
+
+    if workspace is not None:
+        workspace.to(device)
 
     # Simplified single-seed setup
     epochs = train_cfg.epochs
@@ -154,6 +194,8 @@ def train_model(
 
     for epoch in range(start_epoch, stop_at_epoch):
         model.train()
+        if workspace is not None:
+            workspace.train()
         total_loss = 0.0
 
         if resume_samples > 0:
@@ -182,22 +224,19 @@ def train_model(
             batch_size = targets.shape[0]
 
             with _autocast_context(device, train_cfg.precision):
-                tuple_embeds = model._tuple_hidden(inputs)
-                hidden_states = model.backbone(inputs_embeds=tuple_embeds)
-                last_hidden = hidden_states[:, -1, :]
-                logits = model.head(last_hidden)
+                logits = forward_logits(model, inputs, workspace)
 
                 loss = F.cross_entropy(logits, targets)
 
             if scaler is not None:
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
+                torch.nn.utils.clip_grad_norm_(_trainable(model, workspace), train_cfg.grad_clip)
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
+                torch.nn.utils.clip_grad_norm_(_trainable(model, workspace), train_cfg.grad_clip)
                 optimizer.step()
 
             if lr_scheduler is not None:
@@ -241,7 +280,7 @@ def train_model(
         epoch_loss = total_loss / len(loader)
         epoch_train_losses.append(epoch_loss)
 
-        val_acc = evaluate_vway_accuracy(model, val_dataset, train_cfg, device)
+        val_acc = evaluate_vway_accuracy(model, val_dataset, train_cfg, device, workspace)
         epoch_val_accuracies.append(val_acc)
 
         if val_acc > best_val_acc:
