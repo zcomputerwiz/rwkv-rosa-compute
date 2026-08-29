@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from exp0.config import ModelConfig, TrainConfig
@@ -367,7 +368,6 @@ def test_step_periodic_checkpointing(tmp_path):
     assert (checkpoint_dir / "step_000004.pt").exists()
     assert (checkpoint_dir / "epoch_001.pt").exists()
 
-import pytest
 
 def test_training_resumes_refused_on_signature_mismatch(tmp_path):
     spec = ChaseSpec(num_nodes=M, num_maps=K, max_depth=8)
