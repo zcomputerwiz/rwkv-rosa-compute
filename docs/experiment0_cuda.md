@@ -87,6 +87,56 @@ Use `-Cold` when the point is to prove the build rather than the tests. A warm
 run reuses the cached kernel and finishes in a few seconds; a cold one takes
 roughly twenty and is what a fresh CI runner actually does.
 
+### The three entry points that assemble this environment
+
+`run_cuda_tests.ps1` is not the only one, and knowing the others saves
+rediscovering the same failure:
+
+```text
+scripts/init_cuda_env.ps1     the actual bootstrap. Dot-source it, never run
+                              it directly: it locates Visual Studio with
+                              vswhere, runs vcvars64.bat in cmd, and copies the
+                              resulting environment into the calling session.
+                              A child process cannot modify its parent, which
+                              is why the copy is necessary.
+scripts/run_cuda_tests.ps1    dot-sources it, then runs the CUDA suite.
+scripts/pueue_wrap.ps1        dot-sources it and forwards -RequireCuda when the
+                              queued command requests CUDA. With -SelfCheck and
+                              -RequireCuda it fails closed naming any missing
+                              cl, nvcc, or ninja, without running the job.
+```
+
+The practical consequence: a CUDA job submitted through `pueue_wrap.ps1` with
+`-RequireCuda` needs no bootstrap inside the task. A hand-run job still does.
+
+### Invoking python directly bypasses all of the above
+
+Every bootstrap path here is PowerShell, and that is not incidental.
+`vcvars64.bat` is a cmd batch file whose whole purpose is mutating its caller's
+environment. Adding a compiler directory to `PATH` in a plain Git Bash session
+does not reproduce that environment, and `ninja` alone is not enough:
+
+```text
+Error checking compiler version for cl
+RuntimeError: Ninja is required to load C++ extensions (pip install ninja to get it)
+RuntimeError: Failed to compile/load the RWKV-7 CUDA kernel
+```
+
+The second line names `ninja`, which reads as a missing pip package. It is
+usually already in `.venv\Scripts`; the bypassed bootstrap left both that
+directory and the MSVC environment unavailable, as the first line signals.
+Installing another copy of Ninja does not initialize MSVC.
+
+If a direct invocation is genuinely necessary, go through cmd:
+
+```powershell
+$vc = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+cmd /c "call `"$vc`" >nul && cd /d D:\GitHub\rwkv-rosa-compute && .venv\Scripts\python.exe -m pytest -m cuda"
+```
+
+Prefer `run_cuda_tests.ps1`, which discovers that path with `vswhere` instead
+of hardcoding an installation that differs per machine.
+
 ## Quick CUDA gate
 
 Run the non-slow CUDA tests before a long 0A run:
@@ -187,6 +237,10 @@ pytest -m "exp0 and cuda and slow" -v
 ```
 
 ### bash
+
+Linux only as written. A plain Windows Git Bash session does not initialize the
+MSVC environment — see "Invoking python directly bypasses all of the above".
+Use the PowerShell form or `run_cuda_tests.ps1`.
 
 ```bash
 EXP0_REQUIRE_RWKV_CUDA=1 pytest -m "exp0 and cuda and slow" -v
