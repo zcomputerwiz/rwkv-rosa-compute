@@ -196,7 +196,14 @@ def main(argv=None) -> int:
         },
     }
 
-    report_file = args.out_dir / f"report_seed{args.seed}.json"
+    # Named for the seed that actually distinguishes the run. The gates vary
+    # --model-seed while holding the data banks fixed, so naming this after the
+    # legacy --seed would let three gate attempts overwrite one file. Refuse to
+    # overwrite either way: a silently clobbered gate result is worse than a
+    # failed launch.
+    report_file = args.out_dir / f"report_model_seed{model_seed}.json"
+    if report_file.exists():
+        raise SystemExit(f"refusing to overwrite existing report: {report_file}")
     with open(report_file, "w") as f:
         json.dump(report, f, indent=2)
 

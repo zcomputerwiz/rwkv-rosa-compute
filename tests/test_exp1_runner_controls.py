@@ -28,12 +28,21 @@ BASE = [
 ]
 
 
+def raw(out: Path, *extra: str) -> subprocess.CompletedProcess:
+    cmd = [sys.executable, str(RUNNER), *BASE, "--out-dir", str(out), *extra]
+    return subprocess.run(cmd, capture_output=True, text=True, cwd=REPO)
+
+
+def run_into(out: Path, *extra: str) -> None:
+    proc = raw(out, *extra)
+    assert proc.returncode == 0, proc.stderr
+
+
 def run(tmp_path: Path, *extra: str) -> dict:
     out = tmp_path / "out"
-    cmd = [sys.executable, str(RUNNER), *BASE, "--out-dir", str(out), *extra]
-    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO)
+    proc = raw(out, *extra)
     assert proc.returncode == 0, proc.stderr
-    reports = list(out.glob("report_seed*.json"))
+    reports = list(out.glob("report_model_seed*.json"))
     assert len(reports) == 1, reports
     return json.loads(reports[0].read_text())
 
@@ -118,3 +127,23 @@ def test_reported_outcome_is_the_final_epoch_not_the_best(tmp_path):
     r = run(tmp_path, "--seed", "7", "--epochs", "2")
     assert r["final_accuracy"] == r["epoch_accuracies"][-1]
     assert len(r["epoch_accuracies"]) == 2
+
+
+def test_report_is_named_for_the_model_seed(tmp_path):
+    """Three gate attempts vary --model-seed with --seed held equal."""
+    out = tmp_path / "out"
+    for ms in ("1001", "1002", "1003"):
+        run_into(out, "--seed", "7", "--model-seed", ms)
+    assert sorted(p.name for p in out.glob("*.json")) == [
+        "report_model_seed1001.json",
+        "report_model_seed1002.json",
+        "report_model_seed1003.json",
+    ]
+
+
+def test_an_existing_report_is_never_overwritten(tmp_path):
+    out = tmp_path / "out"
+    run_into(out, "--seed", "7")
+    proc = raw(out, "--seed", "7")
+    assert proc.returncode != 0
+    assert "refusing to overwrite" in proc.stderr
