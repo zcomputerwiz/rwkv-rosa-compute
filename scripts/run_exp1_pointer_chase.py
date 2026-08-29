@@ -14,6 +14,7 @@ from exp0.train import create_model, set_seed
 from exp1.dataset import PointerChaseDataset
 from exp1.pointer_chase import ChaseSpec, generate_dataset, make_neutral_vector
 from exp1.train import evaluate_vway_accuracy, train_model
+from exp1.workspace import Workspace
 
 
 def main(argv=None) -> int:
@@ -34,6 +35,16 @@ def main(argv=None) -> int:
     parser.add_argument("--num-silent", type=int, default=0)
     parser.add_argument("--silent-kind", type=str, default=None)
     parser.add_argument("--device", type=str, default="cpu")
+    # The 2x2 screen. M=1,K=1 is the baseline CELL, not a no-workspace run:
+    # it still routes and refines, and is parameter-matched to every other cell.
+    parser.add_argument("--num-slots", type=int, default=None,
+                        help="M: workspace slots; defaults to 1 with --workspace")
+    parser.add_argument("--num-steps", type=int, default=None,
+                        help="K: refinement steps; defaults to 1 with --workspace")
+    parser.add_argument("--m-max", type=int, default=None,
+                        help="offset table size; defaults to 8 with --workspace")
+    parser.add_argument("--workspace", action="store_true",
+                        help="enable the latent workspace; Gate 0 leaves this off")
     parser.add_argument("--checkpoint-path", type=Path, default=None)
     parser.add_argument("--resume-from-checkpoint", type=Path, default=None)
 
@@ -67,6 +78,13 @@ def main(argv=None) -> int:
                         help="evaluate on the training set; held-out bank becomes a diagnostic")
 
     args = parser.parse_args(argv)
+    if not args.workspace and any(
+        value is not None for value in (args.num_slots, args.num_steps, args.m_max)
+    ):
+        parser.error("--num-slots, --num-steps, and --m-max require --workspace")
+    num_slots = 1 if args.num_slots is None else args.num_slots
+    num_steps = 1 if args.num_steps is None else args.num_steps
+    m_max = 8 if args.m_max is None else args.m_max
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     model_seed = args.seed if args.model_seed is None else args.model_seed
@@ -134,6 +152,18 @@ def main(argv=None) -> int:
         epochs=args.epochs,
     )
 
+    workspace = None
+    if args.workspace:
+        workspace = Workspace(
+            model_cfg.hidden_size,
+            num_slots=num_slots,
+            num_steps=num_steps,
+            m_max=m_max,
+        )
+        learned = sum(p.numel() for p in workspace.parameters() if p.requires_grad)
+        print(f"workspace: M={num_slots} K={num_steps} "
+              f"learned={learned:,} (invariant across the 2x2)")
+
     print("Training...")
     model, history = train_model(
         model,
@@ -143,6 +173,7 @@ def main(argv=None) -> int:
         model_cfg,
         train_cfg,
         device,
+        workspace=workspace,
         checkpoint_path=args.checkpoint_path,
         resume_from_checkpoint=args.resume_from_checkpoint,
     )
@@ -156,7 +187,7 @@ def main(argv=None) -> int:
     holdout_diagnostic = None
     if args.overfit_train_as_val:
         holdout_diagnostic = evaluate_vway_accuracy(
-            model, holdout_dataset, train_cfg, device
+            model, holdout_dataset, train_cfg, device, workspace
         )
 
     print(f"Done! Final {eval_target} acc: {final_accuracy:.4f}"
@@ -193,6 +224,10 @@ def main(argv=None) -> int:
             "train_data_seed": train_data_seed,
             "val_data_seed": val_data_seed,
             "overfit_train_as_val": args.overfit_train_as_val,
+            "workspace": workspace is not None,
+            "num_slots": num_slots if workspace is not None else None,
+            "num_steps": num_steps if workspace is not None else None,
+            "m_max": m_max if workspace is not None else None,
         },
     }
 

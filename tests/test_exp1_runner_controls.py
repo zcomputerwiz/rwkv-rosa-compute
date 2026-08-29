@@ -108,6 +108,27 @@ def test_kernel_is_explicit_and_defaults_to_reference_on_cpu(tmp_path):
     assert r["config"]["rwkv_kernel"] == "reference"
 
 
+def test_gate_runner_defaults_to_no_workspace(tmp_path):
+    c = run(tmp_path, "--seed", "7")["config"]
+    assert c["workspace"] is False
+    assert (c["num_slots"], c["num_steps"], c["m_max"]) == (None, None, None)
+
+
+def test_workspace_is_explicit_and_fully_reported(tmp_path):
+    c = run(
+        tmp_path, "--seed", "7", "--workspace",
+        "--num-slots", "2", "--num-steps", "3", "--m-max", "8",
+    )["config"]
+    assert c["workspace"] is True
+    assert (c["num_slots"], c["num_steps"], c["m_max"]) == (2, 3, 8)
+
+
+def test_workspace_dimensions_cannot_be_silently_ignored(tmp_path):
+    proc = raw(tmp_path, "--seed", "7", "--num-slots", "8")
+    assert proc.returncode != 0
+    assert "require --workspace" in proc.stderr
+
+
 def test_overfit_mode_evaluates_on_the_training_set(tmp_path):
     r = run(tmp_path, "--seed", "7", "--overfit-train-as-val")
     assert r["eval_target"] == "train_set"
