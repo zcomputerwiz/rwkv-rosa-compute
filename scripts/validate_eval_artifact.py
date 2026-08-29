@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
-"""Validate that an evaluation artifact carries required provenance fields."""
+"""Validate that an evaluation artifact carries required provenance fields.
+
+This is a legacy audit tool and must not be used as the Gate 0 acceptance gate.
+"""
 
 import argparse
 import json
 import os
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 ALIASES = {
     # Expected fields can be mapped to a list of possible json paths (dot separated).
     # e.g., 'a.b.c' will look for {"a": {"b": {"c": value}}}
 
     # identity
+    "artifact_kind": ["artifact_kind", "kind"],
+    "schema_version": ["schema_version", "version"],
     "run_id": ["run_id"],
-    "seed": ["seed", "seeds_run", "canonical_validation.eval_seed", "evaluation.seeds_run"],
-    "epoch": ["epochs", "training_protocol.epochs", "eval_epoch"],
+    "seed": ["seed", "seeds_run", "evaluation.seeds_run"],
+    "epoch": ["evaluated_epoch", "eval_epoch"],
 
     # inputs
     "challenge_or_dataset": ["structural_challenge.challenge_id", "task", "task_config", "challenge", "dataset"],
@@ -132,11 +137,16 @@ def main(argv=None) -> int:
 
         if not check_identity_is_eval(data):
             results[str(fpath)] = {"error": "not an eval artifact"}
+            any_missing = True
             continue
 
         missing = []
 
         # Identity group
+        if not resolve_alias(data, ALIASES["artifact_kind"]):
+            missing.append("artifact kind")
+        if not resolve_alias(data, ALIASES["schema_version"]):
+            missing.append("schema version")
         if not resolve_alias(data, ALIASES["run_id"]):
             missing.append("run id")
         if not resolve_alias(data, ALIASES["seed"]):
@@ -161,8 +171,15 @@ def main(argv=None) -> int:
                 missing.append("legacy working-tree script hash (not platform-independent)")
         else:
             path_val = get_alias_value(data, ALIASES["producer_script_path"])
-            if not path_val or not isinstance(path_val, str) or path_val.startswith('/'):
+            if not path_val or not isinstance(path_val, str):
                 script_missing = True
+            else:
+                p_posix = PurePosixPath(path_val)
+                p_win = PureWindowsPath(path_val)
+                if p_posix.is_absolute() or p_win.is_absolute():
+                    script_missing = True
+                elif ".." in p_posix.parts or ".." in p_win.parts:
+                    script_missing = True
 
             if not resolve_alias(data, ALIASES["producer_script_hash"], enforce_hash=True, hash_len=64, lowercase_only=True):
                 script_missing = True

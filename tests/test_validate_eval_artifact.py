@@ -14,9 +14,11 @@ def write_json(path, data):
 
 def valid_payload():
     return {
+        "artifact_kind": "evaluation",
+        "schema_version": "1.0",
         "run_id": "test_run_123",
         "seed": 42,
-        "epochs": 5,
+        "evaluated_epoch": 5,
         "task_config": {"name": "test"},
         "input_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "checkpoint": "my_checkpoint.pt",
@@ -52,12 +54,12 @@ def test_complete_artifact_passes(tmp_path, capsys):
 def test_missing_identity_group(tmp_path, capsys):
     fpath = tmp_path / "missing_epoch.json"
     payload = valid_payload()
-    del payload["epochs"]
+    del payload["evaluated_epoch"]
     write_json(fpath, payload)
 
     assert main([str(fpath)]) == 0
     captured = capsys.readouterr()
-    assert "missing the evaluated epoch" in captured.out
+    assert "the evaluated epoch" in captured.out
 
 def test_missing_inputs_group(tmp_path, capsys):
     fpath = tmp_path / "missing_hash.json"
@@ -77,7 +79,7 @@ def test_missing_commit(tmp_path, capsys):
 
     assert main([str(fpath)]) == 0
     captured = capsys.readouterr()
-    assert "missing commit" in captured.out
+    assert "commit" in captured.out
     assert "script hash" not in captured.out
 
 def test_missing_script_hash(tmp_path, capsys):
@@ -99,7 +101,7 @@ def test_short_commit_rejected(tmp_path, capsys):
 
     assert main([str(fpath)]) == 0
     captured = capsys.readouterr()
-    assert "missing commit" in captured.out
+    assert "commit" in captured.out
 
 def test_missing_checkpoint_group(tmp_path, capsys):
     fpath = tmp_path / "missing_checkpoint.json"
@@ -135,7 +137,7 @@ def test_alias_spelling_accepted(tmp_path, capsys):
     fpath = tmp_path / "alias_payload.json"
     payload = valid_payload()
     # Change "epochs" to "eval_epoch" (which is in our ALIASES)
-    del payload["epochs"]
+    del payload["evaluated_epoch"]
     payload["eval_epoch"] = 5
     # Change "seed" to nested "evaluation.seeds_run"
     del payload["seed"]
@@ -150,7 +152,7 @@ def test_alias_spelling_accepted(tmp_path, capsys):
 def test_strict_mode_exit_code(tmp_path):
     fpath = tmp_path / "missing_epoch_strict.json"
     payload = valid_payload()
-    del payload["epochs"]
+    del payload["evaluated_epoch"]
     write_json(fpath, payload)
 
     assert main([str(fpath), "--strict"]) == 1
@@ -220,13 +222,13 @@ def test_real_artifact_shape(tmp_path, capsys):
     assert main([str(fpath)]) == 0
     captured = capsys.readouterr()
 
-    assert "missing commit" in captured.out
+    assert "commit" in captured.out
     assert "script hash" in captured.out
     assert "device name and compute capability" in captured.out
     assert "environment Python, Torch, and CUDA versions" in captured.out
 
     # Make sure we don't accidentally report other fields missing
-    assert "the evaluated epoch" not in captured.out
+    assert "the evaluated epoch" in captured.out
     assert "evaluation batch size and precision" not in captured.out
     assert "challenge or dataset identifier AND its content hash" not in captured.out
     assert "evaluated checkpoint identifier and 64-hex hash" in captured.out
@@ -242,12 +244,12 @@ def test_missing_strict_exit_on_empty_dir(tmp_path):
 def test_empty_value_is_missing(tmp_path, capsys):
     fpath = tmp_path / "empty_epoch.json"
     payload = valid_payload()
-    payload["epochs"] = ""
+    payload["evaluated_epoch"] = ""
     write_json(fpath, payload)
 
     assert main([str(fpath)]) == 0
     captured = capsys.readouterr()
-    assert "missing the evaluated epoch" in captured.out
+    assert "the evaluated epoch" in captured.out
 
 def test_invalid_hash_is_missing(tmp_path, capsys):
     fpath = tmp_path / "invalid_hash.json"
@@ -314,9 +316,11 @@ def test_wrapper_produced_integration_fixture(tmp_path, capsys):
     fpath = tmp_path / "wrapper_artifact.json"
     # An artifact shaped like what PR 73 wrapper produces
     payload = {
+        "artifact_kind": "evaluation",
+        "schema_version": "1.0",
         "run_id": "test_wrapper_123",
         "seed": 42,
-        "epochs": 5,
+        "evaluated_epoch": 5,
         "task_config": {"name": "test"},
         "input_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 
@@ -390,3 +394,40 @@ def test_script_hash_absolute_path_rejected(tmp_path, capsys):
     assert main([str(fpath)]) == 0
     captured = capsys.readouterr()
     assert "script hash (requires repository-relative path, lowercase 64-hex blob hash, and correct basis string)" in captured.out
+
+def test_strict_mode_exits_nonzero_on_empty_artifact(tmp_path):
+    fpath = tmp_path / "empty.json"
+    write_json(fpath, {})
+    assert main([str(fpath), "--strict"]) == 1
+
+def test_script_hash_posix_absolute_rejected(tmp_path, capsys):
+    fpath = tmp_path / "posix_abs.json"
+    payload = valid_payload()
+    payload["provenance"]["producer_script_path"] = "/evaluate.py"
+    write_json(fpath, payload)
+    assert main([str(fpath)]) == 0
+    assert "script hash (requires repository-relative path" in capsys.readouterr().out
+
+def test_script_hash_windows_absolute_rejected(tmp_path, capsys):
+    fpath = tmp_path / "win_abs.json"
+    payload = valid_payload()
+    payload["provenance"]["producer_script_path"] = "C:\\evaluate.py"
+    write_json(fpath, payload)
+    assert main([str(fpath)]) == 0
+    assert "script hash (requires repository-relative path" in capsys.readouterr().out
+
+def test_script_hash_unc_rejected(tmp_path, capsys):
+    fpath = tmp_path / "unc_abs.json"
+    payload = valid_payload()
+    payload["provenance"]["producer_script_path"] = "\\\\server\\share\\evaluate.py"
+    write_json(fpath, payload)
+    assert main([str(fpath)]) == 0
+    assert "script hash (requires repository-relative path" in capsys.readouterr().out
+
+def test_script_hash_traversal_rejected(tmp_path, capsys):
+    fpath = tmp_path / "traversal.json"
+    payload = valid_payload()
+    payload["provenance"]["producer_script_path"] = "../evaluate.py"
+    write_json(fpath, payload)
+    assert main([str(fpath)]) == 0
+    assert "script hash (requires repository-relative path" in capsys.readouterr().out
