@@ -114,6 +114,15 @@ def train_model(
     resume_from_checkpoint: Optional[Path] = None,
     checkpoint_every_steps: Optional[int] = None,
     max_epochs: Optional[int] = None,
+    depth: int = 0,
+    num_silent: int = 0,
+    silent_kind: Optional[str] = None,
+    queries_per_memory: int = 4,
+    train_data_seed: int = 0,
+    val_data_seed: int = 0,
+    train_size: int = 0,
+    val_size: int = 0,
+    overfit_train_as_val: bool = False,
 ) -> Tuple[torch.nn.Module, Dict[str, Any]]:
     """Train loop specifically for the Experiment 1 pointer-chase task."""
     set_seed(train_cfg.seed)
@@ -158,9 +167,37 @@ def train_model(
     lr_scheduler = _make_lr_scheduler(optimizer, train_cfg, total_steps)
     scaler = torch.amp.GradScaler(device.type) if train_cfg.precision == "fp16" else None
 
+    # The device NAME is recorded as provenance but not compared. rwkv_kernel and
+    # precision already capture the parts of the device that change the
+    # computation, and gating on the name would block legitimate recovery onto
+    # another card.
+    # out_dir and checkpoint_path are not compared. They do not enter the
+    # computation.
     signature = {
         "task": "exp1_pointer_chase",
         "workspace": workspace_signature,
+        "depth": depth,
+        "num_nodes": spec.num_nodes,
+        "num_maps": spec.num_maps,
+        "max_depth": spec.max_depth,
+        "num_silent": num_silent,
+        "silent_kind": silent_kind,
+        "queries_per_memory": queries_per_memory,
+        "train_data_seed": train_data_seed,
+        "val_data_seed": val_data_seed,
+        "train_size": train_size,
+        "val_size": val_size,
+        "overfit_train_as_val": overfit_train_as_val,
+        "hidden_size": model_cfg.hidden_size,
+        "num_hidden_layers": model_cfg.num_hidden_layers,
+        "num_attention_heads": model_cfg.num_attention_heads,
+        "head_dim": model_cfg.head_dim,
+        "vocab_size": model_cfg.vocab_size,
+        "rwkv_kernel": model_cfg.rwkv_kernel,
+        "model_seed": train_cfg.seed,
+        "batch_size": train_cfg.batch_size,
+        "precision": train_cfg.precision,
+        "epochs": train_cfg.epochs,
     }
 
     start_epoch = 0
