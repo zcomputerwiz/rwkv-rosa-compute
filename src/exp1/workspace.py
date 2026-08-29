@@ -128,12 +128,23 @@ class Workspace(nn.Module):
         for _ in range(self.num_steps):
             z = self.norm_attn(z + self._route(z))
             z = self.norm_refine(z + self.refine(z))
-        # Mean over slots, with the fixed offset mean removed. Without that
-        # correction the readout carries a systematic M-dependent term: the
-        # mean of the first M offsets differs between M=1 and M=8, so the two
-        # cells would differ in their input statistics as well as in their slot
-        # count. The correction is a constant, not a learned parameter.
-        return z.mean(dim=1) - self.offsets[: self.num_slots].mean(dim=0)
+        # Plain mean over slots. Parameter-free, and defined identically
+        # whatever M is, so the readout does not change shape between cells.
+        #
+        # An earlier revision subtracted the offset-prefix mean here, claiming
+        # it removed an M-dependent term. It does not: the offsets reach this
+        # point through attention, residuals, GELU and two LayerNorms per step,
+        # and subtracting the RAW offset mean can only cancel them if all of
+        # that were the identity. Review demonstrated a full-forward
+        # counterexample at max_abs_delta 2.74 with routing and refinement
+        # zeroed, and the test that "proved" the correction never called
+        # forward() -- it re-implemented the readout formula by hand, so it
+        # verified the algebra rather than the model.
+        #
+        # The offset-prefix mean is therefore an intentional, documented
+        # component of the M axis, not a defect papered over here. Gate 0's
+        # routing calibration has to cover it.
+        return z.mean(dim=1)
 
     def extra_repr(self) -> str:  # pragma: no cover
         return (f"d_model={self.d_model}, num_slots={self.num_slots}, "

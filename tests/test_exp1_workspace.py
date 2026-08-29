@@ -106,23 +106,6 @@ def test_offsets_do_not_depend_on_the_torch_thread_count():
         torch.set_num_threads(original)
 
 
-@pytest.mark.parametrize("num_slots", [1, 2, 4, 8])
-def test_readout_has_no_M_dependent_offset_term(num_slots):
-    """The readout must not carry a systematic term that moves with M.
-
-    The mean of the first M offsets differs between M=1 and M=8, so a plain
-    mean over slots would make the cells differ in their input statistics as
-    well as in their slot count -- a confound underneath the parameter-count
-    one. With the constant correction applied, an identity refinement leaves
-    the readout equal to the state it was seeded from, for every M.
-    """
-    ws = Workspace(D_MODEL, num_slots=num_slots, num_steps=1)
-    state = torch.randn(3, D_MODEL, generator=torch.Generator().manual_seed(7))
-    z0 = ws.initial(state)
-    readout_of_initial = z0.mean(dim=1) - ws.offsets[:num_slots].mean(dim=0)
-    assert torch.allclose(readout_of_initial, state, atol=1e-6)
-
-
 def test_routing_is_learned_and_parameter_invariant():
     """Cross-slot routing is learned, and its projections do not scale with M.
 
