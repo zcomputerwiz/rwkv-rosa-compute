@@ -12,11 +12,9 @@ Layout, one run per archive:
       model_epoch_001.pt
       model_epoch_005.pt
 
-Identity is a canonical content digest over the tensors themselves, not over
-Torch's container bytes, so re-serialization by a different Torch version does
-not change a snapshot's identity. The digest commits to every key, dtype, and
-shape directly rather than delegating to a separate schema field that a reader
-might forget to check.
+Identity verification checks that the checkpoint's signature matches the caller's
+claimed run_id and seed. The canonical content digest ensures the weights
+themselves are uniquely identified and stable across re-serializations.
 """
 from __future__ import annotations
 
@@ -188,6 +186,7 @@ def export_snapshots(
     source_checkpoints: Mapping[int, Path],
     out_dir: Path,
     run: SourceRun,
+    allow_unverified_identity: bool = False,
 ) -> Path:
     """Write an evaluation-only archive for one run.
 
@@ -208,11 +207,17 @@ def export_snapshots(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     entries = []
+    all_identities_verified = True
+    all_identities_verified = True
     for epoch in sorted(source_checkpoints):
         if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 0:
             raise ArchiveError(f"invalid checkpoint epoch {epoch!r}")
         source = Path(source_checkpoints[epoch])
+        pre_load_sha256 = sha256_file(source)
         payload = torch.load(source, map_location="cpu", weights_only=False)
+        post_load_sha256 = sha256_file(source)
+        if pre_load_sha256 != post_load_sha256:
+            raise ArchiveError(f"{source} changed during export")
         if not isinstance(payload, Mapping) or "model_state_dict" not in payload:
             raise ArchiveError(
                 f"{source} does not look like a training checkpoint: "
@@ -222,6 +227,7 @@ def export_snapshots(
         if not isinstance(state, Mapping):
             raise ArchiveError(f"{source} model_state_dict is not a mapping")
 
+        checkpoint_identity_verified = False
         signature = payload.get("signature")
         if isinstance(signature, Mapping):
             source_run_id = signature.get("run_id")
@@ -238,6 +244,16 @@ def export_snapshots(
                     raise ArchiveError(
                         f"{source} does not record seed {run.seed} in seeds_run"
                     )
+
+            # Verify identity
+            if source_run_id == run.run_id:
+                if seeds is None or run.seed in seeds:
+                    checkpoint_identity_verified = True
+
+        if not checkpoint_identity_verified:
+            if not allow_unverified_identity:
+                raise ArchiveError(f"{source} lacks a verified run_id/signature")
+            all_identities_verified = False
 
         content = canonical_content_sha256(state)
         schema = schema_sha256(state)
@@ -269,7 +285,7 @@ def export_snapshots(
                 "decoded_bytes": decoded,
                 "stored_sha256": stored_sha,
                 "stored_bytes": target.stat().st_size,
-                "source_checkpoint_sha256": sha256_file(source),
+                "source_checkpoint_sha256": pre_load_sha256,
                 "codec": {"name": "torch_save", "version": 1, "parameters": {}},
                 "base_epoch": None,
             }
@@ -281,6 +297,7 @@ def export_snapshots(
         "resume_capable": False,
         "contains_optimizer_state": False,
         "omitted_state": ["optimizer", "scheduler", "scaler", "rng"],
+        "identity_verified": all_identities_verified,
         "run_id": run.run_id,
         "seed": run.seed,
         "commit": run.commit,
@@ -335,7 +352,13 @@ def _entry_for(manifest: Mapping[str, Any], epoch: int) -> Mapping[str, Any]:
 def verify_archive(archive_dir: Path) -> dict[str, Any]:
     """Check every manifest entry exists and matches, without loading tensors.
 
-    Cheap enough to run before a transfer or before allocating anything.
+    This detects the failures this project actually has: a truncated or
+    partially synced file, a corrupted transfer, a missing entry, a wrong file
+    under the right name. It is an integrity check, not authentication. A
+    manifest replaced coherently along with all of its sidecars would pass,
+    because every digest it compares against lives inside the archive. That is
+    out of scope by design; the external check is the digest published
+    separately in the shared folder alongside the archive.
     """
     archive_dir = Path(archive_dir)
     manifest = read_manifest(archive_dir)
@@ -394,6 +417,11 @@ def load_snapshot(
     expect_source_checkpoint_sha256: str | None = None,
 ) -> dict[str, torch.Tensor]:
     """Load one epoch's weights, failing closed on any mismatch.
+
+    The integrity limits described on verify_archive apply here too:
+    expect_source_checkpoint_sha256 compares against a manifest-recorded
+    string, so it catches a wrong or stale archive, not a coherently rewritten
+    one.
 
     Separate from the training resume path by construction: it returns a state
     dict and nothing that could restart an optimizer.

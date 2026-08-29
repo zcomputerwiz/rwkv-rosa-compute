@@ -206,7 +206,7 @@ def test_a_real_module_loads_the_snapshot(tmp_path):
     source = tmp_path / "epoch_001.pt"
     torch.save({"checkpoint_version": 1, "model_state_dict": module.state_dict()}, source)
     out = tmp_path / "arch"
-    export_snapshots(source_checkpoints={1: source}, out_dir=out, run=RUN)
+    export_snapshots(source_checkpoints={1: source}, out_dir=out, run=RUN, allow_unverified_identity=True)
 
     fresh = torch.nn.Linear(3, 4)
     fresh.load_state_dict(load_snapshot(out, 1), strict=True)
@@ -322,3 +322,44 @@ def test_multiple_epochs_are_independently_loadable(tmp_path):
     manifest = read_manifest(out)
     digests = {e["content_sha256"] for e in manifest["entries"]}
     assert len(digests) == 2
+
+
+# 6. Provenance defects
+
+def test_unverified_identity_raises(tmp_path):
+    source = tmp_path / "epoch_001.pt"
+    # No signature
+    torch.save({"checkpoint_version": 1, "model_state_dict": make_state()}, source)
+    out = tmp_path / "arch"
+    with pytest.raises(ArchiveError, match="lacks a verified run_id/signature"):
+        export_snapshots(source_checkpoints={1: source}, out_dir=out, run=RUN)
+
+def test_unverified_identity_passes_with_flag(tmp_path):
+    source = tmp_path / "epoch_001.pt"
+    # No signature
+    torch.save({"checkpoint_version": 1, "model_state_dict": make_state()}, source)
+    out = tmp_path / "arch"
+    export_snapshots(source_checkpoints={1: source}, out_dir=out, run=RUN, allow_unverified_identity=True)
+    manifest = read_manifest(out)
+    assert manifest["identity_verified"] is False
+
+def test_verified_identity_records_true(archive):
+    out, _, _ = archive
+    manifest = read_manifest(out)
+    assert manifest["identity_verified"] is True
+
+def test_source_checkpoint_race_condition_raises(tmp_path, monkeypatch):
+    source = write_source(tmp_path / "epoch_005.pt", make_state())
+    out = tmp_path / "arch"
+
+    original_torch_load = torch.load
+    def mutating_load(f, *args, **kwargs):
+        res = original_torch_load(f, *args, **kwargs)
+        # Mutate the file to simulate the race
+        with open(source, "ab") as f_out:
+            f_out.write(b"0")
+        return res
+
+    monkeypatch.setattr(torch, "load", mutating_load)
+    with pytest.raises(ArchiveError, match="changed during export"):
+        export_snapshots(source_checkpoints={5: source}, out_dir=out, run=RUN)

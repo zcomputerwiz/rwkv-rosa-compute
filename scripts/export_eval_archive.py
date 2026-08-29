@@ -49,6 +49,10 @@ def main(argv=None) -> int:
                         help="defaults to the checkpoint's signature.run_id")
     parser.add_argument("--seed", type=int, default=None,
                         help="defaults to the checkpoint's recorded seed")
+    parser.add_argument("--allow-unverified-identity", action=argparse.BooleanOptionalAction,
+                        default=False,
+                        help="allow export if checkpoint lacks a verified run_id/signature; "
+                             "the identity will be recorded as unverified")
     args = parser.parse_args(argv)
 
     sources = dict(args.checkpoint)
@@ -81,7 +85,8 @@ def main(argv=None) -> int:
 
     try:
         manifest = export_snapshots(
-            source_checkpoints=sources, out_dir=args.out_dir, run=run
+            source_checkpoints=sources, out_dir=args.out_dir, run=run,
+            allow_unverified_identity=args.allow_unverified_identity
         )
     except ArchiveError as exc:
         print(f"error: {exc}", file=sys.stderr)
