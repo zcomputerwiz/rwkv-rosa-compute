@@ -237,15 +237,32 @@ def main(argv=None) -> int:
             "out": str(args.out)}, "results": results}, indent=2, default=str))
     print(f"\nwrote {args.out}")
 
+    # Clustered at the memory level. queries_per_memory queries share one
+    # memory, so treating instances as independent understates the standard
+    # error by sqrt(queries_per_memory) and makes noise look like signal. That
+    # error has already been made once on this experiment and corrected; the
+    # naive interval would call a 0.0798 here a result.
+    se = math.sqrt(chance * (1 - chance) / args.val_memories)
     best = max(results, key=lambda r: r["held_out_best"])
-    print(f"best held-out: lr={best['lr']:.1e} d={best['d_model']} "
+    z = (best["held_out_best"] - chance) / se
+    print(f"\nbest held-out: lr={best['lr']:.1e} d={best['d_model']} "
           f"L={best['layers']} memories={best['memories']} -> "
-          f"{best['held_out_best']:.4f} (chance {chance:.4f})")
+          f"{best['held_out_best']:.4f}")
+    print(f"  chance {chance:.4f}, clustered SE {se:.4f} "
+          f"(n={args.val_memories} memories, not "
+          f"{args.val_memories * args.queries_per_memory} queries)")
+    if z < 2:
+        print(f"  that is {z:+.2f} SE. NOT above chance -- no cell in this "
+              f"sweep generalised, and the maximum is selection over noise.")
+    else:
+        print(f"  that is {z:+.2f} SE above chance.")
+
     memorised = [r for r in results if r["gap"] > 0.2]
     if memorised:
         print(f"{len(memorised)} of {len(results)} cells memorised "
               f"(train - held-out > 0.2); largest gap "
-              f"{max(r['gap'] for r in memorised):.4f}")
+              f"{max(r['gap'] for r in memorised):.4f}. A cell that memorises "
+              f"is training fine and learning the wrong thing.")
     return 0
 
 
