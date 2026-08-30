@@ -201,6 +201,7 @@ def test_workspace_checkpoint_round_trip_and_cell_identity(tmp_path):
     train_model(
         model, dataset, dataset, spec, model_cfg, train_cfg, torch.device("cpu"),
         workspace=workspace, checkpoint_path=checkpoint_dir,
+        depth=2, train_data_seed=5, val_data_seed=5, train_size=4, val_size=4, queries_per_memory=2,
     )
     checkpoint = checkpoint_dir / "epoch_001.pt"
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
@@ -213,6 +214,7 @@ def test_workspace_checkpoint_round_trip_and_cell_identity(tmp_path):
         resumed_model, dataset, dataset, spec, model_cfg, train_cfg,
         torch.device("cpu"), workspace=resumed_workspace,
         resume_from_checkpoint=checkpoint, max_epochs=0,
+        depth=2, train_data_seed=5, val_data_seed=5, train_size=4, val_size=4, queries_per_memory=2,
     )
     for key, value in expected.items():
         assert torch.equal(resumed_workspace.state_dict()[key], value), key
@@ -223,4 +225,5 @@ def test_workspace_checkpoint_round_trip_and_cell_identity(tmp_path):
             resumed_model, dataset, dataset, spec, model_cfg, train_cfg,
             torch.device("cpu"), workspace=wrong_cell,
             resume_from_checkpoint=checkpoint, max_epochs=0,
+            depth=2, train_data_seed=5, val_data_seed=5, train_size=4, val_size=4, queries_per_memory=2,
         )

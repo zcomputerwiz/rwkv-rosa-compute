@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from exp0.config import ModelConfig, TrainConfig
@@ -97,6 +98,11 @@ def test_tiny_e2e_training_smoke():
         model_cfg,
         train_cfg,
         device,
+        depth=4,
+        train_data_seed=1,
+        val_data_seed=2,
+        train_size=2,
+        val_size=2,
     )
 
     assert len(history["epoch_train_losses"]) == 1
@@ -144,14 +150,22 @@ def test_training_resumes_from_checkpoint(tmp_path):
         train_cfg,
         device,
         checkpoint_path=checkpoint_dir,
+        depth=4,
+        train_data_seed=1,
+        val_data_seed=2,
+        train_size=4,
+        val_size=2,
     )
 
     # Assert a checkpoint was created
     latest_ckpt = checkpoint_dir / "latest.pt"
     assert latest_ckpt.exists()
 
-    # Resume training for 2 epochs total, which means 1 more epoch
-    train_cfg_resume = TrainConfig(
+    # Resume training for 1 more epoch, but the epochs field is part of the signature!
+    # So we must use max_epochs=1 with the original train_cfg (which had epochs=1)
+    # to test resumption, OR we construct the test differently.
+    # Let's adjust epochs=2 and use max_epochs=1 in the first run.
+    train_cfg_total = TrainConfig(
         seed=42,
         batch_size=4,
         precision="fp32",
@@ -159,6 +173,18 @@ def test_training_resumes_from_checkpoint(tmp_path):
         epochs=2,
         learning_rate=1e-3,
     )
+
+    # We re-run the first part to ensure the signature recorded epochs=2
+    checkpoint_dir_2 = tmp_path / "checkpoints_2"
+    checkpoint_dir_2.mkdir()
+
+    model2 = create_model(model_cfg, d_input=spec.d_input, compact_reduced_features=False)
+    model2, history_1 = train_model(
+        model2, train_ds, val_ds, spec, model_cfg, train_cfg_total, device,
+        checkpoint_path=checkpoint_dir_2, depth=4, train_data_seed=1, val_data_seed=2, train_size=4, val_size=2, max_epochs=1
+    )
+
+    latest_ckpt_2 = checkpoint_dir_2 / "latest.pt"
 
     model_resumed = create_model(model_cfg, d_input=spec.d_input, compact_reduced_features=False)
 
@@ -168,15 +194,23 @@ def test_training_resumes_from_checkpoint(tmp_path):
         val_ds,
         spec,
         model_cfg,
-        train_cfg_resume,
+        train_cfg_total,
         device,
-        checkpoint_path=checkpoint_dir,
-        resume_from_checkpoint=latest_ckpt,
+        checkpoint_path=checkpoint_dir_2,
+        resume_from_checkpoint=latest_ckpt_2,
+        depth=4,
+        train_data_seed=1,
+        val_data_seed=2,
+        train_size=4,
+        val_size=2,
     )
 
     # history_1 ran 1 epoch, history_2 ran 1 epoch (from epoch 1 to 2)
     assert history_1["epochs_trained"] == 1
     assert history_2["epochs_trained"] == 1
+
+    # Redefine checkpoint_dir for the asserts below
+    checkpoint_dir = checkpoint_dir_2
 
 
     # Verify optimizer state was actually restored
@@ -255,7 +289,8 @@ def test_exact_resume_and_history_preservation(tmp_path):
     model_full = create_model(model_cfg, d_input=spec.d_input, compact_reduced_features=False)
 
     model_full, history_full = train_model(
-        model_full, train_ds, val_ds, spec, model_cfg, train_cfg_full, device
+        model_full, train_ds, val_ds, spec, model_cfg, train_cfg_full, device,
+        depth=4, train_data_seed=1, val_data_seed=2, train_size=4, val_size=2
     )
 
     # 2. Train 1 epoch, save, resume for 1 more epoch
@@ -266,7 +301,8 @@ def test_exact_resume_and_history_preservation(tmp_path):
     checkpoint_dir.mkdir()
 
     model_part, history_part1 = train_model(
-        model_part, train_ds, val_ds, spec, model_cfg, train_cfg_full, device, checkpoint_path=checkpoint_dir, max_epochs=1
+        model_part, train_ds, val_ds, spec, model_cfg, train_cfg_full, device, checkpoint_path=checkpoint_dir, max_epochs=1,
+        depth=4, train_data_seed=1, val_data_seed=2, train_size=4, val_size=2
     )
 
     latest_ckpt = checkpoint_dir / "latest.pt"
@@ -278,7 +314,8 @@ def test_exact_resume_and_history_preservation(tmp_path):
 
     model_resumed, history_resumed = train_model(
         model_resumed, train_ds, val_ds, spec, model_cfg, train_cfg_full, device,
-        checkpoint_path=checkpoint_dir, resume_from_checkpoint=latest_ckpt
+        checkpoint_path=checkpoint_dir, resume_from_checkpoint=latest_ckpt,
+        depth=4, train_data_seed=1, val_data_seed=2, train_size=4, val_size=2
     )
 
     # Assert histories match
@@ -323,9 +360,105 @@ def test_step_periodic_checkpointing(tmp_path):
     # Train and checkpoint every 2 steps
     train_model(
         model, train_ds, val_ds, spec, model_cfg, train_cfg, device,
-        checkpoint_path=checkpoint_dir, checkpoint_every_steps=2
+        checkpoint_path=checkpoint_dir, checkpoint_every_steps=2,
+        depth=4, train_data_seed=1, val_data_seed=2, train_size=4, val_size=2
     )
 
     assert (checkpoint_dir / "step_000002.pt").exists()
     assert (checkpoint_dir / "step_000004.pt").exists()
     assert (checkpoint_dir / "epoch_001.pt").exists()
+
+
+def test_training_resumes_refused_on_signature_mismatch(tmp_path):
+    spec = ChaseSpec(num_nodes=M, num_maps=K, max_depth=8)
+    train_data = generate_dataset(4, 4, depth=4, seed=1, num_nodes=M, num_maps=K)
+    val_data = generate_dataset(2, 4, depth=4, seed=2, num_nodes=M, num_maps=K)
+
+    train_ds = PointerChaseDataset(train_data, spec)
+    val_ds = PointerChaseDataset(val_data, spec)
+
+    model_cfg = ModelConfig(
+        architecture="rwkv",
+        hidden_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        head_dim=64,
+        vocab_size=M,
+        rwkv_kernel="reference",
+    )
+    model = create_model(model_cfg, d_input=spec.d_input, compact_reduced_features=False)
+
+    train_cfg = TrainConfig(
+        seed=42,
+        batch_size=4,
+        precision="fp32",
+        num_workers=0,
+        epochs=1,
+        learning_rate=1e-3,
+    )
+    device = torch.device("cpu")
+
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+
+    train_model(
+        model,
+        train_ds,
+        val_ds,
+        spec,
+        model_cfg,
+        train_cfg,
+        device,
+        checkpoint_path=checkpoint_dir,
+        depth=4,
+        train_data_seed=1,
+        val_data_seed=2,
+        train_size=4,
+        val_size=2,
+    )
+
+    latest_ckpt = checkpoint_dir / "latest.pt"
+    assert latest_ckpt.exists()
+
+    model_resumed = create_model(model_cfg, d_input=spec.d_input, compact_reduced_features=False)
+
+    # Change depth
+    with pytest.raises(ValueError, match="Training checkpoint does not match the requested run. Differing signature sections: depth"):
+        train_model(
+            model_resumed, train_ds, val_ds, spec, model_cfg, train_cfg, device,
+            resume_from_checkpoint=latest_ckpt,
+            depth=5, train_data_seed=1, val_data_seed=2, train_size=4, val_size=2,
+        )
+
+    # Change model_seed (train_cfg.seed)
+    train_cfg_diff_seed = TrainConfig(seed=43, batch_size=4, precision="fp32", num_workers=0, epochs=1, learning_rate=1e-3)
+    with pytest.raises(ValueError, match="Training checkpoint does not match the requested run. Differing signature sections: model_seed"):
+        train_model(
+            model_resumed, train_ds, val_ds, spec, model_cfg, train_cfg_diff_seed, device,
+            resume_from_checkpoint=latest_ckpt,
+            depth=4, train_data_seed=1, val_data_seed=2, train_size=4, val_size=2,
+        )
+
+    # Change train_data_seed
+    with pytest.raises(ValueError, match="Training checkpoint does not match the requested run. Differing signature sections: train_data_seed"):
+        train_model(
+            model_resumed, train_ds, val_ds, spec, model_cfg, train_cfg, device,
+            resume_from_checkpoint=latest_ckpt,
+            depth=4, train_data_seed=2, val_data_seed=2, train_size=4, val_size=2,
+        )
+
+
+def test_identity_arguments_cannot_be_omitted():
+    """A default here would be written into the signature as if it were real.
+
+    Two callers that both forgot the same argument would then produce
+    checkpoints that validate against each other, which is exactly the
+    mislabeled-result failure the signature exists to prevent.
+    """
+    import inspect
+
+    params = inspect.signature(train_model).parameters
+    for name in ("depth", "train_data_seed", "val_data_seed",
+                 "train_size", "val_size"):
+        assert params[name].default is inspect.Parameter.empty, (
+            f"{name} has a default; an omitted caller would silently record it")

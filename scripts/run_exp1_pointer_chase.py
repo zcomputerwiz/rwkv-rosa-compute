@@ -176,6 +176,15 @@ def main(argv=None) -> int:
         workspace=workspace,
         checkpoint_path=args.checkpoint_path,
         resume_from_checkpoint=args.resume_from_checkpoint,
+        depth=args.depth,
+        num_silent=args.num_silent,
+        silent_kind=args.silent_kind,
+        queries_per_memory=args.queries_per_memory,
+        train_data_seed=train_data_seed,
+        val_data_seed=val_data_seed,
+        train_size=args.train_size,
+        val_size=args.val_size,
+        overfit_train_as_val=args.overfit_train_as_val,
     )
 
     # The gates are fixed-budget with no checkpoint selection, so the outcome is
