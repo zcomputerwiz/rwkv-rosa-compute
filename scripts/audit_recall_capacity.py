@@ -61,10 +61,11 @@ def build_bank(memories, *, depth, seed, spec, queries_per_memory,
         spec)
 
 
-def run_cell(*, lr, d_model, layers, memories, args, spec, val_ds, device):
+def run_cell(*, lr, d_model, layers, memories, num_nodes, num_maps, args,
+             spec, val_ds, device):
     train_ds = build_bank(memories, depth=args.depth, seed=args.train_data_seed,
                           spec=spec, queries_per_memory=args.queries_per_memory,
-                          num_nodes=args.num_nodes, num_maps=args.num_maps)
+                          num_nodes=num_nodes, num_maps=num_maps)
     # Scored on a slice of the training bank as well. The gap between the two is
     # the measurement: chance on both means it has not learned, high train with
     # chance held out means it has memorised, and only both rising together is
@@ -77,7 +78,7 @@ def run_cell(*, lr, d_model, layers, memories, args, spec, val_ds, device):
     cfg = ModelConfig(architecture="rwkv", hidden_size=d_model,
                       num_hidden_layers=layers,
                       num_attention_heads=max(1, d_model // 64), head_dim=64,
-                      vocab_size=args.num_nodes, rwkv_kernel=args.rwkv_kernel)
+                      vocab_size=num_nodes, rwkv_kernel=args.rwkv_kernel)
     model = create_model(cfg, d_input=spec.d_input,
                          compact_reduced_features=False).to(device)
     params = sum(p.numel() for p in model.parameters())
@@ -110,8 +111,8 @@ def run_cell(*, lr, d_model, layers, memories, args, spec, val_ds, device):
             train_ds = build_bank(memories, depth=args.depth,
                                   seed=args.train_data_seed + epoch, spec=spec,
                                   queries_per_memory=args.queries_per_memory,
-                                  num_nodes=args.num_nodes,
-                                  num_maps=args.num_maps)
+                                  num_nodes=num_nodes,
+                                  num_maps=num_maps)
             loader = DataLoader(train_ds, batch_size=args.batch_size,
                                 shuffle=True, generator=gen, drop_last=True,
                                 collate_fn=exp1_collate_fn, num_workers=0,
@@ -134,6 +135,8 @@ def run_cell(*, lr, d_model, layers, memories, args, spec, val_ds, device):
     train_acc = evaluate_vway_accuracy(model, train_probe, tcfg, device, None)
     distinct = memories * (args.epochs if args.fresh_memories_per_epoch else 1)
     result = dict(lr=lr, d_model=d_model, layers=layers, memories=memories,
+                  num_nodes=num_nodes, num_maps=num_maps,
+                  associations=num_nodes * num_maps, chance=1.0 / num_nodes,
                   fresh_per_epoch=args.fresh_memories_per_epoch,
                   distinct_memories_seen=distinct,
                   params=params, instances=len(train_ds),
@@ -167,8 +170,12 @@ def main(argv=None) -> int:
                         "model has not seen for many epochs, not memorisation "
                         "of the current one")
     p.add_argument("--depth", type=int, default=1)
-    p.add_argument("--num-nodes", type=int, default=16)
-    p.add_argument("--num-maps", type=int, default=4)
+    # Swept, because the quantity the literature bounds is the number of
+    # associations the recurrent state must hold, and that is num_nodes *
+    # num_maps -- 64 at the gate's M=16, K=4. Chance is 1/num_nodes, so it
+    # moves with the sweep and is reported per cell.
+    p.add_argument("--num-nodes", type=int, nargs="+", default=[16])
+    p.add_argument("--num-maps", type=int, nargs="+", default=[4])
     p.add_argument("--queries-per-memory", type=int, default=4)
     p.add_argument("--epochs", type=int, default=32)
     p.add_argument("--batch-size", type=int, default=256)
@@ -203,59 +210,73 @@ def main(argv=None) -> int:
                 f"must be multiples of {step}.")
 
     device = torch.device(args.device)
-    spec = ChaseSpec(num_nodes=args.num_nodes, num_maps=args.num_maps,
-                     max_depth=max(32, args.depth))
-    val_ds = build_bank(args.val_memories, depth=args.depth,
-                        seed=args.val_data_seed, spec=spec,
-                        queries_per_memory=args.queries_per_memory,
-                        num_nodes=args.num_nodes, num_maps=args.num_maps)
-
-    chance = 1.0 / args.num_nodes
-    print(f"chance = {chance:.4f}   depth={args.depth}   "
-          f"associations per memory = {args.num_nodes * args.num_maps}")
-    print(f"{'lr':>9} {'d':>5} {'L':>3} {'memories':>9} {'params':>10} "
-          f"{'held-out':>9} {'train':>8} {'gap':>8} {'loss':>8} {'s':>6}")
+    print(f"depth={args.depth}   chance is 1/num_nodes and moves with the sweep")
+    print(f"{'M':>3} {'K':>3} {'assoc':>6} {'chance':>7} {'lr':>9} {'d':>5} "
+          f"{'L':>3} {'memories':>9} {'held-out':>9} {'train':>8} {'gap':>8} "
+          f"{'z':>6} {'loss':>8} {'s':>6}")
 
     results = []
-    for memories in args.memories:
-        for d_model in args.d_models:
-            for layers in args.layers:
-                for lr in args.lrs:
-                    r = run_cell(lr=lr, d_model=d_model, layers=layers,
-                                 memories=memories, args=args, spec=spec,
-                                 val_ds=val_ds, device=device)
-                    results.append(r)
-                    print(f"{lr:>9.1e} {d_model:>5} {layers:>3} {memories:>9} "
-                          f"{r['params']:>10,} {r['held_out_best']:>9.4f} "
-                          f"{r['train_acc']:>8.4f} {r['gap']:>8.4f} "
-                          f"{r['final_loss']:>8.4f} {r['seconds']:>6.0f}")
-                    sys.stdout.flush()
+    for num_nodes in args.num_nodes:
+        for num_maps in args.num_maps:
+            # Rebuilt per (M, K): the field layout, and so d_input and the
+            # learned input projection, depend on both. That is a real confound
+            # on this axis -- a larger M is a wider input as well as more
+            # associations -- which is why params is recorded per cell.
+            spec = ChaseSpec(num_nodes=num_nodes, num_maps=num_maps,
+                             max_depth=max(32, args.depth))
+            val_ds = build_bank(args.val_memories, depth=args.depth,
+                                seed=args.val_data_seed, spec=spec,
+                                queries_per_memory=args.queries_per_memory,
+                                num_nodes=num_nodes, num_maps=num_maps)
+            chance = 1.0 / num_nodes
+            se = math.sqrt(chance * (1 - chance) / args.val_memories)
+            for memories in args.memories:
+                for d_model in args.d_models:
+                    for layers in args.layers:
+                        for lr in args.lrs:
+                            r = run_cell(lr=lr, d_model=d_model, layers=layers,
+                                         memories=memories,
+                                         num_nodes=num_nodes,
+                                         num_maps=num_maps, args=args,
+                                         spec=spec, val_ds=val_ds,
+                                         device=device)
+                            r["z"] = (r["held_out_best"] - chance) / se
+                            results.append(r)
+                            print(f"{num_nodes:>3} {num_maps:>3} "
+                                  f"{num_nodes * num_maps:>6} {chance:>7.4f} "
+                                  f"{lr:>9.1e} {d_model:>5} {layers:>3} "
+                                  f"{memories:>9} {r['held_out_best']:>9.4f} "
+                                  f"{r['train_acc']:>8.4f} {r['gap']:>8.4f} "
+                                  f"{r['z']:>+6.2f} {r['final_loss']:>8.4f} "
+                                  f"{r['seconds']:>6.0f}")
+                            sys.stdout.flush()
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(
-        {"label": args.label, "chance": chance, "config": vars(args) | {
-            "out": str(args.out)}, "results": results}, indent=2, default=str))
+        {"label": args.label, "config": vars(args) | {"out": str(args.out)},
+         "results": results}, indent=2, default=str))
     print(f"\nwrote {args.out}")
 
     # Clustered at the memory level. queries_per_memory queries share one
     # memory, so treating instances as independent understates the standard
-    # error by sqrt(queries_per_memory) and makes noise look like signal. That
-    # error has already been made once on this experiment and corrected; the
-    # naive interval would call a 0.0798 here a result.
-    se = math.sqrt(chance * (1 - chance) / args.val_memories)
-    best = max(results, key=lambda r: r["held_out_best"])
-    z = (best["held_out_best"] - chance) / se
-    print(f"\nbest held-out: lr={best['lr']:.1e} d={best['d_model']} "
-          f"L={best['layers']} memories={best['memories']} -> "
-          f"{best['held_out_best']:.4f}")
-    print(f"  chance {chance:.4f}, clustered SE {se:.4f} "
-          f"(n={args.val_memories} memories, not "
-          f"{args.val_memories * args.queries_per_memory} queries)")
-    if z < 2:
-        print(f"  that is {z:+.2f} SE. NOT above chance -- no cell in this "
-              f"sweep generalised, and the maximum is selection over noise.")
+    # error by sqrt(queries_per_memory) and turns noise into apparent signal.
+    # That error has been made on this experiment once already and corrected;
+    # the naive interval would report a 1.5-SE bump as a result.
+    print(f"z is clustered at the memory level: n={args.val_memories} memories, "
+          f"not {args.val_memories * args.queries_per_memory} queries.")
+    above = [r for r in results if r["z"] >= 2]
+    if above:
+        print(f"{len(above)} of {len(results)} cells exceed chance at 2 SE:")
+        for r in sorted(above, key=lambda r: -r["z"]):
+            print(f"  M={r['num_nodes']} K={r['num_maps']} "
+                  f"({r['associations']} associations) lr={r['lr']:.1e} "
+                  f"d={r['d_model']} L={r['layers']} -> "
+                  f"{r['held_out_best']:.4f} ({r['z']:+.2f} SE), "
+                  f"train {r['train_acc']:.4f}")
     else:
-        print(f"  that is {z:+.2f} SE above chance.")
+        best = max(results, key=lambda r: r["z"])
+        print(f"NO cell exceeded chance at 2 SE. The largest is {best['z']:+.2f} "
+              f"SE, which is selection over noise rather than a result.")
 
     memorised = [r for r in results if r["gap"] > 0.2]
     if memorised:
