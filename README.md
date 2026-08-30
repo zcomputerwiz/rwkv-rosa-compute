@@ -89,6 +89,9 @@ Comprehensive research and engineering documentation is available under [`docs/`
   - [`docs/experiment0_construction_diagnostics.md`](docs/experiment0_construction_diagnostics.md) — Construction-prior strata tracking and challenge sets.
   - [`docs/experiment0_checkpoint_analysis.md`](docs/experiment0_checkpoint_analysis.md) — Checkpoint re-evaluation and cross-seed error comparison.
   - [`docs/experiment0_checkpointing.md`](docs/experiment0_checkpointing.md) — Atomic checkpointing, exact resume, and completed-run continuation.
+- **Experiment 1 Protocols & Diagnostics**:
+  - [`docs/experiment1_transition_plan.md`](docs/experiment1_transition_plan.md) — Historical handoff record from Experiment 0 to Experiment 1.
+  - [`docs/experiment1_recall_capacity.md`](docs/experiment1_recall_capacity.md) — Gate 0a's result, the recall-capacity audit, and the limits of what it establishes.
 - **Performance, Precision & CUDA**:
   - [`docs/experiment0_precision_and_compile.md`](docs/experiment0_precision_and_compile.md) — Benchmarking `torch.compile`, TF32, and BF16 on Ada GPUs.
   - [`docs/experiment0_performance.md`](docs/experiment0_performance.md) — Memory optimizations, grouped execution, and CUDA benchmarks.
