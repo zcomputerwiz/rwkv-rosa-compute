@@ -225,3 +225,7 @@ tests/fixtures/
 /results
 
 .inductor_cache/
+
+# Local Jules orchestration queue. Machine-local state, not repo content,
+# and an untracked directory here makes run_with_provenance refuse every job.
+.jules/
