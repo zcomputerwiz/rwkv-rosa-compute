@@ -462,3 +462,64 @@ def test_identity_arguments_cannot_be_omitted():
                  "train_size", "val_size"):
         assert params[name].default is inspect.Parameter.empty, (
             f"{name} has a default; an omitted caller would silently record it")
+
+
+def _tiny_setup():
+    spec = ChaseSpec(num_nodes=M, num_maps=K, max_depth=8)
+    train_ds = PointerChaseDataset(
+        generate_dataset(2, 4, depth=4, seed=1, num_nodes=M, num_maps=K), spec)
+    val_ds = PointerChaseDataset(
+        generate_dataset(2, 4, depth=4, seed=2, num_nodes=M, num_maps=K), spec)
+    model_cfg = ModelConfig(
+        architecture="rwkv", hidden_size=64, num_hidden_layers=1,
+        num_attention_heads=1, head_dim=64, vocab_size=M,
+        rwkv_kernel="reference",
+    )
+    model = create_model(model_cfg, d_input=spec.d_input,
+                         compact_reduced_features=False)
+    train_cfg = TrainConfig(seed=42, batch_size=4, precision="fp32",
+                            num_workers=0, epochs=1, learning_rate=1e-3)
+    return model, train_ds, val_ds, spec, model_cfg, train_cfg
+
+
+def _train(model, train_ds, val_ds, spec, model_cfg, train_cfg, **kwargs):
+    return train_model(
+        model, train_ds, val_ds, spec, model_cfg, train_cfg,
+        torch.device("cpu"),
+        depth=4, train_data_seed=1, val_data_seed=2, train_size=2, val_size=2,
+        **kwargs,
+    )
+
+
+def test_compile_backend_is_rejected_when_the_model_is_not_compiled():
+    """Naming a backend for an eager model would write a false resume signature.
+
+    The signature would then claim the run used that backend, and a genuinely
+    compiled resume against it would be accepted.
+    """
+    parts = _tiny_setup()
+    with pytest.raises(ValueError, match="not compiled"):
+        _train(*parts, compile_backend="cudagraphs")
+
+
+def test_a_compiled_backbone_without_a_named_backend_is_rejected():
+    """Compiling and saying nothing would leave the signature indistinguishable.
+
+    inductor and cudagraphs do not produce the same trajectory, and the backend
+    is not recoverable from the wrapper, so it has to be declared.
+    """
+    model, train_ds, val_ds, spec, model_cfg, train_cfg = _tiny_setup()
+    model.backbone = torch.compile(model.backbone)
+    with pytest.raises(ValueError, match="compile_backend was not passed"):
+        _train(model, train_ds, val_ds, spec, model_cfg, train_cfg)
+
+
+def test_the_resume_signature_records_the_compile_backend(tmp_path):
+    """An eager run must not resume from a compiled checkpoint, or the reverse."""
+    parts = _tiny_setup()
+    ckpt = tmp_path / "ckpt"
+    _train(*parts, checkpoint_path=ckpt)
+    saved = torch.load(ckpt / "latest.pt", map_location="cpu",
+                       weights_only=False)
+    assert "compile_backend" in saved["signature"]
+    assert saved["signature"]["compile_backend"] is None

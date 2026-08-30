@@ -63,6 +63,7 @@ import random
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
+import numpy as np
 import torch
 
 __all__ = ["Memory", "ChaseInstance", "ChaseSpec", "generate_memory",
@@ -224,47 +225,93 @@ class ChaseSpec:
 def encode_batch(instances: Sequence[ChaseInstance], spec: ChaseSpec, *,
                  num_silent: int = 0, silent_kind: Optional[str] = None,
                  neutral_vector: Optional[torch.Tensor] = None):
-    """Return ``(inputs [B, T, d_input], answers [B])``."""
+    """Return ``(inputs [B, T, d_input], answers [B])``.
+
+    Written as scatters rather than as a loop of scalar assignments. The loop
+    form cost one Python-level ``__setitem__`` per set bit -- ``M*(2+K) + 1 +
+    Dmax + N + 1`` of them per instance, or 2.6 million for a 19,968-instance
+    training bank at ``M=16, K=4, Dmax=32``, and 15.5 s of a run whose training
+    phase is 33 s once the backbone is compiled.
+
+    Every write is ``= 1.0`` into a zeroed tensor, so the operation is a set
+    union rather than an accumulation: repeated indices are idempotent and the
+    scatter reproduces the loop bit for bit. ``encoding_matches_reference`` in
+    the test module asserts exactly that across the arms and the padding cases,
+    because "faster and equal" is the only version of this change worth having.
+    """
     if num_silent and silent_kind is None:
         raise ValueError("num_silent > 0 requires a silent_kind")
     if silent_kind is not None and silent_kind not in ("scratchpad", "neutral", "zero"):
         raise ValueError(f"bad silent_kind: {silent_kind}")
-
+    B = len(instances)
+    M, K, Dmax = spec.num_nodes, spec.num_maps, spec.max_depth
     T = spec.seq_len(num_silent)
-    x = torch.zeros((len(instances), T, spec.d_input), dtype=torch.float32)
-    for b, inst in enumerate(instances):
-        pos = 0
-        for node in range(spec.num_nodes):                    # the memory
-            x[b, pos, spec.off_kind + _KIND_INDEX["memory"]] = 1.0
-            x[b, pos, spec.off_node + node] = 1.0
-            for k in range(spec.num_maps):
-                x[b, pos, spec.off_images + k * spec.num_nodes + inst.memory.maps[k][node]] = 1.0
-            pos += 1
+    x = torch.zeros((B, T, spec.d_input), dtype=torch.float32)
+    if B == 0:
+        return x, torch.zeros((0,), dtype=torch.long)
 
-        # start node AND every selector, in ONE position - this is what defers
-        # the computation past ingestion
-        x[b, pos, spec.off_kind + _KIND_INDEX["query"]] = 1.0
-        x[b, pos, spec.off_start + inst.start] = 1.0
-        for slot in range(spec.max_depth):
-            sel = inst.selectors[slot] if slot < len(inst.selectors) else IDENTITY_SELECTOR
-            col = spec.num_maps if sel == IDENTITY_SELECTOR else sel
-            x[b, pos, spec.off_selectors + slot * (spec.num_maps + 1) + col] = 1.0
-        pos += 1
+    # Checked here rather than at the top of the function: the original raised
+    # from inside the per-row loop, so an empty batch never reached it and
+    # returned empty tensors even with no neutral vector. Hoisting the guard
+    # above the early return would turn that into a ValueError.
+    if silent_kind == "neutral" and num_silent and neutral_vector is None:
+        raise ValueError("neutral arm requires a neutral_vector")
 
-        for _ in range(num_silent):
-            if silent_kind == "zero":
-                pass                                          # no input signal at all
-            elif silent_kind == "neutral":
-                if neutral_vector is None:
-                    raise ValueError("neutral arm requires a neutral_vector")
-                x[b, pos] = neutral_vector
-            else:
-                x[b, pos, spec.off_kind + _KIND_INDEX["scratchpad"]] = 1.0
-            pos += 1
+    node = torch.arange(M)
+    query_pos = M
+    probe_pos = T - 1
 
-        x[b, pos, spec.off_kind + _KIND_INDEX["probe"]] = 1.0
-        pos += 1
-        assert pos == T, (pos, T)
+    # --- memory rows, positions 0..M-1 ---------------------------------------
+    x[:, :M, spec.off_kind + _KIND_INDEX["memory"]] = 1.0
+    x[:, node, spec.off_node + node] = 1.0                     # node identity
+
+    # maps[b, k, n] is the image of node n under map k. The column for that
+    # image is off_images + k*M + image, and the row is n.
+    # Through numpy: building a [B, K, M] tensor from nested Python tuples is
+    # markedly slower via torch.tensor than via np.array plus from_numpy.
+    maps = torch.from_numpy(
+        np.array([inst.memory.maps for inst in instances], dtype=np.int64))
+    image_col = spec.off_images + (torch.arange(K).view(1, K, 1) * M) + maps
+    x[torch.arange(B).view(B, 1, 1), node.view(1, 1, M), image_col] = 1.0
+
+    # --- query row: the start node and the whole selector word, one position --
+    x[:, query_pos, spec.off_kind + _KIND_INDEX["query"]] = 1.0
+    starts = torch.tensor([inst.start for inst in instances], dtype=torch.long)
+    x[torch.arange(B), query_pos, spec.off_start + starts] = 1.0
+
+    # Slots past the instance's depth hold IDENTITY_SELECTOR, which occupies
+    # column K of its slot -- so K is the fill value, not a sentinel to replace
+    # later. Selectors beyond Dmax are dropped, matching the loop's fixed range.
+    words = [inst.selectors[:Dmax] for inst in instances]
+    sel_np = np.full((B, Dmax), K, dtype=np.int64)
+    widths = {len(w) for w in words}
+    if len(widths) == 1:
+        # Every instance in a cell shares one depth, so the whole block lands in
+        # a single array construction. The ragged branch below is the general
+        # case and stays correct, it is just not the one that runs.
+        width = widths.pop()
+        if width:
+            sel_np[:, :width] = np.array(words, dtype=np.int64)
+    else:
+        for b, word in enumerate(words):
+            if word:
+                sel_np[b, :len(word)] = word
+    sel = torch.from_numpy(sel_np)
+    sel[sel == IDENTITY_SELECTOR] = K
+    slot_col = spec.off_selectors + torch.arange(Dmax) * (K + 1) + sel
+    x[torch.arange(B).view(B, 1), query_pos, slot_col] = 1.0
+
+    # --- silent rows, then the probe ------------------------------------------
+    if num_silent:
+        rows = slice(query_pos + 1, query_pos + 1 + num_silent)
+        if silent_kind == "neutral":
+            x[:, rows, :] = neutral_vector
+        elif silent_kind == "scratchpad":
+            x[:, rows, spec.off_kind + _KIND_INDEX["scratchpad"]] = 1.0
+        # "zero" writes nothing at all: no input signal, which is the arm
+
+    x[:, probe_pos, spec.off_kind + _KIND_INDEX["probe"]] = 1.0
+
     answers = torch.tensor([i.answer for i in instances], dtype=torch.long)
     return x, answers
 
