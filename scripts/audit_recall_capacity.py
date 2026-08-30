@@ -60,8 +60,7 @@ import sys
 import time
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import torch
 import torch.nn.functional as F
@@ -73,6 +72,11 @@ from exp1.dataset import PointerChaseDataset, exp1_collate_fn
 from exp1.pointer_chase import ChaseSpec, generate_dataset
 from exp1.train import evaluate_vway_accuracy, forward_logits
 from rosa_compute.diagnostics import get_artifact_environment, get_git_commit
+
+# Defined after the imports, not before: ruff's E402 allows a bare sys.path
+# mutation ahead of them, but any other statement there makes every import
+# below it an error.
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def build_bank(memories, *, depth, seed, spec, queries_per_memory,
