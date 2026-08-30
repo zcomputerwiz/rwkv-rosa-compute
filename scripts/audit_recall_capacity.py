@@ -98,7 +98,24 @@ def run_cell(*, lr, d_model, layers, memories, args, spec, val_ds, device):
 
     accs, losses = [], []
     started = time.time()
-    for _ in range(args.epochs):
+    for epoch in range(args.epochs):
+        if args.fresh_memories_per_epoch and epoch:
+            # A new bank every epoch, so no memory is ever seen twice and
+            # memorising is impossible by construction. Whatever accuracy
+            # survives that is in-context retrieval, which is the quantity gate
+            # 0a is meant to be measuring. Generation costs about 46 us per
+            # instance -- 0.8 s for a 4,992-memory bank -- against an epoch of
+            # roughly 108 s, so the effective bank is unbounded for ~1% more
+            # wall clock and no extra memory.
+            train_ds = build_bank(memories, depth=args.depth,
+                                  seed=args.train_data_seed + epoch, spec=spec,
+                                  queries_per_memory=args.queries_per_memory,
+                                  num_nodes=args.num_nodes,
+                                  num_maps=args.num_maps)
+            loader = DataLoader(train_ds, batch_size=args.batch_size,
+                                shuffle=True, generator=gen, drop_last=True,
+                                collate_fn=exp1_collate_fn, num_workers=0,
+                                pin_memory=True)
         model.train()
         total = torch.zeros((), device=device, dtype=torch.float64)
         for batch in loader:
@@ -115,7 +132,10 @@ def run_cell(*, lr, d_model, layers, memories, args, spec, val_ds, device):
         accs.append(evaluate_vway_accuracy(model, val_ds, tcfg, device, None))
 
     train_acc = evaluate_vway_accuracy(model, train_probe, tcfg, device, None)
+    distinct = memories * (args.epochs if args.fresh_memories_per_epoch else 1)
     result = dict(lr=lr, d_model=d_model, layers=layers, memories=memories,
+                  fresh_per_epoch=args.fresh_memories_per_epoch,
+                  distinct_memories_seen=distinct,
                   params=params, instances=len(train_ds),
                   held_out_best=max(accs), held_out_final=accs[-1],
                   train_acc=train_acc, gap=train_acc - max(accs),
@@ -139,6 +159,13 @@ def main(argv=None) -> int:
                    help="distinct memories in the training bank; the axis that "
                         "decides whether memorising is cheaper than retrieving")
     p.add_argument("--val-memories", type=int, default=448)
+    p.add_argument("--fresh-memories-per-epoch", action="store_true",
+                   help="draw a new training bank every epoch, so no memory is "
+                        "seen twice and memorising is impossible. The train "
+                        "probe still scores epoch 0's bank, so a high train "
+                        "accuracy under this flag means retention of a bank the "
+                        "model has not seen for many epochs, not memorisation "
+                        "of the current one")
     p.add_argument("--depth", type=int, default=1)
     p.add_argument("--num-nodes", type=int, default=16)
     p.add_argument("--num-maps", type=int, default=4)
