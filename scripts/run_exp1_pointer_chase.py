@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from exp1.dataset import PointerChaseDataset
 from exp1.pointer_chase import ChaseSpec, generate_dataset, make_neutral_vector
 from exp1.train import evaluate_vway_accuracy, train_model
 from exp1.workspace import Workspace
+from rosa_compute.diagnostics import get_artifact_environment
 
 
 def main(argv=None) -> int:
@@ -70,6 +72,33 @@ def main(argv=None) -> int:
     parser.add_argument("--rwkv-kernel", type=str, default=None,
                         choices=["reference", "cuda"],
                         help="defaults to reference on CPU, cuda otherwise")
+
+    # The reference recurrence is a Python loop over timesteps, so a step is
+    # dominated by kernel-launch overhead rather than by arithmetic: measured
+    # 848 instances/s eager against 2947 compiled and 8177 under cudagraphs, at
+    # a batch size the GPU could serve four times over. Opt-in, because a gate
+    # should not silently change its execution path.
+    #
+    # Scope of the equivalence claim, stated precisely because it is easy to
+    # overstate: only `model.backbone` is compiled. The head, the loss, gradient
+    # clipping, and the optimizer step all remain eager, so this is not a
+    # captured training step. What was measured is that the per-epoch mean loss
+    # and validation accuracy matched eager exactly for 15 epochs at D=1, N=0,
+    # batch 64, fp32. Parameters, gradients and per-step losses were not
+    # compared, and `set_seed` does not enable deterministic algorithms -- so
+    # this is strong evidence of an unperturbed trajectory at this scale, not a
+    # proof of bitwise equivalence in general.
+    parser.add_argument("--compile", action="store_true",
+                        help="torch.compile the backbone; see --help note on batch divisibility")
+    # Default resolved after parsing rather than here, so that passing a backend
+    # without --compile is a visible error instead of a silently ignored flag.
+    parser.add_argument("--compile-backend", type=str, default=None,
+                        choices=["inductor", "cudagraphs"],
+                        help="default cudagraphs: it captures the backbone's "
+                             "forward as a graph, and reproduced eager's "
+                             "per-epoch loss and accuracy exactly over 15 "
+                             "epochs where inductor drifted ~1.2e-3. Requires "
+                             "every batch to be the same shape")
 
     # Deliberate memorization: evaluate on the training set itself. The bank
     # from --val-data-seed is still generated and scored once after training,
@@ -145,6 +174,59 @@ def main(argv=None) -> int:
         compact_reduced_features=False
     ).to(device)
 
+    if args.compile_backend is not None and not args.compile:
+        parser.error("--compile-backend requires --compile")
+    compile_backend = (args.compile_backend or "cudagraphs") if args.compile else None
+
+    if args.compile:
+        # A ragged final batch is another input shape. Under inductor that costs
+        # a second compile -- measured at 161 s against 11 s for the first, more
+        # than compiling saves on a short run. Under cudagraphs it is fatal: the
+        # replay copies into fixed-size buffers and raises
+        #   RuntimeError: The size of tensor a (64) must match ... (16)
+        # partway through the first evaluation. So it is refused rather than
+        # warned about for that backend, before any training is done.
+        #
+        # Both banks matter. Checking only the training bank is what made a
+        # first attempt here measure 1.02x instead of 3.1x, and the gate's own
+        # ratified 5000/500 is ragged in both.
+        #
+        # Sizes count memories while the batch counts instances, so the aligned
+        # memory counts are the multiples of
+        # batch / gcd(batch, queries_per_memory), not the instance count rounded
+        # down. At memories=5, q=4, batch=6 the naive rounding suggests 4, whose
+        # 16 instances are still ragged modulo 6; the answer is 3.
+        step = args.batch_size // math.gcd(args.batch_size, args.queries_per_memory)
+        ragged = []
+        for name, memories in (("train", args.train_size), ("val", args.val_size)):
+            instances = memories * args.queries_per_memory
+            remainder = instances % args.batch_size
+            if not remainder:
+                continue
+            lower = memories - memories % step
+            fix = (f"--{name}-size {lower}" if lower
+                   else f"--{name}-size {step} or larger")
+            ragged.append(f"{instances} {name} instances is not a multiple of "
+                          f"batch {args.batch_size} (remainder {remainder}); "
+                          f"aligned sizes are multiples of {step}, so use {fix}")
+        if ragged:
+            detail = "; ".join(ragged)
+            if compile_backend == "cudagraphs":
+                parser.error(
+                    f"--compile-backend cudagraphs requires every batch to have "
+                    f"the same shape, and {detail}. Align the banks, or pass "
+                    f"--compile-backend inductor, which tolerates a ragged batch "
+                    f"at the cost of an extra compile."
+                )
+            print(f"warning: {detail}. The ragged final batch forces an extra "
+                  f"compile that can cost more than compiling saves.")
+
+        # Compiled on the backbone rather than on forward_logits, because
+        # training and evaluation both reach the model through it. Compiling one
+        # call site would run a compiled architecture and score an eager one --
+        # the same train/eval split forward_logits exists to prevent.
+        model.backbone = torch.compile(model.backbone, backend=compile_backend)
+
     train_cfg = TrainConfig(
         seed=model_seed,
         batch_size=args.batch_size,
@@ -185,6 +267,7 @@ def main(argv=None) -> int:
         train_size=args.train_size,
         val_size=args.val_size,
         overfit_train_as_val=args.overfit_train_as_val,
+        compile_backend=compile_backend,
     )
 
     # The gates are fixed-budget with no checkpoint selection, so the outcome is
@@ -204,9 +287,17 @@ def main(argv=None) -> int:
     if holdout_diagnostic is not None:
         print(f"  held-out diagnostic (non-gating): {holdout_diagnostic:.4f}")
 
+    # Recorded in the report itself, not only in the run_with_provenance
+    # wrapper, so a report is self-describing when read on its own. It matters
+    # here specifically because --compile changes the execution path, and a
+    # claim about a compiled run is not interpretable without knowing which
+    # torch, CUDA and GPU produced it.
+    environment = get_artifact_environment()
+
     report = {
         "eval_target": eval_target,
         "final_accuracy": final_accuracy,
+        "environment": environment,
         "epoch_accuracies": epoch_accuracies,
         "holdout_diagnostic_accuracy": holdout_diagnostic,
         "history": history,
@@ -218,6 +309,8 @@ def main(argv=None) -> int:
             "layers": args.layers,
             "precision": args.precision,
             "rwkv_kernel": rwkv_kernel,
+            "compile": args.compile,
+            "compile_backend": compile_backend,
             "device": str(device),
             "batch_size": args.batch_size,
             "epochs": args.epochs,

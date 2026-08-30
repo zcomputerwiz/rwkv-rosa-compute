@@ -249,3 +249,177 @@ def test_expected_fixed_points_counts_only_divisors_at_most_M():
             if unrestricted != restricted:
                 assert measured != unrestricted, (
                     "the unrestricted divisor count should be wrong here")
+
+
+def _encode_batch_reference(instances, spec, *, num_silent=0, silent_kind=None,
+                            neutral_vector=None):
+    """The pre-vectorization encoder, kept verbatim as an oracle.
+
+    encode_batch was rewritten from a loop of scalar assignments into scatters
+    for speed. That is only worth having if the output is unchanged, and the
+    claim is easy to get wrong in the padding and arm cases rather than in the
+    common one, so the original stays here and the two are compared directly.
+    """
+    from exp1.pointer_chase import _KIND_INDEX, IDENTITY_SELECTOR
+
+    T = spec.seq_len(num_silent)
+    x = torch.zeros((len(instances), T, spec.d_input), dtype=torch.float32)
+    for b, inst in enumerate(instances):
+        pos = 0
+        for node in range(spec.num_nodes):
+            x[b, pos, spec.off_kind + _KIND_INDEX["memory"]] = 1.0
+            x[b, pos, spec.off_node + node] = 1.0
+            for k in range(spec.num_maps):
+                x[b, pos, spec.off_images + k * spec.num_nodes
+                  + inst.memory.maps[k][node]] = 1.0
+            pos += 1
+
+        x[b, pos, spec.off_kind + _KIND_INDEX["query"]] = 1.0
+        x[b, pos, spec.off_start + inst.start] = 1.0
+        for slot in range(spec.max_depth):
+            sel = (inst.selectors[slot] if slot < len(inst.selectors)
+                   else IDENTITY_SELECTOR)
+            col = spec.num_maps if sel == IDENTITY_SELECTOR else sel
+            x[b, pos, spec.off_selectors + slot * (spec.num_maps + 1) + col] = 1.0
+        pos += 1
+
+        for _ in range(num_silent):
+            if silent_kind == "zero":
+                pass
+            elif silent_kind == "neutral":
+                x[b, pos] = neutral_vector
+            else:
+                x[b, pos, spec.off_kind + _KIND_INDEX["scratchpad"]] = 1.0
+            pos += 1
+
+        x[b, pos, spec.off_kind + _KIND_INDEX["probe"]] = 1.0
+        pos += 1
+        assert pos == T, (pos, T)
+    answers = torch.tensor([i.answer for i in instances], dtype=torch.long)
+    return x, answers
+
+
+@pytest.mark.parametrize("num_silent,silent_kind", [
+    (0, None),
+    (4, "scratchpad"),
+    (4, "neutral"),
+    (4, "zero"),
+    (1, "scratchpad"),
+])
+@pytest.mark.parametrize("depth", [1, 4, 32])
+def test_vectorized_encoding_matches_the_reference_loop(num_silent, silent_kind,
+                                                       depth):
+    """Bit-for-bit, across every arm and both ends of the selector padding.
+
+    depth=32 fills every selector slot and depth=1 leaves 31 of them holding
+    the identity, which is where an off-by-one in the padding would hide.
+    """
+    spec = ChaseSpec(num_nodes=M, num_maps=K, max_depth=32)
+    neutral = make_neutral_vector(spec) if silent_kind == "neutral" else None
+    instances = generate_dataset(12, queries_per_memory=3, depth=depth, seed=99,
+                                 num_nodes=M, num_maps=K)
+
+    got_x, got_y = encode_batch(instances, spec, num_silent=num_silent,
+                                silent_kind=silent_kind, neutral_vector=neutral)
+    want_x, want_y = _encode_batch_reference(instances, spec,
+                                             num_silent=num_silent,
+                                             silent_kind=silent_kind,
+                                             neutral_vector=neutral)
+    assert torch.equal(got_x, want_x)
+    assert torch.equal(got_y, want_y)
+
+
+def test_vectorized_encoding_handles_a_non_square_spec():
+    """M != K != Dmax, so a transposed or broadcast index cannot pass silently."""
+    spec = ChaseSpec(num_nodes=7, num_maps=3, max_depth=5)
+    instances = generate_dataset(6, queries_per_memory=2, depth=2, seed=5,
+                                 num_nodes=7, num_maps=3)
+    got, _ = encode_batch(instances, spec)
+    want, _ = _encode_batch_reference(instances, spec)
+    assert torch.equal(got, want)
+
+
+def test_encoding_an_empty_batch_keeps_the_declared_shape():
+    spec = ChaseSpec(num_nodes=M, num_maps=K, max_depth=32)
+    x, y = encode_batch([], spec, num_silent=3, silent_kind="scratchpad")
+    assert x.shape == (0, spec.seq_len(3), spec.d_input)
+    assert y.shape == (0,)
+    assert y.dtype == torch.long
+
+
+def test_encoding_matches_the_oracle_on_ragged_depths():
+    """Instances of differing depth in one batch take the fallback branch.
+
+    The vectorized encoder has a fast path for the case where every instance
+    shares a depth, which is what a training cell produces. The general branch
+    is the one that must still be right, so it is exercised directly.
+    """
+    spec = ChaseSpec(num_nodes=M, num_maps=K, max_depth=32)
+    mixed = []
+    for depth in (1, 3, 7, 32):
+        mixed.extend(generate_dataset(2, queries_per_memory=2, depth=depth,
+                                      seed=depth, num_nodes=M, num_maps=K))
+    assert len({len(i.selectors) for i in mixed}) == 4, "batch must be ragged"
+
+    got, gy = encode_batch(mixed, spec)
+    want, wy = _encode_batch_reference(mixed, spec)
+    assert torch.equal(got, want)
+    assert torch.equal(gy, wy)
+
+
+def test_encoding_matches_the_oracle_for_an_identity_selector_inside_a_word():
+    """IDENTITY_SELECTOR is padding, but nothing stops it appearing mid-word.
+
+    The reference maps it to column K wherever it occurs, not only past the
+    instance's depth, so the vectorized form has to do the same rather than
+    only prefilling unused slots.
+    """
+    from exp1.pointer_chase import IDENTITY_SELECTOR, ChaseInstance
+
+    spec = ChaseSpec(num_nodes=M, num_maps=K, max_depth=32)
+    memory = generate_memory(random.Random(3), num_nodes=M, num_maps=K)
+    word = (0, IDENTITY_SELECTOR, 2, IDENTITY_SELECTOR, 1)
+    inst = ChaseInstance(memory=memory, start=5, selectors=word,
+                         answer=execute(memory, 5, tuple(s for s in word
+                                                         if s != IDENTITY_SELECTOR)))
+
+    got, _ = encode_batch([inst], spec)
+    want, _ = _encode_batch_reference([inst], spec)
+    assert torch.equal(got, want)
+
+
+def test_encoding_matches_the_oracle_when_the_word_exceeds_max_depth():
+    """The reference loops over range(max_depth), so extra selectors are dropped."""
+    from exp1.pointer_chase import ChaseInstance
+
+    spec = ChaseSpec(num_nodes=M, num_maps=K, max_depth=4)
+    memory = generate_memory(random.Random(11), num_nodes=M, num_maps=K)
+    word = (0, 1, 2, 3, 1, 0, 2)                      # 7 selectors, max_depth 4
+    inst = ChaseInstance(memory=memory, start=2, selectors=word,
+                         answer=execute(memory, 2, word))
+
+    got, _ = encode_batch([inst], spec)
+    want, _ = _encode_batch_reference([inst], spec)
+    assert torch.equal(got, want)
+
+
+def test_an_empty_neutral_batch_returns_empty_rather_than_raising():
+    """The reference raised from inside the row loop, which an empty batch skips.
+
+    Hoisting that guard above the empty-batch return would turn a call that
+    previously produced empty tensors into a ValueError.
+    """
+    spec = ChaseSpec(num_nodes=M, num_maps=K, max_depth=32)
+    x, y = encode_batch([], spec, num_silent=2, silent_kind="neutral",
+                        neutral_vector=None)
+    assert x.shape == (0, spec.seq_len(2), spec.d_input)
+    assert y.shape == (0,)
+
+
+def test_a_nonempty_neutral_batch_still_requires_a_vector():
+    spec = ChaseSpec(num_nodes=M, num_maps=K, max_depth=32)
+    instances = generate_dataset(2, queries_per_memory=1, depth=1, seed=1,
+                                 num_nodes=M, num_maps=K)
+    with pytest.raises(ValueError, match="neutral"):
+        encode_batch(instances, spec, num_silent=2, silent_kind="neutral",
+                     neutral_vector=None)

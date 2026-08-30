@@ -71,7 +71,7 @@ def evaluate_vway_accuracy(
     model.eval()
     if workspace is not None:
         workspace.to(device).eval()
-    correct = 0
+    correct = torch.zeros((), device=device, dtype=torch.long)
     total = 0
 
     loader = _create_loader(
@@ -94,10 +94,19 @@ def evaluate_vway_accuracy(
                 node_logits = logits[:, :num_nodes]
                 predictions = node_logits.argmax(dim=-1)
 
-                correct += predictions.eq(targets).sum().item()
+                # Counted on the device for the same reason the training loop
+                # accumulates its loss there: reading back per batch is a host
+                # sync. Worth 1.18x of the evaluation pass once the backbone is
+                # compiled, and nothing at all before that.
+                correct += predictions.eq(targets).sum()
                 total += targets.shape[0]
 
-    return correct / total if total > 0 else 0.0
+    # Divided in Python, not on the device. A tensor divide would be float32 and
+    # would change the stored number: at correct=1, total=20000 that is
+    # 0.00004999999873689376 against 0.00005, which rounds the other way at four
+    # decimals. The count is exact in int64, so one readback and an integer
+    # divide reproduce the original float64 result exactly.
+    return correct.item() / total if total > 0 else 0.0
 
 
 def train_model(
@@ -130,6 +139,11 @@ def train_model(
     silent_kind: Optional[str] = None,
     queries_per_memory: int = 4,
     overfit_train_as_val: bool = False,
+    # Not defaulted-and-forgotten like the fields above: whether the backbone is
+    # compiled is read off the model, and this only names which backend, which
+    # cannot be recovered by introspection. Passing it while the model is eager,
+    # or compiling without passing it, is an error rather than a silent gap.
+    compile_backend: Optional[str] = None,
 ) -> Tuple[torch.nn.Module, Dict[str, Any]]:
     """Train loop specifically for the Experiment 1 pointer-chase task."""
     set_seed(train_cfg.seed)
@@ -180,9 +194,49 @@ def train_model(
     # another card.
     # out_dir and checkpoint_path are not compared. They do not enter the
     # computation.
+    # Read off the model, not taken on trust: torch.compile wraps the module and
+    # exposes the original as _orig_mod. Crossing the eager/compiled boundary on
+    # a resume changes both the trajectory -- the inductor backend drifts from
+    # eager by ~1e-3 over 15 epochs -- and the state_dict key layout, which
+    # would otherwise surface as a confusing key mismatch instead of a signature
+    # rejection. The backend name is not introspectable, so it is passed.
+    #
+    # This checks the backbone only, which is the one place the runner compiles.
+    # A caller that compiled something else would not be caught here.
+    backbone_compiled = hasattr(getattr(model, "backbone", None), "_orig_mod")
+    if backbone_compiled and compile_backend is None:
+        raise ValueError(
+            "model.backbone is compiled but compile_backend was not passed; "
+            "the resume signature cannot tell inductor from cudagraphs without "
+            "it, and they do not produce the same trajectory"
+        )
+    if compile_backend is not None and not backbone_compiled:
+        raise ValueError(
+            f"compile_backend={compile_backend!r} was passed but model.backbone "
+            f"is not compiled"
+        )
+
+    # Checked here as well as in the runner, because the runner is not the only
+    # caller. cudagraphs replays into fixed-size buffers, so a ragged final
+    # batch raises partway through the first evaluation -- after training has
+    # run. Failing before the first step turns a wasted run into a message.
+    if compile_backend == "cudagraphs":
+        ragged = [f"{len(ds)} {name} instances"
+                  for name, ds in (("train", train_dataset),
+                                   ("val", val_dataset))
+                  if len(ds) % train_cfg.batch_size]
+        if ragged:
+            raise ValueError(
+                f"compile_backend='cudagraphs' requires every batch to have the "
+                f"same shape, but {' and '.join(ragged)} are not multiples of "
+                f"batch_size={train_cfg.batch_size}. Align the banks, or use "
+                f"the inductor backend, which tolerates a ragged batch."
+            )
+
     signature = {
         "task": "exp1_pointer_chase",
         "workspace": workspace_signature,
+        "compile_backend": compile_backend,
         "depth": depth,
         "num_nodes": spec.num_nodes,
         "num_maps": spec.num_maps,
@@ -212,6 +266,11 @@ def train_model(
     best_val_acc = 0.0
     resume_samples = 0
     resume_epoch_seed = None
+    # The running loss of a partially completed epoch. Without it a resumed
+    # epoch reports the mean of only the batches that ran after the resume,
+    # which is silently wrong rather than obviously wrong.
+    resume_loss_sum = 0.0
+    resume_batches = 0
 
     if resume_from_checkpoint:
         prog_state, init_state = _load_training_checkpoint_into_state(
@@ -230,6 +289,11 @@ def train_model(
             start_epoch = partial["epoch"]
             resume_samples = partial["samples_consumed"]
             resume_epoch_seed = partial["epoch_seed"]
+            # Absent in checkpoints written before this was carried; treating a
+            # missing value as zero reproduces the old behaviour for those
+            # rather than failing to load them.
+            resume_loss_sum = partial.get("loss_sum", 0.0)
+            resume_batches = partial.get("batches_done", 0)
             optimizer_steps = prog_state.get("optimizer_steps", 0)
             comp = prog_state.get("completed", {})
             best_val_acc = comp.get("best_val_acc", 0.0)
@@ -252,7 +316,22 @@ def train_model(
         model.train()
         if workspace is not None:
             workspace.train()
-        total_loss = 0.0
+        # Accumulated on the device. Reading the loss back every step is a hard
+        # host sync, which stops the CPU from running ahead to queue the next
+        # step's kernel launches.
+        #
+        # float64, not float32. The original summed loss.item() in Python, which
+        # is binary64; a float32 running sum drifts by roughly (n-1)*2^-24 of the
+        # mean, about 5e-5 over the 312 batches of a gate epoch -- enough to move
+        # the fourth decimal of a printed and stored epoch loss. The accumulator
+        # is one scalar per step, so the wider dtype costs nothing measurable
+        # even where float64 throughput is poor.
+        total_loss = torch.zeros((), device=device, dtype=torch.float64)
+        # Seeded from the partial epoch on the first pass after a resume, and
+        # zero on every epoch after that.
+        total_loss += resume_loss_sum
+        batches_done = resume_batches
+        resume_loss_sum, resume_batches = 0.0, 0
 
         if resume_samples > 0:
             epoch_seed = resume_epoch_seed
@@ -298,7 +377,8 @@ def train_model(
             if lr_scheduler is not None:
                 lr_scheduler.step()
 
-            total_loss += loss.item()
+            total_loss += loss.detach().double()
+            batches_done += 1
             optimizer_steps += 1
             resume_samples += batch_size
 
@@ -318,6 +398,8 @@ def train_model(
                             "epoch": epoch,
                             "samples_consumed": resume_samples,
                             "epoch_seed": epoch_seed,
+                            "loss_sum": float(total_loss.item()),
+                            "batches_done": batches_done,
                         },
                     )
                     step_checkpoint = checkpoint_path / f"step_{optimizer_steps:06d}.pt"
@@ -333,7 +415,10 @@ def train_model(
                     )
                     atomic_copy(step_checkpoint, checkpoint_path / "latest.pt")
 
-        epoch_loss = total_loss / len(loader)
+        # Divided by the batches actually accumulated, not len(loader): after a
+        # mid-epoch resume the loader yields only the remainder of the epoch,
+        # while total_loss covers the whole of it.
+        epoch_loss = (total_loss / max(batches_done, 1)).item()  # one sync/epoch
         epoch_train_losses.append(epoch_loss)
 
         val_acc = evaluate_vway_accuracy(model, val_dataset, train_cfg, device, workspace)
