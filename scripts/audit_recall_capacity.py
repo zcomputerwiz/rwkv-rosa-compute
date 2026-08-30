@@ -115,7 +115,15 @@ def run_cell(*, lr, d_model, layers, memories, num_nodes, num_maps, args,
 
     opt = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95),
                             weight_decay=args.weight_decay)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
+    # Cosine stays the default so previously published artifacts remain
+    # reproducible, but it cannot be the only option: T_max=epochs anneals the
+    # rate to approximately zero by the final epoch, so a long run spends its
+    # tail frozen. "More steps did not help" is not a claim that survives that
+    # -- the extra steps were taken at a vanishing learning rate. Constant is
+    # what tests a budget, and it is also the regime delayed generalisation
+    # after memorisation would need.
+    sched = (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
+             if args.lr_schedule == "cosine" else None)
     tcfg = TrainConfig(seed=args.model_seed, batch_size=args.batch_size,
                        precision=args.precision, epochs=args.epochs)
     gen = torch.Generator().manual_seed(args.shuffle_seed)
@@ -155,7 +163,8 @@ def run_cell(*, lr, d_model, layers, memories, num_nodes, num_maps, args,
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             opt.step()
             total += loss.detach().double()
-        sched.step()
+        if sched is not None:
+            sched.step()
         losses.append((total / len(loader)).item())
         accs.append(evaluate_vway_accuracy(model, val_ds, tcfg, device, None))
 
@@ -215,6 +224,12 @@ def main(argv=None) -> int:
                    choices=["fp32", "bf16", "fp16"])
     p.add_argument("--rwkv-kernel", type=str, default="reference",
                    choices=["reference", "cuda"])
+    p.add_argument("--lr-schedule", type=str, default="cosine",
+                   choices=["cosine", "constant"],
+                   help="cosine anneals to ~0 by the final epoch, so a long "
+                        "run's tail is frozen and 'more steps did not help' "
+                        "does not follow from it. Use constant to test a "
+                        "budget, or to leave room for delayed generalisation")
     p.add_argument("--weight-decay", type=float, default=0.01)
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--model-seed", type=int, default=1001)
