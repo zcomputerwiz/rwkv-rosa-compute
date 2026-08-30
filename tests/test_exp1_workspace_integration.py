@@ -92,9 +92,14 @@ def test_workspace_receives_gradient_through_the_forward():
     assert any(grads.values()), f"no workspace parameter received gradient: {grads}"
 
 
-def test_evaluation_uses_the_same_workspace_as_training():
+def test_evaluation_passes_workspace_to_forward_and_changes_predictions():
     """A train/eval architecture mismatch would not raise; it would just report
-    a different number. Assert the evaluation path actually consumes it."""
+    a different number. Assert the evaluation path actually consumes it, and
+    that changing the workspace changes the predictions."""
+    import unittest.mock
+
+    import exp1.train
+
     model, spec = _model()
     data = generate_dataset(8, 2, depth=2, seed=3, num_nodes=V, num_maps=K_MAPS)
     ds = PointerChaseDataset(data, spec)
@@ -102,23 +107,39 @@ def test_evaluation_uses_the_same_workspace_as_training():
     dev = torch.device("cpu")
 
     torch.manual_seed(0)
-    ws = Workspace(D_MODEL, num_slots=8, num_steps=4)
-    with_ws = evaluate_vway_accuracy(model, ds, cfg, dev, ws)
-    without = evaluate_vway_accuracy(model, ds, cfg, dev, None)
+    ws1 = Workspace(D_MODEL, num_slots=8, num_steps=4)
+    torch.manual_seed(1)
+    ws2 = Workspace(D_MODEL, num_slots=8, num_steps=4)
 
-    # Perturb the workspace; if evaluation consumes it, the score may move.
-    with torch.no_grad():
-        for p in ws.parameters():
-            p.add_(torch.randn_like(p) * 5.0)
-    perturbed = evaluate_vway_accuracy(model, ds, cfg, dev, ws)
+    orig_forward_logits = exp1.train.forward_logits
 
-    logits_ws = forward_logits(model, torch.stack([ds[i]["input_tuples"] for i in range(8)]), ws)
-    logits_no = forward_logits(model, torch.stack([ds[i]["input_tuples"] for i in range(8)]), None)
-    assert not torch.allclose(logits_ws, logits_no), (
-        "forward_logits ignores the workspace entirely")
-    assert isinstance(with_ws, float) and isinstance(without, float)
-    assert isinstance(perturbed, float)
+    def get_predictions_and_workspaces(ws):
+        captured_workspaces = []
+        captured_preds = []
 
+        def spy_forward(m, inputs, workspace=None):
+            captured_workspaces.append(workspace)
+            logits = orig_forward_logits(m, inputs, workspace)
+            # Logits shape: (batch_size, seq_len, vocab_size)
+            # For evaluation, we only care about the first V tokens
+            preds = logits[:, :spec.num_nodes].argmax(dim=-1)
+            captured_preds.append(preds)
+            return logits
+
+        with unittest.mock.patch("exp1.train.forward_logits", side_effect=spy_forward):
+            evaluate_vway_accuracy(model, ds, cfg, dev, ws)
+
+        return torch.cat(captured_preds), captured_workspaces
+
+    preds1, workspaces1 = get_predictions_and_workspaces(ws1)
+
+    # Assert evaluate_vway_accuracy invoked THAT exact object
+    assert all(w is ws1 for w in workspaces1), "evaluate_vway_accuracy bypassed the workspace"
+
+    preds2, _ = get_predictions_and_workspaces(ws2)
+
+    # Assert behavioural change
+    assert not torch.equal(preds1, preds2), "predictions were identical for different workspaces"
 
 @pytest.mark.parametrize("num_slots,num_steps", CELLS)
 def test_untrained_model_scores_near_chance_in_every_cell(num_slots, num_steps):
