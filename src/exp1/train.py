@@ -200,6 +200,9 @@ def train_model(
     # eager by ~1e-3 over 15 epochs -- and the state_dict key layout, which
     # would otherwise surface as a confusing key mismatch instead of a signature
     # rejection. The backend name is not introspectable, so it is passed.
+    #
+    # This checks the backbone only, which is the one place the runner compiles.
+    # A caller that compiled something else would not be caught here.
     backbone_compiled = hasattr(getattr(model, "backbone", None), "_orig_mod")
     if backbone_compiled and compile_backend is None:
         raise ValueError(

@@ -75,19 +75,28 @@ def main(argv=None) -> int:
     # The reference recurrence is a Python loop over timesteps, so a step is
     # dominated by kernel-launch overhead rather than by arithmetic: measured
     # 848 instances/s eager against 2947 compiled and 8177 under cudagraphs, at
-    # a batch size the GPU could serve four times over. Compiling the backbone
-    # reproduces the eager loss trajectory to 2.4e-07 absolute over 25 steps,
-    # which is inside every tolerance the CUDA parity tests already use, but it
-    # is opt-in: a gate should not silently change its execution path.
+    # a batch size the GPU could serve four times over. Opt-in, because a gate
+    # should not silently change its execution path.
+    #
+    # Scope of the equivalence claim, stated precisely because it is easy to
+    # overstate: only `model.backbone` is compiled. The head, the loss, gradient
+    # clipping, and the optimizer step all remain eager, so this is not a
+    # captured training step. What was measured is that the per-epoch mean loss
+    # and validation accuracy matched eager exactly for 15 epochs at D=1, N=0,
+    # batch 64, fp32. Parameters, gradients and per-step losses were not
+    # compared, and `set_seed` does not enable deterministic algorithms -- so
+    # this is strong evidence of an unperturbed trajectory at this scale, not a
+    # proof of bitwise equivalence in general.
     parser.add_argument("--compile", action="store_true",
                         help="torch.compile the backbone; see --help note on batch divisibility")
     # Default resolved after parsing rather than here, so that passing a backend
     # without --compile is a visible error instead of a silently ignored flag.
     parser.add_argument("--compile-backend", type=str, default=None,
                         choices=["inductor", "cudagraphs"],
-                        help="default cudagraphs: it replays the step as one "
-                             "launch and is bitwise identical to eager, where "
-                             "inductor reorders float ops and drifts. Requires "
+                        help="default cudagraphs: it captures the backbone's "
+                             "forward as a graph, and reproduced eager's "
+                             "per-epoch loss and accuracy exactly over 15 "
+                             "epochs where inductor drifted ~1.2e-3. Requires "
                              "every batch to be the same shape")
 
     # Deliberate memorization: evaluate on the training set itself. The bank
