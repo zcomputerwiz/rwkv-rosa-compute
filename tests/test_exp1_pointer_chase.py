@@ -8,9 +8,9 @@ ingestion, and the query sat after the silent positions. Each is checked here.
 import itertools
 import math
 import random
-from fractions import Fraction
 import statistics
 from collections import Counter
+from fractions import Fraction
 
 import pytest
 import torch
@@ -241,11 +241,11 @@ def test_expected_fixed_points_counts_only_divisors_at_most_M():
             total = sum(sum(1 for i, x in enumerate(_power(perm, depth)) if x == i)
                         for perm in perms)
             measured = Fraction(total, len(perms))
-            restricted = sum(1 for l in range(1, m + 1) if depth % l == 0)
+            restricted = sum(1 for length in range(1, m + 1) if depth % length == 0)
             assert measured == restricted, (
                 f"M={m} D={depth}: expected {restricted}, got {measured}")
 
-            unrestricted = sum(1 for l in range(1, depth + 1) if depth % l == 0)
+            unrestricted = sum(1 for length in range(1, depth + 1) if depth % length == 0)
             if unrestricted != restricted:
                 assert measured != unrestricted, (
                     "the unrestricted divisor count should be wrong here")
