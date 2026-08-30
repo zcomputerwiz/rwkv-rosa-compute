@@ -57,7 +57,7 @@ def test_missing_identity_group(tmp_path, capsys):
     del payload["evaluated_epoch"]
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     captured = capsys.readouterr()
     assert "the evaluated epoch" in captured.out
 
@@ -67,7 +67,7 @@ def test_missing_inputs_group(tmp_path, capsys):
     del payload["input_sha256"]
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     captured = capsys.readouterr()
     assert "missing challenge or dataset identifier AND its content hash" in captured.out
 
@@ -77,7 +77,7 @@ def test_missing_commit(tmp_path, capsys):
     del payload["provenance"]["repository_commit"]
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     captured = capsys.readouterr()
     assert "commit" in captured.out
     assert "script hash" not in captured.out
@@ -88,7 +88,7 @@ def test_missing_script_hash(tmp_path, capsys):
     del payload["provenance"]["producer_script_git_blob_sha256"]
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     captured = capsys.readouterr()
     assert "missing script hash" in captured.out
     assert "missing commit" not in captured.out
@@ -99,7 +99,7 @@ def test_short_commit_rejected(tmp_path, capsys):
     payload["provenance"]["repository_commit"] = "12345678"
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     captured = capsys.readouterr()
     assert "commit" in captured.out
 
@@ -109,7 +109,7 @@ def test_missing_checkpoint_group(tmp_path, capsys):
     del payload["checkpoint"]
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     captured = capsys.readouterr()
     assert "missing evaluated checkpoint identifier and 64-hex hash" in captured.out
 
@@ -119,7 +119,7 @@ def test_missing_settings_group(tmp_path, capsys):
     del payload["settings"]["batch_size"]
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     captured = capsys.readouterr()
     assert "missing evaluation batch size and precision" in captured.out
 
@@ -129,7 +129,7 @@ def test_missing_device_group(tmp_path, capsys):
     del payload["provenance"]["device"]["gpu_compute_capability"]
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     captured = capsys.readouterr()
     assert "missing device name and compute capability" in captured.out
 
@@ -145,7 +145,7 @@ def test_evaluation_seed_list_does_not_replace_model_seed(tmp_path, capsys):
 
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     captured = capsys.readouterr()
     assert "missing seed" in captured.out
     assert "the evaluated epoch" not in captured.out
@@ -168,7 +168,7 @@ def test_non_eval_json(tmp_path, capsys):
     fpath = tmp_path / "non_eval.json"
     write_json(fpath, {"just": "some", "data": 123})
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     captured = capsys.readouterr()
     assert "not an eval artifact" in captured.out
     assert "missing" not in captured.out
@@ -177,7 +177,7 @@ def test_malformed_json(tmp_path, capsys):
     fpath = tmp_path / "malformed.json"
     fpath.write_text("{ this is not valid json }")
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     captured = capsys.readouterr()
     assert "Failed to parse JSON" in captured.out
 
@@ -187,7 +187,7 @@ def test_missing_run_id_group(tmp_path, capsys):
     del payload["run_id"]
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     captured = capsys.readouterr()
     assert "missing run id" in captured.out
 
@@ -220,7 +220,7 @@ def test_real_artifact_shape(tmp_path, capsys):
 
     write_json(fpath, real_payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     captured = capsys.readouterr()
 
     assert "commit" in captured.out
@@ -248,7 +248,7 @@ def test_empty_value_is_missing(tmp_path, capsys):
     payload["evaluated_epoch"] = ""
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     captured = capsys.readouterr()
     assert "the evaluated epoch" in captured.out
 
@@ -258,7 +258,7 @@ def test_invalid_hash_is_missing(tmp_path, capsys):
     payload["input_sha256"] = "abcdef" # only 6 chars, invalid hash length
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     captured = capsys.readouterr()
     assert "missing challenge or dataset identifier AND its content hash" in captured.out
 
@@ -279,7 +279,7 @@ def test_short_script_hash_rejected(tmp_path, capsys):
     payload["provenance"]["producer_script_git_blob_sha256"] = "12345678"
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     captured = capsys.readouterr()
     assert "missing script hash" in captured.out
 
@@ -289,7 +289,7 @@ def test_missing_environment_versions(tmp_path, capsys):
     del payload["provenance"]["device"]["python_version"]
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     captured = capsys.readouterr()
     assert "missing environment Python, Torch, and CUDA versions" in captured.out
 
@@ -299,7 +299,7 @@ def test_missing_checkpoint_hash(tmp_path, capsys):
     del payload["checkpoint_sha256"]
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     captured = capsys.readouterr()
     assert "missing evaluated checkpoint identifier and 64-hex hash" in captured.out
 
@@ -309,7 +309,7 @@ def test_short_checkpoint_hash_rejected(tmp_path, capsys):
     payload["checkpoint_sha256"] = "12345"
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     captured = capsys.readouterr()
     assert "missing evaluated checkpoint identifier and 64-hex hash" in captured.out
 
@@ -362,7 +362,7 @@ def test_legacy_script_hash_warning(tmp_path, capsys):
     payload["script_sha256"] = "a" * 64
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     captured = capsys.readouterr()
     assert "legacy working-tree script hash (not platform-independent)" in captured.out
 
@@ -372,7 +372,7 @@ def test_script_hash_uppercase_rejected(tmp_path, capsys):
     payload["provenance"]["producer_script_git_blob_sha256"] = "A" * 64
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     captured = capsys.readouterr()
     assert "script hash (requires repository-relative path, lowercase 64-hex blob hash, and correct basis string)" in captured.out
 
@@ -382,7 +382,7 @@ def test_script_hash_wrong_basis_rejected(tmp_path, capsys):
     payload["provenance"]["producer_script_hash_basis"] = "something_else"
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     captured = capsys.readouterr()
     assert "script hash (requires repository-relative path, lowercase 64-hex blob hash, and correct basis string)" in captured.out
 
@@ -392,7 +392,7 @@ def test_script_hash_absolute_path_rejected(tmp_path, capsys):
     payload["provenance"]["producer_script_path"] = "/absolute/path/to/script.py"
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     captured = capsys.readouterr()
     assert "script hash (requires repository-relative path, lowercase 64-hex blob hash, and correct basis string)" in captured.out
 
@@ -406,7 +406,7 @@ def test_script_hash_posix_absolute_rejected(tmp_path, capsys):
     payload = valid_payload()
     payload["provenance"]["producer_script_path"] = "/evaluate.py"
     write_json(fpath, payload)
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     assert "script hash (requires repository-relative path" in capsys.readouterr().out
 
 def test_script_hash_windows_absolute_rejected(tmp_path, capsys):
@@ -414,7 +414,7 @@ def test_script_hash_windows_absolute_rejected(tmp_path, capsys):
     payload = valid_payload()
     payload["provenance"]["producer_script_path"] = "C:\\evaluate.py"
     write_json(fpath, payload)
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     assert "script hash (requires repository-relative path" in capsys.readouterr().out
 
 def test_script_hash_unc_rejected(tmp_path, capsys):
@@ -422,7 +422,7 @@ def test_script_hash_unc_rejected(tmp_path, capsys):
     payload = valid_payload()
     payload["provenance"]["producer_script_path"] = "\\\\server\\share\\evaluate.py"
     write_json(fpath, payload)
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     assert "script hash (requires repository-relative path" in capsys.readouterr().out
 
 def test_script_hash_traversal_rejected(tmp_path, capsys):
@@ -430,7 +430,7 @@ def test_script_hash_traversal_rejected(tmp_path, capsys):
     payload = valid_payload()
     payload["provenance"]["producer_script_path"] = "../evaluate.py"
     write_json(fpath, payload)
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     assert "script hash (requires repository-relative path" in capsys.readouterr().out
 
 
@@ -447,7 +447,7 @@ def test_initialization_checkpoint_does_not_replace_evaluated_checkpoint(
     }
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     assert "evaluated checkpoint identifier" in capsys.readouterr().out
 
 
@@ -457,7 +457,7 @@ def test_wrong_artifact_kind_is_rejected(tmp_path, capsys):
     payload["artifact_kind"] = "training"
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     assert "missing artifact kind" in capsys.readouterr().out
 
 
@@ -467,7 +467,7 @@ def test_invalid_schema_version_is_rejected(tmp_path, capsys):
     payload["schema_version"] = False
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     assert "missing schema version" in capsys.readouterr().out
 
 
@@ -477,5 +477,38 @@ def test_script_hash_drive_relative_path_rejected(tmp_path, capsys):
     payload["provenance"]["producer_script_path"] = "C:evaluate.py"
     write_json(fpath, payload)
 
-    assert main([str(fpath)]) == 0
+    assert main([str(fpath)]) == 1
     assert "script hash (requires repository-relative path" in capsys.readouterr().out
+
+def test_malformed_artifact_exits_nonzero_without_strict(tmp_path):
+    fpath = tmp_path / "malformed3.json"
+    fpath.write_text("{")
+    assert main([str(fpath)]) == 1
+
+def test_missing_requested_path_exits_nonzero(tmp_path):
+    fpath_valid = tmp_path / "valid.json"
+    write_json(fpath_valid, valid_payload())
+    fpath_missing = tmp_path / "missing.json"
+    assert main([str(fpath_valid), str(fpath_missing)]) == 1
+
+def test_unreadable_directory_reported(tmp_path, monkeypatch):
+    import os
+    def mock_walk(top, topdown=True, onerror=None, followlinks=False):
+        if onerror:
+            class MockError:
+                def __init__(self, filename, strerror):
+                    self.filename = filename
+                    self.strerror = strerror
+            onerror(MockError(top, "Permission denied"))
+        return []
+    monkeypatch.setattr(os, "walk", mock_walk)
+
+    assert main([str(tmp_path)]) == 1
+
+def test_report_only_exits_zero(tmp_path):
+    fpath = tmp_path / "malformed4.json"
+    fpath.write_text("{")
+    assert main([str(fpath), "--report-only"]) == 0
+
+    fpath_missing = tmp_path / "missing2.json"
+    assert main([str(fpath_missing), "--report-only"]) == 0
