@@ -1,23 +1,44 @@
 #!/usr/bin/env python3
 """Map where the pointer chase stops being memorised and starts being solved.
 
-Gate 0a returned chance on all three seeds. The apparatus is sound -- a single
-memorisable memory reaches accuracy 1.0 -- and the failure is not a shortage of
-optimisation budget. At the learning rate the published literature uses, the
-model reaches 0.62 training accuracy against 0.07 held out. It memorises the
-training memories instead of learning in-context retrieval.
+Gate 0a returned chance on all three seeds. Two distinct failures sit behind
+that, and conflating them was the first mistake this tool was used to make:
+
+  At the gate's own inherited learning rate of 1e-4, training barely started --
+  loss moved 2.800 to 2.653 against ln(16) = 2.7726. That is under-training,
+  not memorisation.
+
+  At the learning rates the published literature uses, from 2e-4 up, training
+  works and the model reaches 0.62 training accuracy against 0.07 held out. It
+  memorises the training memories instead of learning in-context retrieval.
+
+So this tool characterises the regime where optimisation succeeds. It does not
+explain the registered gate's failure, and no report may read it that way.
 
 Held-out accuracy alone cannot tell "has not learned" from "has memorised", and
 here that distinction is the entire result. This tool always reports both, plus
 their gap.
 
+It is also not the instrument for "can the training path fit a finite set at
+all" -- gate 0c is, at 512 fixed instances with train and eval identical. Ad
+hoc controls here duplicate a registered gate and should not be reported as
+findings about the apparatus.
+
 Two published literatures cover this task family:
 
   MQAR, in-context retrieval, the D=1 case. HazyResearch/zoology sweeps RWKV-7
   at this exact shape -- d_model in {64,128,256}, n_layers=2, head_dim=64 --
-  over np.logspace(-3,-1.5,4) with max_epochs=32 and batch 256. Its Claim 1 is
-  that gated-convolution and recurrent models, RWKV named explicitly, do not
-  exceed 0.9 accuracy unless d >= N.
+  over np.logspace(-3,-1.5,4) with max_epochs=32 and batch 256. Its claim is
+  about model *dimension*: recurrent and gated-convolution models need d to
+  scale with the MQAR input sequence length to stay accurate, where attention
+  does not.
+
+  That is a width bound, and this tool measures a data bound. They are not the
+  same claim and Zoology does not license translating one into the other --
+  note that what is observed here runs mildly against a pure width reading,
+  since d is held at 128 while associations go 4 to 64 and the failure is
+  rescued by more memories rather than more width. Treat the parallel as an
+  open question, not as support.
 
   The S_n group word problem, the D>1 case. DeltaProduct uses lr 1e-3 with
   cosine annealing, 100 epochs, batch 1024, and reports S_n is solvable by one
@@ -39,7 +60,8 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "src"))
 
 import torch
 import torch.nn.functional as F
@@ -50,6 +72,7 @@ from exp0.train import create_model, set_seed
 from exp1.dataset import PointerChaseDataset, exp1_collate_fn
 from exp1.pointer_chase import ChaseSpec, generate_dataset
 from exp1.train import evaluate_vway_accuracy, forward_logits
+from rosa_compute.diagnostics import get_artifact_environment, get_git_commit
 
 
 def build_bank(memories, *, depth, seed, spec, queries_per_memory,
@@ -140,8 +163,13 @@ def run_cell(*, lr, d_model, layers, memories, num_nodes, num_maps, args,
                   fresh_per_epoch=args.fresh_memories_per_epoch,
                   distinct_memories_seen=distinct,
                   params=params, instances=len(train_ds),
+                  # Both are recorded, and `gap` and `z` below are derived from
+                  # the final epoch, because that is the statistic the gates
+                  # use. Deriving them from max(accs) silently builds a
+                  # selection over 32-128 epochs into a number reported as if
+                  # it were an outcome.
                   held_out_best=max(accs), held_out_final=accs[-1],
-                  train_acc=train_acc, gap=train_acc - max(accs),
+                  train_acc=train_acc, gap=train_acc - accs[-1],
                   final_loss=losses[-1], held_out_curve=accs,
                   train_losses=losses, seconds=time.time() - started)
     del model, opt
@@ -212,8 +240,8 @@ def main(argv=None) -> int:
     device = torch.device(args.device)
     print(f"depth={args.depth}   chance is 1/num_nodes and moves with the sweep")
     print(f"{'M':>3} {'K':>3} {'assoc':>6} {'chance':>7} {'lr':>9} {'d':>5} "
-          f"{'L':>3} {'memories':>9} {'held-out':>9} {'train':>8} {'gap':>8} "
-          f"{'z':>6} {'loss':>8} {'s':>6}")
+          f"{'L':>3} {'memories':>9} {'held/fin':>9} {'held/max':>9} "
+          f"{'train':>8} {'gap':>8} {'z':>6} {'loss':>8} {'s':>6}")
 
     results = []
     for num_nodes in args.num_nodes:
@@ -240,20 +268,27 @@ def main(argv=None) -> int:
                                          num_maps=num_maps, args=args,
                                          spec=spec, val_ds=val_ds,
                                          device=device)
-                            r["z"] = (r["held_out_best"] - chance) / se
+                            r["z"] = (r["held_out_final"] - chance) / se
                             results.append(r)
                             print(f"{num_nodes:>3} {num_maps:>3} "
                                   f"{num_nodes * num_maps:>6} {chance:>7.4f} "
                                   f"{lr:>9.1e} {d_model:>5} {layers:>3} "
-                                  f"{memories:>9} {r['held_out_best']:>9.4f} "
+                                  f"{memories:>9} {r['held_out_final']:>9.4f} "
+                                  f"{r['held_out_best']:>9.4f} "
                                   f"{r['train_acc']:>8.4f} {r['gap']:>8.4f} "
                                   f"{r['z']:>+6.2f} {r['final_loss']:>8.4f} "
                                   f"{r['seconds']:>6.0f}")
                             sys.stdout.flush()
 
+    # Recorded because these artifacts are read across the fleet and the cells
+    # disagree between nodes. Without the compute capability and the torch and
+    # CUDA versions, a cross-node comparison cannot separate architecture from
+    # environment, and a reviewer holding only the JSON cannot audit either.
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(
         {"label": args.label, "config": vars(args) | {"out": str(args.out)},
+         "environment": get_artifact_environment(),
+         "repo_commit": get_git_commit(str(REPO_ROOT)),
          "results": results}, indent=2, default=str))
     print(f"\nwrote {args.out}")
 
@@ -271,7 +306,7 @@ def main(argv=None) -> int:
             print(f"  M={r['num_nodes']} K={r['num_maps']} "
                   f"({r['associations']} associations) lr={r['lr']:.1e} "
                   f"d={r['d_model']} L={r['layers']} -> "
-                  f"{r['held_out_best']:.4f} ({r['z']:+.2f} SE), "
+                  f"{r['held_out_final']:.4f} ({r['z']:+.2f} SE), "
                   f"train {r['train_acc']:.4f}")
     else:
         best = max(results, key=lambda r: r["z"])

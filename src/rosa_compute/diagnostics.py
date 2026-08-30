@@ -103,3 +103,32 @@ def print_diagnostics():
         print(f"RWKV-LM Submodule Commit: {info['RWKV-LM_commit']}")
     if "rosa_soft_commit" in info:
         print(f"rosa_soft Submodule Commit: {info['rosa_soft_commit']}")
+
+
+def get_artifact_environment() -> dict:
+    """The JSON-safe subset of `get_environment_info` for embedding in artifacts.
+
+    `get_environment_info` cannot be handed to `json.dump`: it returns a
+    `BuildCapabilities` object, and `gpu_compute_capability` is a tuple. A
+    writer must select named fields and coerce them rather than merge the dict.
+
+    Filtering by type instead is the trap, and it is worse than it looks:
+    `gpu_compute_capability` is the field that separates sm_75 from sm_86 from
+    sm_89, so a scalar-only filter silently drops exactly the field a
+    cross-device comparison needs and leaves an artifact that looks complete.
+
+    The two submodule commits are included because a claim about the recurrence
+    is not interpretable without knowing which kernel source produced it.
+    """
+    info = get_environment_info()
+    cap = info.get("gpu_compute_capability")
+    return {
+        "python_version": info.get("python_version"),
+        "torch_version": str(info.get("torch_version")),
+        "cuda_available": info.get("cuda_available"),
+        "cuda_version": info.get("cuda_version"),
+        "gpu_name": info.get("gpu_name"),
+        "gpu_compute_capability": list(cap) if cap is not None else None,
+        "RWKV-LM_commit": info.get("RWKV-LM_commit"),
+        "rosa_soft_commit": info.get("rosa_soft_commit"),
+    }

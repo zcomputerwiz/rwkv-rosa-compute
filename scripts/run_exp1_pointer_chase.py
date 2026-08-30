@@ -16,7 +16,7 @@ from exp1.dataset import PointerChaseDataset
 from exp1.pointer_chase import ChaseSpec, generate_dataset, make_neutral_vector
 from exp1.train import evaluate_vway_accuracy, train_model
 from exp1.workspace import Workspace
-from rosa_compute.diagnostics import get_environment_info
+from rosa_compute.diagnostics import get_artifact_environment
 
 
 def main(argv=None) -> int:
@@ -292,9 +292,7 @@ def main(argv=None) -> int:
     # here specifically because --compile changes the execution path, and a
     # claim about a compiled run is not interpretable without knowing which
     # torch, CUDA and GPU produced it.
-    env = get_environment_info()
-    environment = {k: v for k, v in env.items()
-                   if isinstance(v, (str, int, float, bool, type(None)))}
+    environment = get_artifact_environment()
 
     report = {
         "eval_target": eval_target,
