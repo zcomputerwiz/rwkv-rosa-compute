@@ -31,28 +31,20 @@ def test_uniform_word_yields_chance():
     assert abs(e_bw - 1.0 / M) < 0.015
 
 def test_concentrated_word_yields_above_chance():
-    # An all-identical word at depth where composition concentrates.
-    # Say depth 32, word is just '0' repeated 32 times.
-    # Iterating the *same* random permutation 32 times can have varying effects,
-    # but wait: iterating a permutation does not concentrate onto attractors!
-    # A permutation is bijective.
-    # Let's think: The problem states "arbitrary random functions concentrate... permutations don't."
-    # Wait, the prompt says:
-    # "(b) an all-identical word at a depth where the composition concentrates yields a B_w clearly above 1/M"
-    # Wait, permutations DO NOT concentrate under iteration. BUT the prompt says "an all-identical word at a depth where the composition concentrates".
-    # Wait, does the generator use arbitrary maps or permutations?
-    # generate_memory(..., permutations=True) is used in pointer_chase.py, but maybe it doesn't have to be True for the test, or wait!
-    # Ah. The prompt says: "an all-identical word at a depth where the composition concentrates yields a B_w clearly above 1/M".
-    # Wait. If permutations are used, does it concentrate?
-    # No, permutations do not concentrate.
-    # What DOES concentrate? P(answer == s | w, s) for an all-identical word!
-    # Wait. If w = (0, 0, ..., 0) repeated D times, what is P(answer == s | w, s)?
-    # For a given memory, the map 0 is a permutation.
-    # The order of a permutation on 16 elements divides 16!
-    # But for a specific depth D, say D=16, the orbits of size dividing 16 will return to the start node!
-    # So for D=16, any orbit of length 1, 2, 4, 8, 16 returns to itself after 16 steps.
-    # So P(answer == s | w, s) will be unusually high! It's exactly the fixed-point fraction.
+    """An all-identical word is elevated, and by a predictable amount.
 
+    Permutations do not concentrate onto attractors the way arbitrary maps do,
+    so the elevation here is not an attractor effect. It comes from cycle
+    structure: for w = (0,) * D the composition is pi^D, and a node returns to
+    itself exactly when its cycle length divides D. The expected fixed-point
+    count is therefore
+
+        E[fix(pi^D)] = #{ l <= M : l divides D }
+
+    restricted to l <= M, because a cycle cannot be longer than the ground set.
+    At M=16, D=16 the divisors 1, 2, 4, 8, 16 all qualify, giving 5 expected
+    fixed points and p_w = 5/16 = 0.3125 -- five times chance.
+    """
     M = 16
     K = 4
     words = 1
@@ -69,8 +61,11 @@ def test_concentrated_word_yields_above_chance():
         num_nodes=M, num_maps=K, words=words, memories=memories, bootstrap=bootstrap, seed=seed, word_list=[word]
     )
 
-    # Because of orbits dividing 16, P(answer == s) should be > 1/M.
+    # Predicted 5/16 from the divisor count above; asserted loosely because
+    # the estimator scores on a finite second bank.
     assert e_bw > 1.0 / M + 0.05
+    assert abs(e_bw - 5.0 / M) < 0.05, (
+        f"expected about {5.0 / M:.4f} from #{{l <= 16 : l | 16}} = 5, got {e_bw:.4f}")
 
 def test_reproducibility():
     M = 16
@@ -132,3 +127,28 @@ def test_cli_integration(monkeypatch, tmp_path):
         data2 = json.load(f)
 
     assert data == data2
+
+
+def test_the_script_runs_as_a_script():
+    """Run it the way a user does: as a subprocess, not by importing main().
+
+    The in-process CLI test above cannot catch an import error, because pytest
+    has already put the repository root on sys.path. The shipped script used
+    `from src.exp1...`, which resolves under pytest and raises
+    ModuleNotFoundError when the file is executed directly -- so the entry point
+    was broken while its own test passed.
+    """
+    import subprocess
+    import tempfile
+
+    root = Path(__file__).parent.parent
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "floor.json"
+        proc = subprocess.run(
+            [sys.executable, str(root / "scripts" / "audit_word_conditioned_floor.py"),
+             "--depths", "2", "--words", "4", "--memories", "4",
+             "--bootstrap", "10", "--out", str(out)],
+            capture_output=True, text=True, timeout=300)
+        assert proc.returncode == 0, f"script failed:\n{proc.stderr[-2000:]}"
+        assert out.exists()
+        assert "results" in json.loads(out.read_text())

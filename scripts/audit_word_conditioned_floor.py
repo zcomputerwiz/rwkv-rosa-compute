@@ -2,11 +2,18 @@ import argparse
 import json
 import os
 import random
+import sys
 import tempfile
+from pathlib import Path
 
 import numpy as np
 
-from src.exp1.pointer_chase import execute, generate_memory
+# Matches every other script in scripts/. The `src.` package form works under
+# pytest, which puts the repository root on the path, and fails when the script
+# is run directly -- which is the only way it is actually used.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from exp1.pointer_chase import execute, generate_memory  # noqa: E402
 
 
 def estimate_floor(num_nodes: int, num_maps: int, words: int, memories: int, bootstrap: int, seed: int, depth: int = None, word_list: list = None):
