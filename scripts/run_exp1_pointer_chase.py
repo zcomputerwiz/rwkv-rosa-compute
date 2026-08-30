@@ -169,26 +169,25 @@ def main(argv=None) -> int:
     compile_backend = (args.compile_backend or "cudagraphs") if args.compile else None
 
     if args.compile:
-        # Compiled on the backbone rather than on forward_logits, because
-        # training and evaluation both reach the model through it. Compiling one
-        # call site would run a compiled architecture and score an eager one --
-        # the same train/eval split forward_logits exists to prevent.
-        model.backbone = torch.compile(model.backbone, backend=compile_backend)
-
-        # A ragged final batch is another input shape, and the recompile for one
-        # cost 161 s against 11 s for the first -- enough to cancel everything
-        # compiling saves on a short run. It is avoidable rather than inherent:
-        # the shape only varies because the instance count is not a multiple of
-        # the batch. Both banks matter. Checking only the training bank is what
-        # made a first attempt here measure 1.02x instead of 3.1x: the held-out
-        # bank was ragged, and its recompile ate the entire gain.
-        # Sizes are counts of memories, but the batch is a count of instances, so
-        # the aligned memory counts are the multiples of
-        # batch / gcd(batch, queries_per_memory) -- not simply the instance
-        # count rounded down. At memories=5, q=4, batch=6 the naive rounding
-        # suggests 4 memories, whose 16 instances are still ragged modulo 6;
-        # the answer is 3.
+        # A ragged final batch is another input shape. Under inductor that costs
+        # a second compile -- measured at 161 s against 11 s for the first, more
+        # than compiling saves on a short run. Under cudagraphs it is fatal: the
+        # replay copies into fixed-size buffers and raises
+        #   RuntimeError: The size of tensor a (64) must match ... (16)
+        # partway through the first evaluation. So it is refused rather than
+        # warned about for that backend, before any training is done.
+        #
+        # Both banks matter. Checking only the training bank is what made a
+        # first attempt here measure 1.02x instead of 3.1x, and the gate's own
+        # ratified 5000/500 is ragged in both.
+        #
+        # Sizes count memories while the batch counts instances, so the aligned
+        # memory counts are the multiples of
+        # batch / gcd(batch, queries_per_memory), not the instance count rounded
+        # down. At memories=5, q=4, batch=6 the naive rounding suggests 4, whose
+        # 16 instances are still ragged modulo 6; the answer is 3.
         step = args.batch_size // math.gcd(args.batch_size, args.queries_per_memory)
+        ragged = []
         for name, memories in (("train", args.train_size), ("val", args.val_size)):
             instances = memories * args.queries_per_memory
             remainder = instances % args.batch_size
@@ -197,11 +196,26 @@ def main(argv=None) -> int:
             lower = memories - memories % step
             fix = (f"--{name}-size {lower}" if lower
                    else f"--{name}-size {step} or larger")
-            print(f"warning: {instances} {name} instances is not a multiple of "
-                  f"batch {args.batch_size} (remainder {remainder}). The ragged "
-                  f"final batch forces an extra compile that can cost more than "
-                  f"compiling saves. Aligned sizes are multiples of {step}: use "
-                  f"{fix}.")
+            ragged.append(f"{instances} {name} instances is not a multiple of "
+                          f"batch {args.batch_size} (remainder {remainder}); "
+                          f"aligned sizes are multiples of {step}, so use {fix}")
+        if ragged:
+            detail = "; ".join(ragged)
+            if compile_backend == "cudagraphs":
+                parser.error(
+                    f"--compile-backend cudagraphs requires every batch to have "
+                    f"the same shape, and {detail}. Align the banks, or pass "
+                    f"--compile-backend inductor, which tolerates a ragged batch "
+                    f"at the cost of an extra compile."
+                )
+            print(f"warning: {detail}. The ragged final batch forces an extra "
+                  f"compile that can cost more than compiling saves.")
+
+        # Compiled on the backbone rather than on forward_logits, because
+        # training and evaluation both reach the model through it. Compiling one
+        # call site would run a compiled architecture and score an eager one --
+        # the same train/eval split forward_logits exists to prevent.
+        model.backbone = torch.compile(model.backbone, backend=compile_backend)
 
     train_cfg = TrainConfig(
         seed=model_seed,
