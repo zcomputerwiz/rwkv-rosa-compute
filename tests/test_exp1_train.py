@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from exp0.config import ModelConfig, TrainConfig
-from exp0.train import create_model
+from exp0.train import create_model, set_seed
 from exp1.dataset import PointerChaseDataset, exp1_collate_fn
 from exp1.pointer_chase import ChaseSpec, generate_dataset
 from exp1.train import evaluate_vway_accuracy, train_model
@@ -523,3 +523,92 @@ def test_the_resume_signature_records_the_compile_backend(tmp_path):
                        weights_only=False)
     assert "compile_backend" in saved["signature"]
     assert saved["signature"]["compile_backend"] is None
+
+
+def test_a_midepoch_resume_reports_the_whole_epoch_loss(tmp_path):
+    """A resumed epoch must report the mean over all its batches, not the tail.
+
+    The epoch loss accumulator was reinitialised on resume and the partial
+    checkpoint did not carry it, so an epoch interrupted after most of its work
+    reported the mean of only the batches that ran afterwards. That is silently
+    wrong: the number is plausible, it is stored in the report, and nothing
+    about it looks truncated.
+    """
+    spec = ChaseSpec(num_nodes=M, num_maps=K, max_depth=8)
+    train_ds = PointerChaseDataset(
+        generate_dataset(8, 4, depth=4, seed=1, num_nodes=M, num_maps=K), spec)
+    val_ds = PointerChaseDataset(
+        generate_dataset(2, 4, depth=4, seed=2, num_nodes=M, num_maps=K), spec)
+    model_cfg = ModelConfig(
+        architecture="rwkv", hidden_size=64, num_hidden_layers=1,
+        num_attention_heads=1, head_dim=64, vocab_size=M,
+        rwkv_kernel="reference")
+    device = torch.device("cpu")
+
+    def build():
+        set_seed(42)
+        return create_model(model_cfg, d_input=spec.d_input,
+                            compact_reduced_features=False)
+
+    def cfg(epochs):
+        return TrainConfig(seed=42, batch_size=4, precision="fp32",
+                           num_workers=0, epochs=epochs, learning_rate=1e-3)
+
+    common = dict(depth=4, train_data_seed=1, val_data_seed=2,
+                  train_size=8, val_size=2)
+
+    # Uninterrupted reference.
+    _, whole = train_model(build(), train_ds, val_ds, spec, model_cfg,
+                           cfg(1), device, **common)
+
+    # Same epoch, checkpointed partway and resumed.
+    # 32 instances at batch 4 is 8 steps, so a checkpoint every 4 steps puts one
+    # exactly halfway through the epoch. The last is the epoch boundary, which
+    # is not the case under test.
+    ckpt = tmp_path / "ck"
+    train_model(build(), train_ds, val_ds, spec, model_cfg, cfg(1), device,
+                checkpoint_path=ckpt, checkpoint_every_steps=4, **common)
+    steps = sorted(ckpt.glob("step_*.pt"))
+    assert len(steps) >= 2, f"expected a mid-epoch checkpoint, got {steps}"
+
+    _, resumed = train_model(build(), train_ds, val_ds, spec, model_cfg,
+                             cfg(1), device,
+                             resume_from_checkpoint=steps[0], **common)
+
+    got = resumed["epoch_train_losses"][-1]
+    want = whole["epoch_train_losses"][-1]
+    # The tail-only mean differs from the whole-epoch mean by far more than
+    # accumulation order does; this is checking that the whole epoch is covered.
+    assert abs(got - want) < 1e-3, (
+        f"resumed epoch reported {got:.6f} against {want:.6f} for the same "
+        f"epoch of work")
+
+
+def test_train_model_refuses_a_ragged_bank_under_cudagraphs():
+    """The runner is not the only caller, so the guard cannot live only there.
+
+    A ragged final batch raises from inside the graph replay partway through
+    the first evaluation, after training has already run. Refusing before the
+    first step turns a wasted run into a message.
+    """
+    spec = ChaseSpec(num_nodes=M, num_maps=K, max_depth=8)
+    # 3 memories x 4 queries = 12 instances, which is not a multiple of 8.
+    train_ds = PointerChaseDataset(
+        generate_dataset(3, 4, depth=4, seed=1, num_nodes=M, num_maps=K), spec)
+    val_ds = PointerChaseDataset(
+        generate_dataset(2, 4, depth=4, seed=2, num_nodes=M, num_maps=K), spec)
+    model_cfg = ModelConfig(
+        architecture="rwkv", hidden_size=64, num_hidden_layers=1,
+        num_attention_heads=1, head_dim=64, vocab_size=M,
+        rwkv_kernel="reference")
+    model = create_model(model_cfg, d_input=spec.d_input,
+                         compact_reduced_features=False)
+    model.backbone = torch.compile(model.backbone)
+    train_cfg = TrainConfig(seed=42, batch_size=8, precision="fp32",
+                            num_workers=0, epochs=1, learning_rate=1e-3)
+
+    with pytest.raises(ValueError, match="same shape"):
+        train_model(model, train_ds, val_ds, spec, model_cfg, train_cfg,
+                    torch.device("cpu"), depth=4, train_data_seed=1,
+                    val_data_seed=2, train_size=3, val_size=2,
+                    compile_backend="cudagraphs")

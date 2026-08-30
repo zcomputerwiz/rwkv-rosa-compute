@@ -16,6 +16,7 @@ from exp1.dataset import PointerChaseDataset
 from exp1.pointer_chase import ChaseSpec, generate_dataset, make_neutral_vector
 from exp1.train import evaluate_vway_accuracy, train_model
 from exp1.workspace import Workspace
+from rosa_compute.diagnostics import get_environment_info
 
 
 def main(argv=None) -> int:
@@ -286,9 +287,19 @@ def main(argv=None) -> int:
     if holdout_diagnostic is not None:
         print(f"  held-out diagnostic (non-gating): {holdout_diagnostic:.4f}")
 
+    # Recorded in the report itself, not only in the run_with_provenance
+    # wrapper, so a report is self-describing when read on its own. It matters
+    # here specifically because --compile changes the execution path, and a
+    # claim about a compiled run is not interpretable without knowing which
+    # torch, CUDA and GPU produced it.
+    env = get_environment_info()
+    environment = {k: v for k, v in env.items()
+                   if isinstance(v, (str, int, float, bool, type(None)))}
+
     report = {
         "eval_target": eval_target,
         "final_accuracy": final_accuracy,
+        "environment": environment,
         "epoch_accuracies": epoch_accuracies,
         "holdout_diagnostic_accuracy": holdout_diagnostic,
         "history": history,

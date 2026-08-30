@@ -216,6 +216,23 @@ def train_model(
             f"is not compiled"
         )
 
+    # Checked here as well as in the runner, because the runner is not the only
+    # caller. cudagraphs replays into fixed-size buffers, so a ragged final
+    # batch raises partway through the first evaluation -- after training has
+    # run. Failing before the first step turns a wasted run into a message.
+    if compile_backend == "cudagraphs":
+        ragged = [f"{len(ds)} {name} instances"
+                  for name, ds in (("train", train_dataset),
+                                   ("val", val_dataset))
+                  if len(ds) % train_cfg.batch_size]
+        if ragged:
+            raise ValueError(
+                f"compile_backend='cudagraphs' requires every batch to have the "
+                f"same shape, but {' and '.join(ragged)} are not multiples of "
+                f"batch_size={train_cfg.batch_size}. Align the banks, or use "
+                f"the inductor backend, which tolerates a ragged batch."
+            )
+
     signature = {
         "task": "exp1_pointer_chase",
         "workspace": workspace_signature,
@@ -249,6 +266,11 @@ def train_model(
     best_val_acc = 0.0
     resume_samples = 0
     resume_epoch_seed = None
+    # The running loss of a partially completed epoch. Without it a resumed
+    # epoch reports the mean of only the batches that ran after the resume,
+    # which is silently wrong rather than obviously wrong.
+    resume_loss_sum = 0.0
+    resume_batches = 0
 
     if resume_from_checkpoint:
         prog_state, init_state = _load_training_checkpoint_into_state(
@@ -267,6 +289,11 @@ def train_model(
             start_epoch = partial["epoch"]
             resume_samples = partial["samples_consumed"]
             resume_epoch_seed = partial["epoch_seed"]
+            # Absent in checkpoints written before this was carried; treating a
+            # missing value as zero reproduces the old behaviour for those
+            # rather than failing to load them.
+            resume_loss_sum = partial.get("loss_sum", 0.0)
+            resume_batches = partial.get("batches_done", 0)
             optimizer_steps = prog_state.get("optimizer_steps", 0)
             comp = prog_state.get("completed", {})
             best_val_acc = comp.get("best_val_acc", 0.0)
@@ -300,6 +327,11 @@ def train_model(
         # is one scalar per step, so the wider dtype costs nothing measurable
         # even where float64 throughput is poor.
         total_loss = torch.zeros((), device=device, dtype=torch.float64)
+        # Seeded from the partial epoch on the first pass after a resume, and
+        # zero on every epoch after that.
+        total_loss += resume_loss_sum
+        batches_done = resume_batches
+        resume_loss_sum, resume_batches = 0.0, 0
 
         if resume_samples > 0:
             epoch_seed = resume_epoch_seed
@@ -346,6 +378,7 @@ def train_model(
                 lr_scheduler.step()
 
             total_loss += loss.detach().double()
+            batches_done += 1
             optimizer_steps += 1
             resume_samples += batch_size
 
@@ -365,6 +398,8 @@ def train_model(
                             "epoch": epoch,
                             "samples_consumed": resume_samples,
                             "epoch_seed": epoch_seed,
+                            "loss_sum": float(total_loss.item()),
+                            "batches_done": batches_done,
                         },
                     )
                     step_checkpoint = checkpoint_path / f"step_{optimizer_steps:06d}.pt"
@@ -380,7 +415,10 @@ def train_model(
                     )
                     atomic_copy(step_checkpoint, checkpoint_path / "latest.pt")
 
-        epoch_loss = (total_loss / len(loader)).item()   # one sync per epoch
+        # Divided by the batches actually accumulated, not len(loader): after a
+        # mid-epoch resume the loader yields only the remainder of the epoch,
+        # while total_loss covers the whole of it.
+        epoch_loss = (total_loss / max(batches_done, 1)).item()  # one sync/epoch
         epoch_train_losses.append(epoch_loss)
 
         val_acc = evaluate_vway_accuracy(model, val_dataset, train_cfg, device, workspace)
