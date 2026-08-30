@@ -23,19 +23,31 @@ might be asked for::
     store the K primitive maps       M*K       = 64      at M=16, K=4
     store all D-step compositions    M*K^D     = 6.9e10  at D=16
 
-The asymmetry is the design, not the absolute size — we do not need ``M`` to
-exceed the recurrent state, only ``K^D`` to exceed what is worth caching.
+**That count is incomplete, and the gap matters.** It prices only the extreme
+strategies. Caching intermediate *blocks* and chaining them is far cheaper::
+
+    length-2 table   M*K^2 =   256 entries   D=32 becomes ~16 lookups
+    length-3 table   M*K^3 = 1,024 entries   D=32 becomes ~11 lookups
+
+The block table must be built per memory rather than memorised in weights, but
+the apparatus permits exactly that: several queries share one memory, and the
+recurrent state after ingestion is query-independent. Whether such a table is
+actually learned is an empirical question, audited before gate 1; it is not
+ruled out by counting.
 
 **What this does NOT claim.** No formal sequential lower bound. Query deferral
 plus a combinatorial query space removes the known cheap precomputation
 shortcut; it does not prove none exists.
 
-**Layer depth substitutes for time depth.** A ``D``-step chain can be unrolled
-across layers within one token's forward pass while ``D`` is within the layer
-budget. On the production 12-layer model, ``D <= 12`` should be solvable at
-``N=0``, and the H2 signal can only appear above that. ``Dmax`` is therefore set
-to 32 rather than 16, so the informative region is ``D in {12..32}`` rather than
-a four-point sliver.
+**``D`` is composition length, not certified serial neural depth.** A
+``D``-step chain can be unrolled across layers within one token's forward pass
+while ``D`` is within the layer budget, so larger ``D`` plausibly demands more
+of the model. It does not follow that ``D`` steps are *required*: a per-memory
+block table reduces the query-time chain to roughly ``D/b`` steps, and nothing
+here rules that out. ``Dmax`` is 32 rather than 16 to give the depth axis
+range. The region above the layer count is where a serial-depth effect would
+be easiest to see, not a region where serial depth is the only available
+explanation.
 
 Arms, as before, differ in exactly one bit at exactly the silent rows:
 
@@ -106,6 +118,36 @@ def generate_memory(rng: random.Random, *, num_nodes: int, num_maps: int,
     independent of the memory drawn. With arbitrary maps the floor is both
     elevated and memory-dependent, which would have to be measured per cell and
     would confound the D axis - the attractor effect strengthens with depth.
+
+    **A second, higher floor exists for a model that reads the query.** The
+    table above is the floor for ignoring the query entirely. Selectors are
+    drawn independently, so a query can repeat one, and a repeated word need
+    not induce a uniform composition.
+
+    One sufficient condition is exact and worth stating: **if any selector
+    appears exactly once, the composition is exactly uniform.** Condition on
+    every other map and the word becomes ``A pi_j B`` for fixed ``A``, ``B``;
+    ``pi -> A pi B`` is a bijection of ``S_M``, so the product is uniform. It
+    is sufficient, *not* necessary. At ``M=16, D=17`` the all-identical word
+    ``pi^17`` is also exactly uniform, because ``gcd(17, exponent(S_16)) = 1``
+    makes ``g -> g^17`` a bijection.
+
+    For an all-identical word the expected fixed-point count is::
+
+        E[fix(pi^D)] = #{ l <= M : l divides D }
+
+    restricted to ``l <= M``, because a divisor larger than ``M`` cannot be a
+    cycle length. At ``M=16, D=32`` that is 5, not the 6 an unrestricted
+    divisor count gives.
+
+    **The size of the resulting bias is not established here.** Pooled
+    ``P(answer == start)`` averages over words and can sit at ``1/M`` while
+    per-word deviations cancel. The quantity that bounds a word-aware model is
+    ``E_w[max(p_w, (1 - p_w)/(M - 1))]``, and estimating it needs nested
+    simulation with memory-level clustering - an analysis tool, not a
+    docstring. The primary H2 estimand is a paired within-``D`` contrast
+    across ``N``, which cancels any depth-specific floor common to the matched
+    arms.
     """
     if permutations:
         maps = []
