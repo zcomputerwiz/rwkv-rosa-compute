@@ -179,8 +179,9 @@ sm_75                     6                 6                       6
 **Every comparison reproduced its outcome branch.** The four exceptions to
 bitwise identity are all on `sm_89`, spread across two seeds, at roughly 0.33
 events per run; Fisher against the other nodes gives `p = 0.093`, and against
-`sm_89`'s own other seeds `p = 0.067`. So the effect is suggestive of that node
-and is not attributable to a particular seed. `sm_89` is also the only
+`sm_89`'s own other seeds `p = 0.067`. Neither test rejects, and neither
+licenses a conclusion: the effect is *unresolved* between an `sm_89`-wide cause
+and a seed-specific one, not shown to be either. `sm_89` is also the only
 chipset-attached node, so architecture and PCIe topology stay confounded.
 
 One of those four moved a reported value — `0.0681` to `0.0608`, 0.64 clustered
@@ -199,24 +200,46 @@ seed on any node has produced generalisation. At 19,968 five of nine do, and
 the success probability is unresolved.
 
 That last point is the one with consequences, because the outcome here is
-Bernoulli rather than continuous, and a median is the wrong instrument for a
-rate. Treating a fresh seed as a draw at the observed `p = 0.556`:
+Bernoulli rather than continuous, and a median is a decision rule rather than
+an estimate of a rate.
+
+**Two different success events are easy to conflate, and they give different
+numbers.** Five of nine runs reach the upper mode; only **four of nine exceed
+the registered `0.95` threshold**, because `sm_75` seed 1001 lands at `0.9459`.
+The convergence-mode rate and the gate-pass rate are not interchangeable, and
+only the second bears on whether a gate passes.
+
+**The nine runs also do not estimate a per-node rate.** They are three model
+seeds reused across three nodes, not nine independent draws. Conditioned on one
+reference node, the sample is three: on `sm_89`, one of three exceeds the
+threshold, Wilson 95% `[0.06, 0.79]` — an interval wide enough to be
+uninformative.
+
+What the arithmetic does show is how weak a majority rule is as a decision
+procedure. For a hypothetical Bernoulli `p = 0.556`:
 
 ```text
-N = 1    P(median converges) = 0.556
-N = 3    P(median converges) = 0.583
-N = 5    P(median converges) = 0.603
-N = 11   P(median converges) = 0.647
+N =    3    P(majority picks the likelier branch) = 0.584
+N =   11                                            0.649
+N =   51                                            0.790
+N =  201                                            0.945
+N = 1001                                            1.000
 ```
 
-A median over three seeds buys 2.7 points over a single run, and at `p = 0.5`
-exactly no `N` helps at all. Reporting a convergence *rate* with a binomial
-interval is the instrument the literature uses for bimodal training outcomes
--- see the mixture treatment in
+It does converge -- an earlier revision of this document claimed no achievable
+`N` would help, which is false away from `p = 0.5` exactly. The correct and
+sufficient statement is narrower: **a majority over three seeds is a lossy
+decision rule that estimates neither the success rate nor its uncertainty**, and
+it reaches useful power only at sample sizes far beyond what a gate would run.
+
+Reporting a success rate with a binomial interval is the instrument the
+literature uses for bimodal training outcomes -- see the mixture treatment in
 [arXiv:2502.17356](https://arxiv.org/abs/2502.17356), the ten-seed grok-rate
 protocol in [arXiv:2607.05104](https://arxiv.org/html/2607.05104), and the
 argument against point estimates under few runs in
-[arXiv:2108.13264](https://arxiv.org/abs/2108.13264). The 2×2 in section 4 remains a valid
+[arXiv:2108.13264](https://arxiv.org/abs/2108.13264). Ten seeds is a screening
+resolution, not a confirmatory one: `9/10` carries a Wilson interval of
+`[0.60, 0.98]`, and even `10/10` only reaches `[0.72, 1.00]`. The 2×2 in section 4 remains a valid
 within-seed comparison — same seed, nested banks, only the size changed — but
 "quadrupling the bank takes held-out from chance to 1.0000" describes one draw.
 
@@ -224,10 +247,22 @@ within-seed comparison — same seed, nested banks, only the size changed — bu
 optimiser steps reads `0.9994` on `sm_75` where cosine reads `0.9459`, with the
 subsequent 96 epochs worth only a further `0.0006`. That is a demonstrated
 accelerator **for seed 1001**, which converges under cosine on all three nodes
-anyway. It has not been run on any of the four failing trajectories, so it is a
-plausible mechanism for the table rather than a demonstrated rescue, and the
-budget-versus-schedule question is settled only for a seed that was never
-failing.
+anyway.
+
+It has since been run on a failing trajectory, and it did not rescue it. On
+`sm_89` seed 1002, a matched pair at 9,984 steps -- an exact cosine repeat
+against a constant rate -- returned:
+
+```text
+cosine repeat     held-out 0.1021   train 0.5385   loss 1.4440
+constant rate     held-out 0.0859   train 0.3298   loss 2.1284
+```
+
+The constant rate is not merely no better, it is worse: less of the training
+bank fitted over the same budget. So a constant schedule accelerates a
+trajectory that was already converging and retards one that was not. It is not
+a rescue candidate on this evidence, and the budget-versus-schedule question
+remains open.
 
 ## 5c. Repetition, not distinct-memory count
 
