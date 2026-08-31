@@ -130,33 +130,49 @@ section 5b before treating any of them as a property of the bank size.
 ## 5b. The cell is bimodal across model seeds
 
 Three model seeds at the `19,968` cell, `d=128, L=2`, 32 epochs, everything
-else identical, on two architectures — final-epoch held-out:
+else identical, on three architectures — final-epoch held-out, and the gate
+outcome the median would produce:
 
 ```text
-node       seed 1001   seed 1002   seed 1003    median
-sm_89         1.0000      0.1021      0.0681    0.1021
-sm_75         0.9459      0.0837      0.9989    0.9459
+node       seed 1001   seed 1002   seed 1003    median   gate 0a outcome
+sm_89         1.0000      0.1021      0.0681    0.1021   FAIL   (< 0.30)
+sm_86         1.0000      1.0000      0.0725    1.0000   PASS   (>= 0.95)
+sm_75         0.9459      0.0837      0.9989    0.9459   RETRY  (0.30-0.95)
 ```
 
-Three of the six reach near-ceiling with `train 1.0000` and loss between 2e-08
-and 2e-03. The other three sit near chance with `train 0.34–0.54` and loss
-between 1.4 and 1.9. **Nothing lands in between.** The failing seeds are stuck
+**Three nodes, three different gate outcomes, from the same nine-line
+configuration.** That is the practical statement of the problem, and it is not
+a device effect — it is sampling noise on a bimodal distribution at n=3.
+
+Five of the nine runs reach near-ceiling with `train 1.0000` and loss between
+5e-08 and 2e-03. The other four sit near chance with `train 0.34-0.54` and loss
+between 1.4 and 1.9. **Nothing lands in between.** The failing runs are stuck
 partway through fitting the training bank, not generalising poorly from a
 fitted one — an optimisation-stability signature rather than a capacity one.
 
-Two consequences:
+Three consequences:
 
+- **The outcome tracks neither the node nor the seed.** Seed 1001 converges
+  everywhere. Seed 1002 converges on `sm_86` and fails on the other two. Seed
+  1003 converges only on `sm_75`. A two-node reading of seed 1002 looked like
+  cross-device agreement until the third node landed on the opposite side of
+  it.
 - **Seed variance swamps any between-node difference.** The single-seed
   comparison had this cell reaching the threshold on `sm_89` and not on
-  `sm_75`. Across three seeds the medians point the other way. Neither
+  `sm_75`; across three seeds the medians point the other way. Neither
   ordering is real.
 - **`19,968` memories is necessary on the evidence, not sufficient.** At 4,992
-  no seed on any node has produced generalisation. At 19,968 some seeds do and
-  some do not. The 2×2 in section 4 remains a valid within-seed comparison —
-  same seed, nested banks, only the size changed — but "quadrupling the bank
-  takes held-out from chance to 1.0000" describes one draw.
+  no seed on any node has produced generalisation. At 19,968 five of nine do.
+  The 2×2 in section 4 remains a valid within-seed comparison — same seed,
+  nested banks, only the size changed — but "quadrupling the bank takes
+  held-out from chance to 1.0000" describes one draw.
 
-Whether the failing seeds converge with more budget is not measured.
+The likely cause is that 32 cosine epochs cut through the transition rather
+than past it. Holding the rate constant at the same cell and the same 9,984
+optimiser steps reads `0.9994` on `sm_75` where cosine reads `0.9459`, and the
+subsequent 96 epochs move it only to `1.0000` — so the schedule, not the
+budget, is what leaves the outcome on a knife edge. That is one seed on one
+node; no failing seed has been run at a constant rate.
 
 ## 5c. Repetition, not distinct-memory count
 
@@ -172,11 +188,25 @@ epochs  97–128   mean held-out  0.0834    +1.83 SE
 epochs 225–256   mean held-out  0.0871    +2.15 SE
 ```
 
-The departure is real and it saturates: doubling the budget from 9,984 to
-19,968 steps moved the plateau by about a third of an SE. Training accuracy is
-0.9961 and the loss 0.0265 at the end, so gradients persist and the plateau is
-not an optimiser artifact. Against a 0.95 threshold this is a long way from
-passing, but "chance" was the wrong description.
+The departure saturates: doubling the budget from 9,984 to 19,968 steps moved
+the plateau by about a third of an SE. Training accuracy is 0.9961 and the loss
+0.0265 at the end, so gradients persist and the plateau is not an optimiser
+artifact. Against a 0.95 threshold this is a long way from passing, but
+"chance" was the wrong description.
+
+`sm_86` ran the identical configuration and tracks it closely:
+
+```text
+                    sm_89     sm_86
+epochs   1- 32     0.0657    0.0658
+epochs  97-128     0.0834    0.0745
+epochs 225-256     0.0871    0.0847
+```
+
+Both rise monotonically across thirds and settle near 0.085. Note what that
+agreement does and does not show: the two runs share model seed 1001 and both
+data seeds, so they are near-replicates differing only in hardware. It
+establishes that the number is stable, not that it survives a change of seed.
 
 **Removing memorisation removes all learning.** Drawing a fresh bank every
 epoch — 4,992 memories per epoch, 128 epochs, 638,976 distinct memories, no
