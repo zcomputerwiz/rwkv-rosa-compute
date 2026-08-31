@@ -71,7 +71,7 @@ from exp0.train import create_model, set_seed
 from exp1.dataset import PointerChaseDataset, exp1_collate_fn
 from exp1.pointer_chase import ChaseSpec, generate_dataset
 from exp1.train import evaluate_vway_accuracy, forward_logits
-from rosa_compute.diagnostics import get_artifact_environment, get_git_commit
+from rosa_compute.diagnostics import get_artifact_environment, get_repo_provenance
 
 # Defined after the imports, not before: ruff's E402 allows a bare sys.path
 # mutation ahead of them, but any other statement there makes every import
@@ -307,7 +307,7 @@ def main(argv=None) -> int:
     args.out.write_text(json.dumps(
         {"label": args.label, "config": vars(args) | {"out": str(args.out)},
          "environment": get_artifact_environment(),
-         "repo_commit": get_git_commit(str(REPO_ROOT)),
+         "provenance": get_repo_provenance(str(REPO_ROOT)),
          "results": results}, indent=2, default=str))
     print(f"\nwrote {args.out}")
 
