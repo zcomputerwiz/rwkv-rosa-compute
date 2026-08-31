@@ -166,17 +166,57 @@ reading of seed 1002 looked like cross-device agreement until the third node
 landed opposite both. The earlier single-seed comparison, which had this cell
 reaching the threshold on `sm_89` and not on `sm_75`, is refuted.
 
-What it cannot establish is the positive claim. With **one observation per
-node-by-seed cell**, node-by-seed interaction cannot be separated from ordinary
-rerun nondeterminism or from other environment differences. `set_seed` does not
-enable deterministic algorithms, so a repeat of any of these nine runs is not
-guaranteed to reproduce it, and no repeat has been measured. Calling the
-outcome a coin flip, or saying it tracks neither node nor seed, goes past the
-data.
+Rerun nondeterminism has since been measured and does not explain the table.
+Twenty-four repeats at this cell, all at the same commit and configuration:
+
+```text
+node                comparisons   reproduced outcome branch   bitwise identical
+sm_89 (chipset)          12                12                       8
+sm_86                     6                 6                       6
+sm_75                     6                 6                       6
+```
+
+**Every comparison reproduced its outcome branch.** The four exceptions to
+bitwise identity are all on `sm_89`, spread across two seeds, at roughly 0.33
+events per run; Fisher against the other nodes gives `p = 0.093`, and against
+`sm_89`'s own other seeds `p = 0.067`. So the effect is suggestive of that node
+and is not attributable to a particular seed. `sm_89` is also the only
+chipset-attached node, so architecture and PCIe topology stay confounded.
+
+One of those four moved a reported value — `0.0681` to `0.0608`, 0.64 clustered
+SE, both at chance. It reached a final number rather than only the internal
+trajectory, so a result sitting within noise of a threshold should not be
+called from a single run, and bitwise artifact matching is not a valid
+verification method on that node.
+
+What the audit still cannot establish is a positive claim about node-by-seed
+interaction, because there is one *configuration* per node-by-seed cell.
+Calling the outcome a coin flip, or saying it tracks neither node nor seed,
+goes past the data.
 
 **`19,968` memories is necessary on the evidence, not sufficient.** At 4,992 no
 seed on any node has produced generalisation. At 19,968 five of nine do, and
-the success probability is unresolved. The 2×2 in section 4 remains a valid
+the success probability is unresolved.
+
+That last point is the one with consequences, because the outcome here is
+Bernoulli rather than continuous, and a median is the wrong instrument for a
+rate. Treating a fresh seed as a draw at the observed `p = 0.556`:
+
+```text
+N = 1    P(median converges) = 0.556
+N = 3    P(median converges) = 0.583
+N = 5    P(median converges) = 0.603
+N = 11   P(median converges) = 0.647
+```
+
+A median over three seeds buys 2.7 points over a single run, and at `p = 0.5`
+exactly no `N` helps at all. Reporting a convergence *rate* with a binomial
+interval is the instrument the literature uses for bimodal training outcomes
+-- see the mixture treatment in
+[arXiv:2502.17356](https://arxiv.org/abs/2502.17356), the ten-seed grok-rate
+protocol in [arXiv:2607.05104](https://arxiv.org/html/2607.05104), and the
+argument against point estimates under few runs in
+[arXiv:2108.13264](https://arxiv.org/abs/2108.13264). The 2×2 in section 4 remains a valid
 within-seed comparison — same seed, nested banks, only the size changed — but
 "quadrupling the bank takes held-out from chance to 1.0000" describes one draw.
 
