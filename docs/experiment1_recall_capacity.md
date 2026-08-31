@@ -124,16 +124,62 @@ Note that `M` is not a clean axis: changing it also changes chance, the class
 count, the input width, and so the parameter count. `params` is recorded per
 cell for that reason.
 
+## 5b. Repetition, not distinct-memory count
+
+Two controls at the same 9,984 optimiser steps and the same `d=128, L=2` cell
+locate the axis more precisely than bank size does.
+
+**A constant learning rate does move held-out off chance.** Holding `lr 1e-3`
+for 256 epochs at 4,992 memories, against a clustered SE of 0.01144:
+
+```text
+epochs   1– 32   mean held-out  0.0657    chance 0.0625
+epochs  97–128   mean held-out  0.0834    +1.83 SE
+epochs 225–256   mean held-out  0.0871    +2.15 SE
+```
+
+The departure is real and it saturates: doubling the budget from 9,984 to
+19,968 steps moved the plateau by about a third of an SE. Training accuracy is
+0.9961 and the loss 0.0265 at the end, so gradients persist and the plateau is
+not an optimiser artifact. Against a 0.95 threshold this is a long way from
+passing, but "chance" was the wrong description.
+
+**Removing memorisation removes all learning.** Drawing a fresh bank every
+epoch — 4,992 memories per epoch, 128 epochs, 638,976 distinct memories, no
+memory seen twice:
+
+```text
+held-out final   0.0664     chance 0.0625,  z = +0.34
+train accuracy   0.0642     also chance
+final loss       2.77261    ln 16 = 2.77259
+```
+
+The loss reached the entropy of the uniform distribution within a few epochs
+and stayed flat to five decimals for the remaining 120.
+
+```text
+bank                     exposures/memory   held-out    train    final loss
+4,992 fixed                           128     0.0776   1.0000      3.4e-08
+19,968 fixed                           32     1.0000   1.0000      2.2e-08
+4,992 fresh per epoch                   1     0.0664   0.0642      2.77261
+```
+
+Unlimited distinct data at one exposure each is the worst of the three, below
+the small fixed bank. So distinct-memory count is not the axis — **repetition
+is necessary**, and between 1 and 32 exposures per memory the model goes from
+learning nothing to generalising perfectly. Where in that range is not measured.
+
+The same signature appears in Experiment 0: the streaming arm there took 3.3×
+the optimiser steps memorisation needed and never left `ln 13`, while the
+fixed-set arm memorised. Same architecture, different generator.
+
 ## 6. What this does not establish
 
 **It does not show the gate cannot pass at any budget.** `CosineAnnealingLR`
 with `T_max=epochs` anneals the learning rate to approximately zero by the final
 epoch, and held-out accuracy in the 128-epoch cell flatlines at 0.077567 over
-its last eight epochs. The supportable claim is that *a 128-epoch cosine run at
-`lr 1e-3` did not generalise*. A long constant-learning-rate budget is untested,
-and delayed generalisation after memorisation — which requires exactly the
-sustained training the anneal prevents — is not excluded. Weight decay is on at
-0.01.
+its last eight epochs — a frozen model, not a converged verdict. Section 5
+measures what a constant rate does instead.
 
 **It does not show the gate is device-dependent.** The same cell reaches 0.95 at
 different epochs on `sm_89`, `sm_86` and `sm_75`, and on `sm_75` does not reach
@@ -172,4 +218,10 @@ evaluation.
 `--fresh-memories-per-epoch` draws a new training bank every epoch, so no memory
 is seen twice and memorising is impossible by construction. Generation costs
 about 46 µs per instance, so the effective bank is unbounded for roughly 1% more
-wall clock.
+wall clock. Note section 5b before reaching for it as a fix: at these budgets it
+also removes learning, so a run under this flag that sits at chance is not
+evidence about retrieval.
+
+`--lr-schedule constant` holds the rate rather than annealing it. Use it for any
+claim about budget: under the default cosine, `T_max=epochs` means a longer run
+mostly buys frozen epochs, so "more steps did not help" does not follow from one.
