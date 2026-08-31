@@ -134,15 +134,18 @@ else identical, on three architectures — final-epoch held-out, and the gate
 outcome the median would produce:
 
 ```text
-node       seed 1001   seed 1002   seed 1003    median   gate 0a outcome
-sm_89         1.0000      0.1021      0.0681    0.1021   FAIL   (< 0.30)
-sm_86         1.0000      1.0000      0.0725    1.0000   PASS   (>= 0.95)
-sm_75         0.9459      0.0837      0.9989    0.9459   RETRY  (0.30-0.95)
+node       seed 1001   seed 1002   seed 1003    median   0a thresholds applied
+sm_89         1.0000      0.1021      0.0681    0.1021   would be FAIL  (< 0.30)
+sm_86         1.0000      1.0000      0.0725    1.0000   would be PASS  (>= 0.95)
+sm_75         0.9459      0.0837      0.9989    0.9459   would be RETRY (0.30-0.95)
 ```
 
-**Three nodes, three different gate outcomes, from the same nine-line
-configuration.** That is the practical statement of the problem, and it is not
-a device effect — it is sampling noise on a bimodal distribution at n=3.
+**The right-hand column is a counterfactual, not a gate result.** These runs
+used 19,968 memories, batch 256, 32 epochs, `lr 1e-3` and compilation;
+registered gate 0a uses 5,000 memories, batch 64, 10 epochs and `lr 1e-4`,
+uncompiled. Applying 0a's thresholds to audit runs shows how little separates
+the three outcome branches at this cell. It is not a report of gate 0a having
+been run three times.
 
 Five of the nine runs reach near-ceiling with `train 1.0000` and loss between
 5e-08 and 2e-03. The other four sit near chance with `train 0.34-0.54` and loss
@@ -150,29 +153,41 @@ between 1.4 and 1.9. **Nothing lands in between.** The failing runs are stuck
 partway through fitting the training bank, not generalising poorly from a
 fitted one — an optimisation-stability signature rather than a capacity one.
 
-Three consequences:
+The supportable reading is narrow:
 
-- **The outcome tracks neither the node nor the seed.** Seed 1001 converges
-  everywhere. Seed 1002 converges on `sm_86` and fails on the other two. Seed
-  1003 converges only on `sm_75`. A two-node reading of seed 1002 looked like
-  cross-device agreement until the third node landed on the opposite side of
-  it.
-- **Seed variance swamps any between-node difference.** The single-seed
-  comparison had this cell reaching the threshold on `sm_89` and not on
-  `sm_75`; across three seeds the medians point the other way. Neither
-  ordering is real.
-- **`19,968` memories is necessary on the evidence, not sufficient.** At 4,992
-  no seed on any node has produced generalisation. At 19,968 five of nine do.
-  The 2×2 in section 4 remains a valid within-seed comparison — same seed,
-  nested banks, only the size changed — but "quadrupling the bank takes
-  held-out from chance to 1.0000" describes one draw.
+> At this audit configuration the outcome is sharply bimodal and sensitive to
+> execution context. Three seeds are too few for the median to be a stable
+> statistic.
 
-The likely cause is that 32 cosine epochs cut through the transition rather
-than past it. Holding the rate constant at the same cell and the same 9,984
-optimiser steps reads `0.9994` on `sm_75` where cosine reads `0.9459`, and the
-subsequent 96 epochs move it only to `1.0000` — so the schedule, not the
-budget, is what leaves the outcome on a knife edge. That is one seed on one
-node; no failing seed has been run at a constant rate.
+What the crossed audit does establish is negative: **there is no stable device
+ordering, and no seed-only explanation.** Seed 1001 converges on all three
+nodes, seed 1002 only on `sm_86`, seed 1003 only on `sm_75` — and a two-node
+reading of seed 1002 looked like cross-device agreement until the third node
+landed opposite both. The earlier single-seed comparison, which had this cell
+reaching the threshold on `sm_89` and not on `sm_75`, is refuted.
+
+What it cannot establish is the positive claim. With **one observation per
+node-by-seed cell**, node-by-seed interaction cannot be separated from ordinary
+rerun nondeterminism or from other environment differences. `set_seed` does not
+enable deterministic algorithms, so a repeat of any of these nine runs is not
+guaranteed to reproduce it, and no repeat has been measured. Calling the
+outcome a coin flip, or saying it tracks neither node nor seed, goes past the
+data.
+
+**`19,968` memories is necessary on the evidence, not sufficient.** At 4,992 no
+seed on any node has produced generalisation. At 19,968 five of nine do, and
+the success probability is unresolved. The 2×2 in section 4 remains a valid
+within-seed comparison — same seed, nested banks, only the size changed — but
+"quadrupling the bank takes held-out from chance to 1.0000" describes one draw.
+
+**On the schedule.** Holding the rate constant at this cell and the same 9,984
+optimiser steps reads `0.9994` on `sm_75` where cosine reads `0.9459`, with the
+subsequent 96 epochs worth only a further `0.0006`. That is a demonstrated
+accelerator **for seed 1001**, which converges under cosine on all three nodes
+anyway. It has not been run on any of the four failing trajectories, so it is a
+plausible mechanism for the table rather than a demonstrated rescue, and the
+budget-versus-schedule question is settled only for a seed that was never
+failing.
 
 ## 5c. Repetition, not distinct-memory count
 

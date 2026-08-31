@@ -14,6 +14,7 @@ So the test asserts both properties together: it serializes, and the compute
 capability is still there.
 """
 import json
+import pathlib
 from unittest import mock
 
 from rosa_compute.diagnostics import get_artifact_environment
@@ -79,3 +80,31 @@ def test_a_cpu_only_host_records_a_null_capability_rather_than_failing():
 def test_the_real_helper_serializes_on_this_host():
     """No mock: whatever this machine actually reports must serialize."""
     json.dumps(get_artifact_environment())
+
+
+def test_repo_provenance_records_a_full_sha_and_a_tree_hash():
+    """Eight characters is readable and not auditable.
+
+    A fleet artifact recorded `ab973d8c`, the tip of a branch that was
+    squash-merged and deleted; the SHA stopped resolving from a clone. The tree
+    hash survives a squash merge, so recording both lets a reviewer confirm two
+    differently-named commits built identical source.
+    """
+    from rosa_compute.diagnostics import get_repo_provenance
+
+    prov = get_repo_provenance(str(pathlib.Path(__file__).resolve().parents[1]))
+    assert set(prov) == {"commit", "tree", "dirty"}
+    for field in ("commit", "tree"):
+        assert len(prov[field]) == 40, f"{field} is not a full SHA: {prov[field]}"
+        assert all(c in "0123456789abcdef" for c in prov[field])
+    assert isinstance(prov["dirty"], bool)
+    json.dumps(prov)
+
+
+def test_repo_provenance_degrades_instead_of_raising_outside_a_checkout(tmp_path):
+    """An analysis tool still has to write its results outside a checkout."""
+    from rosa_compute.diagnostics import get_repo_provenance
+
+    prov = get_repo_provenance(str(tmp_path))
+    assert prov["commit"] in ("unknown",) or len(prov["commit"]) == 40
+    json.dumps(prov)

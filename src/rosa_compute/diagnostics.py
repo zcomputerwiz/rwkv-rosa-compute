@@ -132,3 +132,32 @@ def get_artifact_environment() -> dict:
         "RWKV-LM_commit": info.get("RWKV-LM_commit"),
         "rosa_soft_commit": info.get("rosa_soft_commit"),
     }
+
+
+def get_repo_provenance(path: str) -> dict:
+    """Full commit SHA, tree hash and dirty flag for an artifact's provenance.
+
+    `get_git_commit` truncates to eight characters, which is enough to read and
+    not enough to audit: a fleet artifact recorded `ab973d8c`, the tip of a
+    branch that was squash-merged and deleted, and the SHA no longer resolved
+    from a clone. The tree hash survives that -- a squash merge preserves the
+    tree even though it rewrites the commit -- so recording both lets a
+    reviewer confirm two differently-named commits built the same source.
+
+    Returns "unknown" for any field git cannot supply, rather than raising: an
+    analysis tool must still write its results outside a checkout.
+    """
+    out = {"commit": "unknown", "tree": "unknown", "dirty": None}
+    try:
+        out["commit"] = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=path, capture_output=True,
+            text=True, check=True).stdout.strip()
+        out["tree"] = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"], cwd=path, capture_output=True,
+            text=True, check=True).stdout.strip()
+        out["dirty"] = bool(subprocess.run(
+            ["git", "status", "--porcelain"], cwd=path, capture_output=True,
+            text=True, check=True).stdout.strip())
+    except Exception:
+        pass
+    return out
