@@ -61,10 +61,10 @@ Three properties worth knowing before reading its output:
 - **`z` is clustered at the memory level.** `queries_per_memory` queries share
   one memory, so treating instances as independent understates the standard
   error by `sqrt(queries_per_memory)`.
-- **The artifact carries its environment and repo commit.** These runs disagree
-  between nodes, and a cross-node comparison that cannot see the compute
+- **The artifact carries its environment and repo commit.** Cells here vary a
+  great deal between runs, and a comparison that cannot see the compute
   capability or the torch and CUDA versions cannot separate architecture from
-  environment.
+  environment — or, as section 5b shows, from the model seed.
 
 Audit regime, distinct from the gate's in every one of these fields: batch 256,
 `lr 1e-3`, AdamW `betas=(0.9, 0.95)`, weight decay 0.01, gradient clipping 1.0,
@@ -124,7 +124,41 @@ Note that `M` is not a clean axis: changing it also changes chance, the class
 count, the input width, and so the parameter count. `params` is recorded per
 cell for that reason.
 
-## 5b. Repetition, not distinct-memory count
+Every cell above, and every cell in section 4, is **model seed 1001**. Read
+section 5b before treating any of them as a property of the bank size.
+
+## 5b. The cell is bimodal across model seeds
+
+Three model seeds at the `19,968` cell, `d=128, L=2`, 32 epochs, everything
+else identical, on two architectures — final-epoch held-out:
+
+```text
+node       seed 1001   seed 1002   seed 1003    median
+sm_89         1.0000      0.1021      0.0681    0.1021
+sm_75         0.9459      0.0837      0.9989    0.9459
+```
+
+Three of the six reach near-ceiling with `train 1.0000` and loss between 2e-08
+and 2e-03. The other three sit near chance with `train 0.34–0.54` and loss
+between 1.4 and 1.9. **Nothing lands in between.** The failing seeds are stuck
+partway through fitting the training bank, not generalising poorly from a
+fitted one — an optimisation-stability signature rather than a capacity one.
+
+Two consequences:
+
+- **Seed variance swamps any between-node difference.** The single-seed
+  comparison had this cell reaching the threshold on `sm_89` and not on
+  `sm_75`. Across three seeds the medians point the other way. Neither
+  ordering is real.
+- **`19,968` memories is necessary on the evidence, not sufficient.** At 4,992
+  no seed on any node has produced generalisation. At 19,968 some seeds do and
+  some do not. The 2×2 in section 4 remains a valid within-seed comparison —
+  same seed, nested banks, only the size changed — but "quadrupling the bank
+  takes held-out from chance to 1.0000" describes one draw.
+
+Whether the failing seeds converge with more budget is not measured.
+
+## 5c. Repetition, not distinct-memory count
 
 Two controls at the same 9,984 optimiser steps and the same `d=128, L=2` cell
 locate the axis more precisely than bank size does.
@@ -181,13 +215,11 @@ epoch, and held-out accuracy in the 128-epoch cell flatlines at 0.077567 over
 its last eight epochs — a frozen model, not a converged verdict. Section 5
 measures what a constant rate does instead.
 
-**It does not show the gate is device-dependent.** The same cell reaches 0.95 at
-different epochs on `sm_89`, `sm_86` and `sm_75`, and on `sm_75` does not reach
-it within 32 epochs. But that comparison is one model seed per node, at the
-audit's regime rather than the gate's, and the nodes differ in environment as
-well as architecture. Node, environment, nondeterminism and architecture remain
-confounded. It is a portability flag, not a result — and it does not bear on the
-gate's pass condition, which is a median over three seeds at the final epoch.
+**It does not show the gate is device-dependent — and the crossed audit says
+it is not.** A single seed per node had the cell reaching 0.95 on `sm_89` and
+not on `sm_75`, which is where that claim came from. Three seeds per node
+invert the medians (section 5b). Seed variance swamps any between-node
+difference, and neither ordering was real.
 
 **It is not the memorisation instrument.** Gate 0c is: 512 fixed `D=4`
 instances, train and evaluation identical, outcome on training-set accuracy.
@@ -218,7 +250,7 @@ evaluation.
 `--fresh-memories-per-epoch` draws a new training bank every epoch, so no memory
 is seen twice and memorising is impossible by construction. Generation costs
 about 46 µs per instance, so the effective bank is unbounded for roughly 1% more
-wall clock. Note section 5b before reaching for it as a fix: at these budgets it
+wall clock. Note section 5c before reaching for it as a fix: at these budgets it
 also removes learning, so a run under this flag that sits at chance is not
 evidence about retrieval.
 
