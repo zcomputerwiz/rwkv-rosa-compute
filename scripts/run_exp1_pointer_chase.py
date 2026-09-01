@@ -14,7 +14,13 @@ from exp0.config import ModelConfig, TrainConfig
 from exp0.train import create_model, set_seed
 from exp1.dataset import PointerChaseDataset
 from exp1.pointer_chase import ChaseSpec, generate_dataset, make_neutral_vector
-from exp1.train import evaluate_vway_accuracy, train_model
+from exp1.qwen4_micro import (
+    QWEN4_MAX_POSITION_EMBEDDINGS,
+    QWEN4_VARIANTS,
+    Qwen4MicroConfig,
+    create_qwen4_micro_model,
+)
+from exp1.train import _trainable, evaluate_vway_accuracy, train_model
 from exp1.workspace import Workspace
 from rosa_compute.diagnostics import get_artifact_environment
 
@@ -30,6 +36,17 @@ def main(argv=None) -> int:
     parser.add_argument("--precision", type=str, required=True, choices=["fp32", "bf16", "fp16"])
     parser.add_argument("--batch-size", type=int, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
+    parser.add_argument(
+        "--architecture",
+        choices=["rwkv", "qwen4_exp"],
+        default="rwkv",
+    )
+    parser.add_argument(
+        "--qwen4-variant",
+        choices=QWEN4_VARIANTS,
+        default=None,
+        help="defaults to hybrid; valid only with --architecture qwen4_exp",
+    )
 
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--train-size", type=int, default=1000)
@@ -107,6 +124,24 @@ def main(argv=None) -> int:
                         help="evaluate on the training set; held-out bank becomes a diagnostic")
 
     args = parser.parse_args(argv)
+    if args.architecture != "qwen4_exp" and args.qwen4_variant is not None:
+        parser.error("--qwen4-variant requires --architecture qwen4_exp")
+    if args.architecture == "qwen4_exp" and args.rwkv_kernel is not None:
+        parser.error("--rwkv-kernel is valid only with --architecture rwkv")
+    if args.architecture == "qwen4_exp" and args.compile:
+        parser.error(
+            "Qwen4-Exp compilation is not part of the registered pilot; use eager execution"
+        )
+    if args.architecture == "qwen4_exp" and (
+        args.d_model != 128 or args.layers != 4
+    ):
+        parser.error(
+            "The registered Qwen4-Exp pilot requires --d-model 128 --layers 4"
+        )
+    if args.architecture == "qwen4_exp" and args.precision != "fp32":
+        parser.error(
+            "The registered Qwen4-Exp pilot requires --precision fp32"
+        )
     if not args.workspace and any(
         value is not None for value in (args.num_slots, args.num_steps, args.m_max)
     ):
@@ -121,13 +156,25 @@ def main(argv=None) -> int:
     val_data_seed = args.seed + 1 if args.val_data_seed is None else args.val_data_seed
 
     device = torch.device(args.device)
-    rwkv_kernel = args.rwkv_kernel or ("reference" if device.type == "cpu" else "cuda")
+    rwkv_kernel = None
+    if args.architecture == "rwkv":
+        rwkv_kernel = args.rwkv_kernel or (
+            "reference" if device.type == "cpu" else "cuda"
+        )
 
     spec = ChaseSpec(
         num_nodes=args.num_nodes,
         num_maps=args.num_maps,
         max_depth=max(32, args.depth) # Give it enough max depth capacity
     )
+    if (
+        args.architecture == "qwen4_exp"
+        and spec.seq_len(args.num_silent) > QWEN4_MAX_POSITION_EMBEDDINGS
+    ):
+        parser.error(
+            "Qwen4-Exp input length exceeds the registered "
+            f"{QWEN4_MAX_POSITION_EMBEDDINGS}-position capacity"
+        )
 
     neutral_vector = make_neutral_vector(spec) if args.silent_kind == "neutral" else None
 
@@ -157,22 +204,35 @@ def main(argv=None) -> int:
     eval_dataset = train_dataset if args.overfit_train_as_val else holdout_dataset
     eval_target = "train_set" if args.overfit_train_as_val else "held_out"
 
-    model_cfg = ModelConfig(
-        architecture="rwkv",
-        hidden_size=args.d_model,
-        num_hidden_layers=args.layers,
-        num_attention_heads=args.d_model // 64, # match standard head dim
-        head_dim=64,
-        vocab_size=args.num_nodes,
-        rwkv_kernel=rwkv_kernel,
-    )
-
     set_seed(model_seed)
-    model = create_model(
-        model_cfg,
-        d_input=spec.d_input,
-        compact_reduced_features=False
-    ).to(device)
+    qwen4_variant = None
+    if args.architecture == "rwkv":
+        model_cfg = ModelConfig(
+            architecture="rwkv",
+            hidden_size=args.d_model,
+            num_hidden_layers=args.layers,
+            num_attention_heads=args.d_model // 64, # match standard head dim
+            head_dim=64,
+            vocab_size=args.num_nodes,
+            rwkv_kernel=rwkv_kernel,
+        )
+        model = create_model(
+            model_cfg,
+            d_input=spec.d_input,
+            compact_reduced_features=False
+        ).to(device)
+    else:
+        qwen4_variant = args.qwen4_variant or "hybrid"
+        model_cfg = Qwen4MicroConfig(
+            vocab_size=args.num_nodes,
+            hidden_size=args.d_model,
+            num_hidden_layers=args.layers,
+            variant=qwen4_variant,
+        )
+        model = create_qwen4_micro_model(
+            model_cfg,
+            d_input=spec.d_input,
+        ).to(device)
 
     if args.compile_backend is not None and not args.compile:
         parser.error("--compile-backend requires --compile")
@@ -302,6 +362,7 @@ def main(argv=None) -> int:
         "holdout_diagnostic_accuracy": holdout_diagnostic,
         "history": history,
         "config": {
+            "architecture": args.architecture,
             "depth": args.depth,
             "num_nodes": args.num_nodes,
             "num_maps": args.num_maps,
@@ -309,6 +370,16 @@ def main(argv=None) -> int:
             "layers": args.layers,
             "precision": args.precision,
             "rwkv_kernel": rwkv_kernel,
+            "qwen4_variant": qwen4_variant,
+            "qwen4_config": (
+                model_cfg.resolved()
+                if isinstance(model_cfg, Qwen4MicroConfig)
+                else None
+            ),
+            "trainable_parameters": sum(
+                p.numel() for p in _trainable(model, workspace)
+                if p.requires_grad
+            ),
             "compile": args.compile,
             "compile_backend": compile_backend,
             "device": str(device),

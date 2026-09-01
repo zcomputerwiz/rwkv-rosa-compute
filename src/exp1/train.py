@@ -17,6 +17,7 @@ from exp0.train import (
 )
 from exp1.dataset import PointerChaseDataset, exp1_collate_fn
 from exp1.pointer_chase import ChaseSpec
+from exp1.qwen4_micro import Qwen4MicroConfig
 
 
 def _trainable(model, workspace=None):
@@ -30,6 +31,20 @@ def _trainable(model, workspace=None):
     if workspace is not None:
         params += list(workspace.parameters())
     return params
+
+
+def _model_signature(model_cfg: ModelConfig | Qwen4MicroConfig) -> Dict[str, Any]:
+    """Preserve legacy RWKV signatures and fully identify Qwen4-Exp runs."""
+    if isinstance(model_cfg, Qwen4MicroConfig):
+        return {"qwen4_exp": model_cfg.resolved()}
+    return {
+        "hidden_size": model_cfg.hidden_size,
+        "num_hidden_layers": model_cfg.num_hidden_layers,
+        "num_attention_heads": model_cfg.num_attention_heads,
+        "head_dim": model_cfg.head_dim,
+        "vocab_size": model_cfg.vocab_size,
+        "rwkv_kernel": model_cfg.rwkv_kernel,
+    }
 
 
 def forward_logits(model, inputs, workspace=None):
@@ -114,7 +129,7 @@ def train_model(
     train_dataset: PointerChaseDataset,
     val_dataset: PointerChaseDataset,
     spec: ChaseSpec,
-    model_cfg: ModelConfig,
+    model_cfg: ModelConfig | Qwen4MicroConfig,
     train_cfg: TrainConfig,
     device: torch.device,
     *,
@@ -249,17 +264,12 @@ def train_model(
         "train_size": train_size,
         "val_size": val_size,
         "overfit_train_as_val": overfit_train_as_val,
-        "hidden_size": model_cfg.hidden_size,
-        "num_hidden_layers": model_cfg.num_hidden_layers,
-        "num_attention_heads": model_cfg.num_attention_heads,
-        "head_dim": model_cfg.head_dim,
-        "vocab_size": model_cfg.vocab_size,
-        "rwkv_kernel": model_cfg.rwkv_kernel,
         "model_seed": train_cfg.seed,
         "batch_size": train_cfg.batch_size,
         "precision": train_cfg.precision,
         "epochs": train_cfg.epochs,
     }
+    signature.update(_model_signature(model_cfg))
 
     start_epoch = 0
     optimizer_steps = 0

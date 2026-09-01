@@ -15,6 +15,7 @@ authors = [
 dependencies = [
     "torch>=2.4,<3",
     "numpy>=1.24",
+    "transformers==5.16.0",
 ]
 
 [project.optional-dependencies]
