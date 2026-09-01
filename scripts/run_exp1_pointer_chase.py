@@ -124,6 +124,8 @@ def main(argv=None) -> int:
                         help="evaluate on the training set; held-out bank becomes a diagnostic")
 
     args = parser.parse_args(argv)
+    if args.compile_backend is not None and not args.compile:
+        parser.error("--compile-backend requires --compile")
     if args.architecture != "qwen4_exp" and args.qwen4_variant is not None:
         parser.error("--qwen4-variant requires --architecture qwen4_exp")
     if args.architecture == "qwen4_exp" and args.rwkv_kernel is not None:
@@ -234,8 +236,6 @@ def main(argv=None) -> int:
             d_input=spec.d_input,
         ).to(device)
 
-    if args.compile_backend is not None and not args.compile:
-        parser.error("--compile-backend requires --compile")
     compile_backend = (args.compile_backend or "cudagraphs") if args.compile else None
 
     if args.compile:

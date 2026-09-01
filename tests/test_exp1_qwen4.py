@@ -35,6 +35,12 @@ def test_registered_qwen4_micro_config_is_complete_and_fixed():
     )
     assert recurrent.layer_types == ("linear_attention",) * 4
     assert hybrid.resolved()["ple_layer_ids"] == []
+    assert hybrid.resolved()["rope_parameters"] == {
+        "rope_type": "default",
+        "rope_theta": 10000.0,
+    }
+    assert hybrid.resolved()["linear_conv_kernel_dim"] == 4
+    assert hybrid.resolved()["norm_topk_prob"] is True
     assert hybrid.resolved()["use_cache"] is False
 
     with pytest.raises(ValueError, match="registered Qwen4-Exp pilot"):
@@ -64,6 +70,8 @@ def test_qwen4_micro_forward_backward_reaches_every_component():
     assert _nonzero_gradient(layers[0].attn_hyper_connection)
     assert _nonzero_gradient(workspace)
     assert any("ple" in name for name, _ in model.named_modules()) is False
+    assert model.backbone.model.embed_tokens.weight.requires_grad is False
+    assert model.backbone.model.embed_tokens.weight.grad is None
 
     model_parameters = sum(p.numel() for p in model.parameters())
     totals = {

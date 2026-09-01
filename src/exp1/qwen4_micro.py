@@ -77,6 +77,20 @@ class Qwen4MicroConfig:
             "indexer_compress_ratio": 2,
             "ple_layer_ids": [],
             "max_position_embeddings": QWEN4_MAX_POSITION_EMBEDDINGS,
+            "hidden_act": "silu",
+            "initializer_range": 0.02,
+            "rms_norm_eps": 1e-6,
+            "attention_bias": False,
+            "attention_dropout": 0.0,
+            "rope_parameters": {
+                "rope_type": "default",
+                "rope_theta": 10000.0,
+            },
+            "linear_conv_kernel_dim": 4,
+            "output_router_logits": False,
+            "router_aux_loss_coef": 0.001,
+            "norm_topk_prob": True,
+            "tie_word_embeddings": False,
             "use_cache": False,
         }
 
@@ -100,9 +114,10 @@ class Qwen4ExpBackbone(nn.Module):
         values.pop("transformers_version")
         values.pop("variant")
         self.model = Qwen4ExpTextModel(Qwen4ExpTextConfig(**values))
+        self.model.embed_tokens.weight.requires_grad_(False)
 
     def forward(self, *, inputs_embeds: torch.Tensor) -> torch.Tensor:
-        output = self.model(inputs_embeds=inputs_embeds, return_dict=True)
+        output = self.model(inputs_embeds=inputs_embeds)
         return output.last_hidden_state
 
 

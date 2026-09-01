@@ -104,6 +104,19 @@ def test_queries_per_memory_is_settable(tmp_path):
 def test_kernel_is_explicit_and_defaults_to_reference_on_cpu(tmp_path):
     r = run(tmp_path, "--seed", "7")
     assert r["config"]["rwkv_kernel"] == "reference"
+    r = run(tmp_path / "b", "--seed", "7", "--rwkv-kernel", "reference")
+    assert r["config"]["rwkv_kernel"] == "reference"
+
+
+def test_compile_backend_requires_compile_before_model_validation(tmp_path):
+    proc = raw(
+        tmp_path,
+        "--seed", "7",
+        "--architecture", "qwen4_exp",
+        "--compile-backend", "inductor",
+    )
+    assert proc.returncode != 0
+    assert "--compile-backend requires --compile" in proc.stderr
 
 
 def test_qwen4_only_flags_are_not_silently_ignored(tmp_path):
@@ -161,8 +174,6 @@ def test_qwen4_report_carries_the_resolved_architecture(tmp_path):
     assert config["qwen4_config"]["transformers_version"] == "5.16.0"
     assert config["qwen4_config"]["layer_types"] == ["linear_attention"] * 4
     assert config["trainable_parameters"] > 0
-    r = run(tmp_path / "b", "--seed", "7", "--rwkv-kernel", "reference")
-    assert r["config"]["rwkv_kernel"] == "reference"
 
 
 def test_gate_runner_defaults_to_no_workspace(tmp_path):
