@@ -67,6 +67,41 @@ def test_the_kernel_source_commits_are_recorded():
     assert env["rosa_soft_commit"] == "5cb78987"
 
 
+FLOAT32_SETTINGS = (
+    "float32_matmul_precision",
+    "cuda_matmul_allow_tf32",
+    "cudnn_allow_tf32",
+)
+
+
+def test_the_float32_execution_settings_are_recorded():
+    """`precision: "fp32"` in a config does not establish FP32 arithmetic.
+
+    TF32 exists on sm_80 and later and not on sm_75, so the same nominal
+    precision can mean different arithmetic on different nodes. Three nodes ran
+    one Qwen4 cell whose artifacts recorded only the config string, and whether
+    TF32 was off could not be established afterwards from the artifacts.
+    """
+    env = _fake_env()
+    for field in FLOAT32_SETTINGS:
+        assert field in env, f"{field} is missing from the artifact environment"
+    assert isinstance(env["float32_matmul_precision"], (str, type(None)))
+    assert isinstance(env["cuda_matmul_allow_tf32"], (bool, type(None)))
+    assert isinstance(env["cudnn_allow_tf32"], (bool, type(None)))
+    assert json.loads(json.dumps(env))["float32_matmul_precision"] == \
+        env["float32_matmul_precision"]
+
+
+def test_an_unreadable_setting_costs_the_field_and_not_the_artifact():
+    """A torch that cannot report a flag must not stop an artifact being written."""
+    from rosa_compute.diagnostics import _torch_setting
+
+    def explode():
+        raise RuntimeError("this build does not expose that flag")
+
+    assert _torch_setting(explode) is None
+
+
 def test_a_cpu_only_host_records_a_null_capability_rather_than_failing():
     cpu = dict(FAKE, cuda_available=False, cuda_version=None, gpu_name=None,
                gpu_compute_capability=None)
@@ -74,6 +109,10 @@ def test_a_cpu_only_host_records_a_null_capability_rather_than_failing():
                     return_value=cpu):
         env = get_artifact_environment()
     assert env["gpu_compute_capability"] is None
+    for field in FLOAT32_SETTINGS:
+        assert field in env, (
+            f"{field} must still be recorded on a host without CUDA; the "
+            "settings are process state, not device state")
     json.dumps(env)
 
 

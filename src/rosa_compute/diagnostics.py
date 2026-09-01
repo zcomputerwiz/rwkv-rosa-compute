@@ -105,6 +105,19 @@ def print_diagnostics():
         print(f"rosa_soft Submodule Commit: {info['rosa_soft_commit']}")
 
 
+def _torch_setting(read):
+    """Return a PyTorch setting, or None if this build cannot report it.
+
+    Provenance must never be the reason an artifact fails to be written. A
+    CPU-only wheel, or a future torch that moves one of these flags, should
+    cost the field and nothing else.
+    """
+    try:
+        return read()
+    except Exception:
+        return None
+
+
 def get_artifact_environment() -> dict:
     """The JSON-safe subset of `get_environment_info` for embedding in artifacts.
 
@@ -119,6 +132,18 @@ def get_artifact_environment() -> dict:
 
     The two submodule commits are included because a claim about the recurrence
     is not interpretable without knowing which kernel source produced it.
+
+    The three float32 execution settings are read from PyTorch here rather than
+    from `get_environment_info`, because they are process state at
+    artifact-production time rather than build information. They are provenance
+    only: nothing in this module sets them, and they are deliberately absent
+    from checkpoint identity.
+
+    They are recorded because `precision: "fp32"` in a run config does not by
+    itself establish that matmuls ran in true FP32. TF32 exists on sm_80 and
+    later and not on sm_75, so the same nominal precision can mean different
+    arithmetic on different nodes, and an artifact recording only the config
+    string cannot be checked afterwards.
     """
     info = get_environment_info()
     cap = info.get("gpu_compute_capability")
@@ -129,6 +154,12 @@ def get_artifact_environment() -> dict:
         "cuda_version": info.get("cuda_version"),
         "gpu_name": info.get("gpu_name"),
         "gpu_compute_capability": list(cap) if cap is not None else None,
+        "float32_matmul_precision": _torch_setting(
+            torch.get_float32_matmul_precision),
+        "cuda_matmul_allow_tf32": _torch_setting(
+            lambda: torch.backends.cuda.matmul.allow_tf32),
+        "cudnn_allow_tf32": _torch_setting(
+            lambda: torch.backends.cudnn.allow_tf32),
         "RWKV-LM_commit": info.get("RWKV-LM_commit"),
         "rosa_soft_commit": info.get("rosa_soft_commit"),
     }
