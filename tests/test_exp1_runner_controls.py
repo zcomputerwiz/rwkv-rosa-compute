@@ -96,6 +96,27 @@ def test_instance_count_is_reported_not_just_memory_count(tmp_path):
     assert c["val_instances"] == 8
 
 
+def test_training_and_checkpoint_provenance_is_reported(tmp_path):
+    plain = run(tmp_path / "plain", "--seed", "7")["config"]
+    assert plain["checkpoint_path"] is None
+
+    checkpoint_path = tmp_path / "checkpoints"
+    c = run(
+        tmp_path / "checkpointed",
+        "--seed", "7",
+        "--checkpoint-path", str(checkpoint_path),
+    )["config"]
+    assert c["checkpoint_path"] == str(checkpoint_path.resolve())
+    assert c["learning_rate"] == 1e-4
+    assert c["weight_decay"] == 0.01
+    assert c["grad_clip"] == 1.0
+    assert c["adam_betas"] == [0.9, 0.95]
+    assert c["lr_schedule"] == "linear_warmup_decay"
+    assert c["warmup_fraction"] == 0.05
+    assert c["planned_optimizer_steps"] == 2
+    assert (checkpoint_path / "latest.pt").is_file()
+
+
 def test_queries_per_memory_is_settable(tmp_path):
     r = run(tmp_path, "--seed", "7", "--queries-per-memory", "1")
     assert r["config"]["train_instances"] == 4

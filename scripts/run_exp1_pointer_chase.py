@@ -385,6 +385,22 @@ def main(argv=None) -> int:
             "device": str(device),
             "batch_size": args.batch_size,
             "epochs": args.epochs,
+            "learning_rate": train_cfg.learning_rate,
+            "weight_decay": train_cfg.weight_decay,
+            "grad_clip": train_cfg.grad_clip,
+            "adam_betas": [train_cfg.adam_beta1, train_cfg.adam_beta2],
+            "lr_schedule": train_cfg.lr_schedule,
+            "warmup_fraction": train_cfg.warmup_fraction,
+            "planned_optimizer_steps": (
+                (len(train_dataset) + args.batch_size - 1)
+                // args.batch_size
+                * args.epochs
+            ),
+            "checkpoint_path": (
+                str(args.checkpoint_path.expanduser().resolve())
+                if args.checkpoint_path is not None
+                else None
+            ),
             "num_silent": args.num_silent,
             "silent_kind": args.silent_kind,
             "queries_per_memory": args.queries_per_memory,
