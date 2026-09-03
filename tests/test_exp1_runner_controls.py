@@ -197,6 +197,56 @@ def test_qwen4_report_carries_the_resolved_architecture(tmp_path):
     assert config["trainable_parameters"] > 0
 
 
+QWEN4_BASE = (
+    "--architecture", "qwen4_exp",
+    "--d-model", "128",
+    "--layers", "4",
+    "--train-size", "1",
+    "--val-size", "1",
+    "--queries-per-memory", "1",
+    "--batch-size", "1",
+)
+
+
+def test_qwen4_qsa_and_gdn_flags_are_rejected_for_rwkv(tmp_path):
+    """Both options are Qwen-only, exactly like --qwen4-variant."""
+    proc = raw(tmp_path, "--seed", "7", "--qwen4-qsa-implementation",
+              "batched-stable-v1")
+    assert proc.returncode != 0
+    assert "--qwen4-qsa-implementation requires --architecture qwen4_exp" in proc.stderr
+
+    proc = raw(tmp_path, "--seed", "7", "--qwen4-gdn-chunk-policy",
+              "min-sequence-64-v1")
+    assert proc.returncode != 0
+    assert "--qwen4-gdn-chunk-policy requires --architecture qwen4_exp" in proc.stderr
+
+
+def test_qwen4_qsa_and_gdn_flags_default_to_exact_and_omit_the_identity_keys(tmp_path):
+    """Neither flag is passed: the runner resolves both to their default,
+    exactly as --qwen4-variant resolves to 'hybrid', and the identity carries
+    neither non-default key -- so existing checkpoints stay loadable."""
+    report = run(tmp_path, "--seed", "7", *QWEN4_BASE)
+    config = report["config"]
+    assert config["qwen4_qsa_implementation"] == "causal-exact"
+    assert config["qwen4_gdn_chunk_policy"] == "fixed-64"
+    assert "qsa_implementation" not in config["qwen4_config"]
+    assert "gdn_chunk_policy" not in config["qwen4_config"]
+
+
+def test_qwen4_qsa_and_gdn_flags_propagate_into_the_resolved_identity(tmp_path):
+    """Both flags reach the model identity through the existing artifact path."""
+    report = run(
+        tmp_path, "--seed", "7", *QWEN4_BASE,
+        "--qwen4-qsa-implementation", "batched-stable-v1",
+        "--qwen4-gdn-chunk-policy", "min-sequence-64-v1",
+    )
+    config = report["config"]
+    assert config["qwen4_qsa_implementation"] == "batched-stable-v1"
+    assert config["qwen4_gdn_chunk_policy"] == "min-sequence-64-v1"
+    assert config["qwen4_config"]["qsa_implementation"] == "batched-stable-v1"
+    assert config["qwen4_config"]["gdn_chunk_policy"] == "min-sequence-64-v1"
+
+
 def test_gate_runner_defaults_to_no_workspace(tmp_path):
     c = run(tmp_path, "--seed", "7")["config"]
     assert c["workspace"] is False
