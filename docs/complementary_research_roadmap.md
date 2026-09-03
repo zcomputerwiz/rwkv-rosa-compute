@@ -4,6 +4,13 @@ This document defines research directions that extend, but do not replace, the s
 
 The existing experiment sequence remains the canonical path for establishing H1-H4. In particular, the project should first establish whether extra RWKV token-time state transitions provide useful test-time computation on controlled sequential tasks before introducing mechanisms that change the recurrence, training objective, stopping policy, or runtime.
 
+> **Current status, 2026-09-03:** the Qwen4-Exp micro side path is closed at
+> its D=1 prerequisite. Both the original and optimized apparatus populations
+> produced held-out accuracy near 16-way chance. The optimization remains
+> useful (12.59-13.37x measured end to end), but speed does not license D=2 or
+> a latent-workspace cell. The next step is an encoding/read-path audit before
+> any new GPU protocol. See [`qwen4_micro_pilot.md`](qwen4_micro_pilot.md).
+
 The extensions here are organized into three lanes:
 
 1. **Scientific mechanism** — how silent recurrent computation is represented, trained, and allocated.
@@ -716,6 +723,10 @@ No complementary mechanism should delay a clean 0A/0B result.
 ## Milestone M1 — Establish sequential H2
 
 Produce the first trustworthy accuracy-vs-RWKV-transition-budget curve on a controlled sequential task with a neutral-token control.
+
+The Qwen4-Exp micro pilot did not complete this milestone. It tested a
+zero-workspace prerequisite and stopped at D=1. Do not count its two negative
+populations as an accuracy-vs-transition-budget curve.
 
 ## Milestone M2 — Add stateful incremental RWKV execution
 
