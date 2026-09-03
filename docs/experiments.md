@@ -100,6 +100,14 @@ H1 is specifically about whether recurrent inference reproduces the **transforme
 
 This is the primary experiment.
 
+> **Qwen4-Exp micro pilot status, 2026-09-03:** the borrowed four-layer
+> Qwen4-Exp harness did not clear its prerequisite D=1 held-out lookup gate.
+> Two independently identified apparatuses both failed at chance-level
+> accuracy, so D=2 and latent-workspace cells are closed under that protocol.
+> This is an apparatus result, not a negative H2 result: neither population
+> varied silent recurrent transitions. See
+> [`qwen4_micro_pilot.md`](qwen4_micro_pilot.md).
+
 Use a stock, already-working RWKV-7 checkpoint before introducing ROSA.
 
 The task should require genuinely sequential dependent computation.
