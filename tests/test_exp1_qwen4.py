@@ -180,8 +180,9 @@ def test_qwen4_cpu_checkpoint_resume_is_exact(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Batched QSA indexer (exp1.qsa_indexer): exact equality against the installed
-# upstream method, and explicit fallback everywhere the predicate is false.
+# QSA indexer without the per-query torch.nonzero (exp1.qsa_indexer): exact
+# equality against the installed upstream method, and explicit fallback
+# everywhere the predicate is false.
 #
 # The oracle is the upstream method captured at import, before any instance is
 # rebound, so a fallback cannot recurse into the replacement under test.
@@ -232,8 +233,8 @@ def _causal_mask(batch, seq, device, dtype=torch.bool, kv=None):
 
 
 def _both_paths(indexer, hidden, mask, past_key_values=None):
-    """Return (upstream, batched) for the same input, without installing."""
-    from exp1.qsa_indexer import _UPSTREAM_FORWARD, batched_qsa_forward
+    """Return (upstream, fast) for the same input, without installing."""
+    from exp1.qsa_indexer import _UPSTREAM_FORWARD, causal_qsa_forward
 
     batch, seq, _ = hidden.shape
     embeddings = _rope(batch, seq, indexer.index_head_dim, hidden.device)
@@ -241,10 +242,10 @@ def _both_paths(indexer, hidden, mask, past_key_values=None):
         upstream = _UPSTREAM_FORWARD(
             indexer, hidden, embeddings, mask, past_key_values
         )
-        batched = batched_qsa_forward(
+        fast = causal_qsa_forward(
             indexer, hidden, embeddings, mask, past_key_values
         )
-    return upstream, batched
+    return upstream, fast
 
 
 def _use_upstream_indexer(model):
@@ -264,40 +265,40 @@ def _use_upstream_indexer(model):
 @pytest.mark.parametrize("seq", QSA_SEQ_LENGTHS)
 @pytest.mark.parametrize("batch", (1, 2, 64))
 @pytest.mark.parametrize("dtype", (torch.bool, torch.float32))
-def test_batched_qsa_mask_is_exactly_upstream_on_cpu(seq, batch, dtype):
+def test_no_nonzero_qsa_mask_is_exactly_upstream_on_cpu(seq, batch, dtype):
     indexer = _indexer(seed=seq * 31 + batch)
     hidden = torch.randn(batch, seq, 128)
-    upstream, batched = _both_paths(indexer, hidden, _causal_mask(batch, seq,
+    upstream, fast = _both_paths(indexer, hidden, _causal_mask(batch, seq,
                                                                  "cpu", dtype))
-    assert upstream.dtype == batched.dtype
-    assert torch.equal(upstream, batched)
+    assert upstream.dtype == fast.dtype
+    assert torch.equal(upstream, fast)
 
 
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("seq", QSA_SEQ_LENGTHS)
 @pytest.mark.parametrize("dtype", (torch.bool, torch.float32))
-def test_batched_qsa_mask_is_exactly_upstream_on_cuda(seq, dtype):
+def test_no_nonzero_qsa_mask_is_exactly_upstream_on_cuda(seq, dtype):
     indexer = _indexer(device="cuda", seed=seq)
     hidden = torch.randn(4, seq, 128, device="cuda")
-    upstream, batched = _both_paths(indexer, hidden, _causal_mask(4, seq, "cuda",
+    upstream, fast = _both_paths(indexer, hidden, _causal_mask(4, seq, "cuda",
                                                                  dtype))
-    assert torch.equal(upstream, batched)
+    assert torch.equal(upstream, fast)
 
 
-def test_batched_qsa_covers_lengths_below_a_block_and_below_the_budget():
+def test_no_nonzero_qsa_covers_lengths_below_a_block_and_below_the_budget():
     """seq 1 has no complete block; seq 7 has fewer selectable than the budget."""
     indexer = _indexer()
     assert indexer.compress_ratio == 2 and indexer.token_budget == 8
     for seq in (1, 7):
         hidden = torch.randn(3, seq, 128)
-        upstream, batched = _both_paths(indexer, hidden,
+        upstream, fast = _both_paths(indexer, hidden,
                                         _causal_mask(3, seq, "cpu"))
-        assert torch.equal(upstream, batched), seq
+        assert torch.equal(upstream, fast), seq
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_batched_qsa_agrees_under_exact_score_ties(device):
+def test_no_nonzero_qsa_agrees_under_exact_score_ties(device):
     """Ties are constructed, not approximated: scaling inputs down is not a tie.
 
     Three constructions, each producing bitwise-equal candidate scores so the
@@ -310,25 +311,25 @@ def test_batched_qsa_agrees_under_exact_score_ties(device):
     mask = _causal_mask(batch, seq, device)
 
     # 1. Zero hidden states: every score is exactly 0.0.
-    upstream, batched = _both_paths(
+    upstream, fast = _both_paths(
         indexer, torch.zeros(batch, seq, 128, device=device), mask
     )
-    assert torch.equal(upstream, batched)
+    assert torch.equal(upstream, fast)
 
     # 2. A repeated two-token pattern: distinct blocks pool to identical keys.
     unit = torch.randn(1, indexer.compress_ratio, 128, device=device)
     repeated = unit.repeat(batch, seq // indexer.compress_ratio + 1, 1)[:, :seq]
-    upstream, batched = _both_paths(indexer, repeated.contiguous(), mask)
-    assert torch.equal(upstream, batched)
+    upstream, fast = _both_paths(indexer, repeated.contiguous(), mask)
+    assert torch.equal(upstream, fast)
 
     # 3. Zero the query half of the projection: keys vary, all scores are 0.
     with torch.no_grad():
         rows = indexer.index_n_heads * indexer.index_head_dim
         indexer.index_qk_proj.weight[:rows].zero_()
-    upstream, batched = _both_paths(
+    upstream, fast = _both_paths(
         indexer, torch.randn(batch, seq, 128, device=device), mask
     )
-    assert torch.equal(upstream, batched)
+    assert torch.equal(upstream, fast)
 
 
 class _CountingCache:
@@ -369,7 +370,7 @@ def _fallback_cases(device="cpu"):
 
 
 @pytest.mark.parametrize("name", list(_fallback_cases()))
-def test_batched_qsa_refuses_masks_it_cannot_prove(name):
+def test_no_nonzero_qsa_refuses_masks_it_cannot_prove(name):
     from exp1.qsa_indexer import optimized_path_applies
 
     indexer = _indexer()
@@ -378,7 +379,7 @@ def test_batched_qsa_refuses_masks_it_cannot_prove(name):
     assert optimized_path_applies(indexer, hidden, mask, None) is False
 
 
-def test_batched_qsa_refuses_unsupported_compression_and_budget():
+def test_no_nonzero_qsa_refuses_unsupported_compression_and_budget():
     from exp1.qsa_indexer import optimized_path_applies
 
     hidden = torch.randn(2, 18, 128)
@@ -395,14 +396,14 @@ def test_batched_qsa_refuses_unsupported_compression_and_budget():
     assert optimized_path_applies(ragged, hidden, mask, None) is False
 
     # block_topk out of step with budget // ratio breaks the output-width bound
-    # the batched writer assumes, even when the budget divides cleanly.
+    # upstream's own writer assumes, even when the budget divides cleanly.
     skewed = _indexer()
     skewed.block_topk = skewed.token_budget // skewed.compress_ratio + 1
     assert optimized_path_applies(skewed, hidden, mask, None) is False
 
 
-def test_batched_qsa_falls_back_for_a_cache_and_updates_it_once():
-    from exp1.qsa_indexer import batched_qsa_forward, optimized_path_applies
+def test_no_nonzero_qsa_falls_back_for_a_cache_and_updates_it_once():
+    from exp1.qsa_indexer import causal_qsa_forward, optimized_path_applies
 
     indexer = _indexer()
     hidden = torch.randn(2, 18, 128)
@@ -412,31 +413,31 @@ def test_batched_qsa_falls_back_for_a_cache_and_updates_it_once():
     assert optimized_path_applies(indexer, hidden, mask, cache) is False
     embeddings = _rope(2, 18, indexer.index_head_dim, hidden.device)
     with torch.no_grad():
-        batched_qsa_forward(indexer, hidden, embeddings, mask, cache)
+        causal_qsa_forward(indexer, hidden, embeddings, mask, cache)
     # One update, from the single upstream call. The predicate must be decided
     # before any projection or cache write, or this would be two.
     assert cache.calls == 1
 
 
 def _hybrid_pair(seq=18, batch=4, seed=7):
-    """Two identically seeded hybrid models: one batched, one upstream."""
+    """Two identically seeded hybrid models: one fast-path, one upstream."""
     spec = ChaseSpec(num_nodes=16, num_maps=4, max_depth=32)
     config = Qwen4MicroConfig(vocab_size=16)
     set_seed(seed)
-    batched = _model(config, spec)
+    fast = _model(config, spec)
     set_seed(seed)
     upstream = _model(config, spec)
     assert _use_upstream_indexer(upstream) == 1
     inputs = torch.randn(batch, seq, spec.d_input)
     targets = torch.randint(0, 16, (batch,))
-    return batched, upstream, inputs, targets
+    return fast, upstream, inputs, targets
 
 
-def test_batched_qsa_gives_identical_logits_and_loss():
-    batched, upstream, inputs, targets = _hybrid_pair()
+def test_no_nonzero_qsa_gives_identical_logits_and_loss():
+    fast, upstream, inputs, targets = _hybrid_pair()
     with torch.no_grad():
         want = forward_logits(upstream, inputs)
-        got = forward_logits(batched, inputs)
+        got = forward_logits(fast, inputs)
     assert torch.equal(want, got)
     assert torch.equal(
         torch.nn.functional.cross_entropy(want, targets),
@@ -444,15 +445,15 @@ def test_batched_qsa_gives_identical_logits_and_loss():
     )
 
 
-def test_batched_qsa_gives_identical_gradients_after_one_backward():
-    batched, upstream, inputs, targets = _hybrid_pair()
-    for model in (upstream, batched):
+def test_no_nonzero_qsa_gives_identical_gradients_after_one_backward():
+    fast, upstream, inputs, targets = _hybrid_pair()
+    for model in (upstream, fast):
         torch.nn.functional.cross_entropy(
             forward_logits(model, inputs), targets
         ).backward()
 
     want = dict(upstream.named_parameters())
-    got = dict(batched.named_parameters())
+    got = dict(fast.named_parameters())
     assert want.keys() == got.keys()
     assert any(p.grad is not None for p in want.values())
     for name, parameter in want.items():
@@ -462,10 +463,10 @@ def test_batched_qsa_gives_identical_gradients_after_one_backward():
             assert torch.equal(parameter.grad, got[name].grad), name
 
 
-def test_batched_qsa_gives_identical_state_after_one_optimizer_step():
-    batched, upstream, inputs, targets = _hybrid_pair()
+def test_no_nonzero_qsa_gives_identical_state_after_one_optimizer_step():
+    fast, upstream, inputs, targets = _hybrid_pair()
     states = []
-    for model in (upstream, batched):
+    for model in (upstream, fast):
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
         optimizer.zero_grad()
         torch.nn.functional.cross_entropy(
@@ -491,27 +492,27 @@ def test_batched_qsa_gives_identical_state_after_one_optimizer_step():
                 assert value == other, (key, field)
 
 
-def test_batched_qsa_preserves_state_dict_keys_and_loads_both_ways(tmp_path):
-    batched, upstream, _, _ = _hybrid_pair()
-    assert list(batched.state_dict()) == list(upstream.state_dict())
-    for name, value in batched.state_dict().items():
+def test_no_nonzero_qsa_preserves_state_dict_keys_and_loads_both_ways(tmp_path):
+    fast, upstream, _, _ = _hybrid_pair()
+    assert list(fast.state_dict()) == list(upstream.state_dict())
+    for name, value in fast.state_dict().items():
         assert value.shape == upstream.state_dict()[name].shape, name
 
     # A checkpoint written by either path must load strictly into the other.
     path = tmp_path / "upstream.pt"
     torch.save(upstream.state_dict(), path)
-    report = batched.load_state_dict(torch.load(path, weights_only=True),
+    report = fast.load_state_dict(torch.load(path, weights_only=True),
                                      strict=True)
     assert not report.missing_keys and not report.unexpected_keys
 
-    path = tmp_path / "batched.pt"
-    torch.save(batched.state_dict(), path)
+    path = tmp_path / "fast.pt"
+    torch.save(fast.state_dict(), path)
     report = upstream.load_state_dict(torch.load(path, weights_only=True),
                                       strict=True)
     assert not report.missing_keys and not report.unexpected_keys
 
 
-def test_hybrid_checkpoint_resume_is_exact_with_the_batched_indexer(tmp_path):
+def test_hybrid_checkpoint_resume_is_exact_with_the_fast_indexer(tmp_path):
     """The existing resume identity test, on the variant that has an indexer."""
     spec = ChaseSpec(num_nodes=4, num_maps=2, max_depth=2)
     train_ds = PointerChaseDataset(
@@ -555,7 +556,7 @@ def test_hybrid_checkpoint_resume_is_exact_with_the_batched_indexer(tmp_path):
         assert torch.equal(resumed.state_dict()[name], value), name
 
 
-def test_batched_qsa_is_installed_on_hybrid_and_absent_from_all_gdn():
+def test_no_nonzero_qsa_is_installed_on_hybrid_and_absent_from_all_gdn():
     spec = ChaseSpec(num_nodes=16, num_maps=4, max_depth=32)
     from transformers.models.qwen4_exp.modeling_qwen4_exp import (
         Qwen4ExpTextQSAIndexer,
@@ -576,34 +577,34 @@ def test_batched_qsa_is_installed_on_hybrid_and_absent_from_all_gdn():
     ]
 
 
-def test_batched_qsa_path_is_actually_taken_by_a_model_forward(monkeypatch):
+def test_no_nonzero_qsa_path_is_actually_taken_by_a_model_forward(monkeypatch):
     """Without this, every equality test above could pass vacuously.
 
-    Equality against upstream proves nothing if the batched path is never
+    Equality against upstream proves nothing if the fast path is never
     entered, so this proves the model's forward reaches it and takes the
     optimized branch rather than the fallback.
     """
     import exp1.qsa_indexer as qsa
 
-    calls = {"batched": 0, "fallback": 0}
-    real = qsa.batched_qsa_forward
+    calls = {"fast": 0, "fallback": 0}
+    real = qsa.causal_qsa_forward
 
     def counting(self, hidden_states, position_embeddings, attention_mask,
                  past_key_values):
         if qsa.optimized_path_applies(self, hidden_states, attention_mask,
                                       past_key_values):
-            calls["batched"] += 1
+            calls["fast"] += 1
         else:
             calls["fallback"] += 1
         return real(self, hidden_states, position_embeddings, attention_mask,
                     past_key_values)
 
-    monkeypatch.setattr(qsa, "batched_qsa_forward", counting)
+    monkeypatch.setattr(qsa, "causal_qsa_forward", counting)
     spec = ChaseSpec(num_nodes=16, num_maps=4, max_depth=32)
     model = _model(Qwen4MicroConfig(vocab_size=16), spec)
-    assert qsa.install_batched_qsa_indexer(model) == 1
+    assert qsa.install_causal_qsa_indexer(model) == 1
 
     with torch.no_grad():
         forward_logits(model, torch.randn(4, 18, spec.d_input))
 
-    assert calls == {"batched": 1, "fallback": 0}
+    assert calls == {"fast": 1, "fallback": 0}

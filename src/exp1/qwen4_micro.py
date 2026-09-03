@@ -115,14 +115,15 @@ class Qwen4ExpBackbone(nn.Module):
         values.pop("variant")
         # Imported here, not at module scope, so the version guard above runs
         # before anything reaches into the Transformers internals this binds to.
-        from exp1.qsa_indexer import install_batched_qsa_indexer
+        from exp1.qsa_indexer import install_causal_qsa_indexer
 
         self.model = Qwen4ExpTextModel(Qwen4ExpTextConfig(**values))
         self.model.embed_tokens.weight.requires_grad_(False)
-        # Batched QSA index selection, bound to this model's indexer instances
-        # only. Exactly equal to upstream on the inputs it admits and deferring
-        # to upstream on all others. See exp1.qsa_indexer.
-        install_batched_qsa_indexer(self.model)
+        # QSA index selection without the per-query torch.nonzero, bound to
+        # this model's indexer instances only. Upstream's own operations on
+        # upstream's own shapes, so the mask is exact; it defers to upstream
+        # on any input it cannot prove. See exp1.qsa_indexer.
+        install_causal_qsa_indexer(self.model)
 
     def forward(self, *, inputs_embeds: torch.Tensor) -> torch.Tensor:
         output = self.model(inputs_embeds=inputs_embeds)
