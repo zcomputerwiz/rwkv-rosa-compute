@@ -17,6 +17,14 @@ QWEN4_VARIANTS = ("hybrid", "all-gdn")
 # Transformers ahead of the version guard in Qwen4ExpBackbone.
 QSA_IMPLEMENTATIONS = ("causal-exact", "batched-stable-v1")
 DEFAULT_QSA_IMPLEMENTATION = "causal-exact"
+# Which chunk size the Gated DeltaNet chunk rule uses. "fixed-64" is
+# upstream's own default and is numerically unchanged. "min-sequence-64-v1"
+# passes chunk_size=min(64, T): identical to fixed-64 for T >= 64, and for
+# shorter T it removes the padding upstream's reference loop pays for --
+# measured to change gradients by O(1e-8) on CUDA, so it is a separate
+# numerics-affecting identity, not a transparent optimization.
+GDN_CHUNK_POLICIES = ("fixed-64", "min-sequence-64-v1")
+DEFAULT_GDN_CHUNK_POLICY = "fixed-64"
 QWEN4_MAX_POSITION_EMBEDDINGS = 128
 
 
@@ -31,6 +39,10 @@ class Qwen4MicroConfig:
     # Which QSA index selector to install. A repository-level choice, not a
     # Transformers config field, so it is never passed to Qwen4ExpTextConfig.
     qsa_implementation: str = DEFAULT_QSA_IMPLEMENTATION
+    # Which GDN chunk-size policy to use. Also repository-level: passed as a
+    # per-forward keyword argument to the pinned model call, never into
+    # Qwen4ExpTextConfig.
+    gdn_chunk_policy: str = DEFAULT_GDN_CHUNK_POLICY
     architecture: str = field(default="qwen4_exp", init=False)
 
     def __post_init__(self) -> None:
@@ -50,6 +62,11 @@ class Qwen4MicroConfig:
                 f"qsa_implementation must be one of {QSA_IMPLEMENTATIONS}; "
                 f"got {self.qsa_implementation!r}"
             )
+        if self.gdn_chunk_policy not in GDN_CHUNK_POLICIES:
+            raise ValueError(
+                f"gdn_chunk_policy must be one of {GDN_CHUNK_POLICIES}; "
+                f"got {self.gdn_chunk_policy!r}"
+            )
 
     @property
     def layer_types(self) -> tuple[str, ...]:
@@ -65,12 +82,13 @@ class Qwen4MicroConfig:
     def resolved(self) -> Dict[str, Any]:
         """Return the complete JSON-safe architecture identity.
 
-        ``qsa_implementation`` appears only when it is not the default. The
-        default selector reproduces upstream's masks exactly, so omitting it
-        keeps this identity byte-identical to the one already written into
-        existing checkpoints: they stay loadable, and they can only resume as
-        the exact implementation. A non-default selector adds the key, which
-        makes the identity differ and the resume signature reject it.
+        ``qsa_implementation`` and ``gdn_chunk_policy`` each appear only when
+        they are not their default. Both defaults reproduce upstream's own
+        numerics exactly, so omitting them keeps this identity byte-identical
+        to the one already written into existing checkpoints: they stay
+        loadable, and they can only resume under the same, matching,
+        non-default selection. A non-default value adds its key, which makes
+        the identity differ and the resume signature reject a mismatch.
         """
         identity: Dict[str, Any] = {
             "architecture": self.architecture,
@@ -118,6 +136,8 @@ class Qwen4MicroConfig:
         }
         if self.qsa_implementation != DEFAULT_QSA_IMPLEMENTATION:
             identity["qsa_implementation"] = self.qsa_implementation
+        if self.gdn_chunk_policy != DEFAULT_GDN_CHUNK_POLICY:
+            identity["gdn_chunk_policy"] = self.gdn_chunk_policy
         return identity
 
 
@@ -139,8 +159,9 @@ class Qwen4ExpBackbone(nn.Module):
         values.pop("architecture")
         values.pop("transformers_version")
         values.pop("variant")
-        # Repository-level selector, not a Transformers config field.
+        # Repository-level selectors, not Transformers config fields.
         values.pop("qsa_implementation", None)
+        values.pop("gdn_chunk_policy", None)
 
         # The registered QSA forwards read no tensor contents, so they cannot
         # verify the mask per step. They rely on this boundary instead: this
@@ -155,6 +176,28 @@ class Qwen4ExpBackbone(nn.Module):
                 "the QSA index selectors assume the no-cache full-causal mask."
             )
 
+        if config.gdn_chunk_policy != DEFAULT_GDN_CHUNK_POLICY:
+            # A non-default policy passes chunk_size as a per-forward keyword,
+            # which reaches the GDN chunk rule through **kwargs. That argument
+            # is only honoured by the pinned Torch fallback: the hub-kernel
+            # wrapper filters kwargs down to whatever the *installed*
+            # implementation accepts, and an installed `fla` kernel is not
+            # audited to accept -- or obey -- chunk_size. Silently ignoring it
+            # would make this policy a no-op rather than a numerics change, so
+            # it fails closed instead.
+            import importlib.util
+
+            if importlib.util.find_spec("fla") is not None:
+                raise RuntimeError(
+                    f"gdn_chunk_policy={config.gdn_chunk_policy!r} requires the "
+                    "Torch fallback chunk_gated_delta_rule implementation, "
+                    "whose signature this policy is measured against. The "
+                    "'fla' package is importable in this environment, so the "
+                    "hub-kernel wrapper may install its kernel instead, which "
+                    "is not known to accept or honour chunk_size. Uninstall "
+                    "'fla' or use the default gdn_chunk_policy."
+                )
+
         # Imported here, not at module scope, so the version guard above runs
         # before anything reaches into the Transformers internals this binds to.
         from exp1.qsa_indexer import install_qsa_indexer
@@ -162,9 +205,19 @@ class Qwen4ExpBackbone(nn.Module):
         self.model = Qwen4ExpTextModel(Qwen4ExpTextConfig(**values))
         self.model.embed_tokens.weight.requires_grad_(False)
         install_qsa_indexer(self.model, config.qsa_implementation)
+        self._gdn_chunk_policy = config.gdn_chunk_policy
 
     def forward(self, *, inputs_embeds: torch.Tensor) -> torch.Tensor:
-        output = self.model(inputs_embeds=inputs_embeds)
+        if self._gdn_chunk_policy == "min-sequence-64-v1":
+            # Identical to fixed-64 for T >= 64 -- min(64, T) is then 64, the
+            # same value the default call leaves implicit. Only T < 64 changes
+            # behaviour, by removing the padding upstream's chunk rule pays
+            # for. Computed per call, not cached, because T can vary between
+            # the train and eval banks.
+            chunk_size = min(64, inputs_embeds.shape[1])
+            output = self.model(inputs_embeds=inputs_embeds, chunk_size=chunk_size)
+        else:
+            output = self.model(inputs_embeds=inputs_embeds)
         return output.last_hidden_state
 
 

@@ -15,6 +15,10 @@ from exp0.train import create_model, set_seed
 from exp1.dataset import PointerChaseDataset
 from exp1.pointer_chase import ChaseSpec, generate_dataset, make_neutral_vector
 from exp1.qwen4_micro import (
+    DEFAULT_GDN_CHUNK_POLICY,
+    DEFAULT_QSA_IMPLEMENTATION,
+    GDN_CHUNK_POLICIES,
+    QSA_IMPLEMENTATIONS,
     QWEN4_MAX_POSITION_EMBEDDINGS,
     QWEN4_VARIANTS,
     Qwen4MicroConfig,
@@ -46,6 +50,27 @@ def main(argv=None) -> int:
         choices=QWEN4_VARIANTS,
         default=None,
         help="defaults to hybrid; valid only with --architecture qwen4_exp",
+    )
+    parser.add_argument(
+        "--qwen4-qsa-implementation",
+        choices=QSA_IMPLEMENTATIONS,
+        default=None,
+        help=f"defaults to {DEFAULT_QSA_IMPLEMENTATION!r}; valid only with "
+             "--architecture qwen4_exp. 'batched-stable-v1' is a separate, "
+             "numerics-affecting apparatus: it is opt-in, part of the model "
+             "identity, and rejects resuming a checkpoint from the other mode.",
+    )
+    parser.add_argument(
+        "--qwen4-gdn-chunk-policy",
+        choices=GDN_CHUNK_POLICIES,
+        default=None,
+        help=f"defaults to {DEFAULT_GDN_CHUNK_POLICY!r}; valid only with "
+             "--architecture qwen4_exp. 'min-sequence-64-v1' is a separate, "
+             "numerics-affecting apparatus: identical to the default for "
+             "sequences of 64 tokens or more, and measured to change "
+             "gradients by O(1e-8) on CUDA for shorter sequences. Opt-in, "
+             "part of the model identity, and rejects resuming a checkpoint "
+             "from the other policy.",
     )
 
     parser.add_argument("--epochs", type=int, default=1)
@@ -128,6 +153,10 @@ def main(argv=None) -> int:
         parser.error("--compile-backend requires --compile")
     if args.architecture != "qwen4_exp" and args.qwen4_variant is not None:
         parser.error("--qwen4-variant requires --architecture qwen4_exp")
+    if args.architecture != "qwen4_exp" and args.qwen4_qsa_implementation is not None:
+        parser.error("--qwen4-qsa-implementation requires --architecture qwen4_exp")
+    if args.architecture != "qwen4_exp" and args.qwen4_gdn_chunk_policy is not None:
+        parser.error("--qwen4-gdn-chunk-policy requires --architecture qwen4_exp")
     if args.architecture == "qwen4_exp" and args.rwkv_kernel is not None:
         parser.error("--rwkv-kernel is valid only with --architecture rwkv")
     if args.architecture == "qwen4_exp" and args.compile:
@@ -208,6 +237,8 @@ def main(argv=None) -> int:
 
     set_seed(model_seed)
     qwen4_variant = None
+    qwen4_qsa_implementation = None
+    qwen4_gdn_chunk_policy = None
     if args.architecture == "rwkv":
         model_cfg = ModelConfig(
             architecture="rwkv",
@@ -225,11 +256,19 @@ def main(argv=None) -> int:
         ).to(device)
     else:
         qwen4_variant = args.qwen4_variant or "hybrid"
+        qwen4_qsa_implementation = (
+            args.qwen4_qsa_implementation or DEFAULT_QSA_IMPLEMENTATION
+        )
+        qwen4_gdn_chunk_policy = (
+            args.qwen4_gdn_chunk_policy or DEFAULT_GDN_CHUNK_POLICY
+        )
         model_cfg = Qwen4MicroConfig(
             vocab_size=args.num_nodes,
             hidden_size=args.d_model,
             num_hidden_layers=args.layers,
             variant=qwen4_variant,
+            qsa_implementation=qwen4_qsa_implementation,
+            gdn_chunk_policy=qwen4_gdn_chunk_policy,
         )
         model = create_qwen4_micro_model(
             model_cfg,
@@ -371,6 +410,8 @@ def main(argv=None) -> int:
             "precision": args.precision,
             "rwkv_kernel": rwkv_kernel,
             "qwen4_variant": qwen4_variant,
+            "qwen4_qsa_implementation": qwen4_qsa_implementation,
+            "qwen4_gdn_chunk_policy": qwen4_gdn_chunk_policy,
             "qwen4_config": (
                 model_cfg.resolved()
                 if isinstance(model_cfg, Qwen4MicroConfig)

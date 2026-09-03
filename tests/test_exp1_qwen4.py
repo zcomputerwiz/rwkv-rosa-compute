@@ -196,6 +196,7 @@ def test_qwen4_cpu_checkpoint_resume_is_exact(tmp_path):
 
 QSA_SEQ_LENGTHS = (1, 2, 3, 7, 17, 18, 32, 64, 128)
 QSA_MODES = ("causal-exact", "batched-stable-v1")
+GDN_POLICIES = ("fixed-64", "min-sequence-64-v1")
 
 
 def _indexer(device="cpu", seed=0, **overrides):
@@ -508,10 +509,11 @@ def test_unsupported_compression_and_budget_are_refused():
 
 # --- model identity, installation, and resume -------------------------------
 
-def _hybrid(mode, seed=7):
+def _hybrid(qsa="causal-exact", gdn="fixed-64", seed=7):
     spec = ChaseSpec(num_nodes=16, num_maps=4, max_depth=32)
     set_seed(seed)
-    config = Qwen4MicroConfig(vocab_size=16, qsa_implementation=mode)
+    config = Qwen4MicroConfig(vocab_size=16, qsa_implementation=qsa,
+                              gdn_chunk_policy=gdn)
     return _model(config, spec), config, spec
 
 
@@ -593,14 +595,14 @@ def test_state_dict_names_and_shapes_match_across_modes(tmp_path):
     assert not report.missing_keys and not report.unexpected_keys
 
 
-def _tiny_training(mode, tmp_path, **kwargs):
+def _tiny_training(mode, tmp_path, gdn="fixed-64", **kwargs):
     spec = ChaseSpec(num_nodes=4, num_maps=2, max_depth=2)
     train_ds = PointerChaseDataset(
         generate_dataset(1, 1, depth=1, seed=1, num_nodes=4, num_maps=2), spec)
     val_ds = PointerChaseDataset(
         generate_dataset(1, 1, depth=1, seed=2, num_nodes=4, num_maps=2), spec)
     config = Qwen4MicroConfig(vocab_size=4, variant="hybrid",
-                              qsa_implementation=mode)
+                              qsa_implementation=mode, gdn_chunk_policy=gdn)
     train_config = TrainConfig(seed=42, batch_size=1, precision="fp32",
                                num_workers=0, epochs=2, learning_rate=1e-3)
     common = dict(depth=1, train_data_seed=1, val_data_seed=2, train_size=1,
@@ -673,3 +675,202 @@ def test_registered_forward_adds_no_host_synchronization(mode):
     hybrid = _model(Qwen4MicroConfig(vocab_size=16, qsa_implementation=mode),
                     spec).cuda()
     assert syncs(hybrid, inputs) <= syncs(reference, inputs)
+
+
+# ---------------------------------------------------------------------------
+# GDN chunk policy (Qwen4MicroConfig.gdn_chunk_policy).
+#
+# "fixed-64" is upstream's own default: chunk_size=64 is never passed, so the
+# call is byte-identical to before this field existed. "min-sequence-64-v1"
+# passes chunk_size=min(64, T) -- identical to fixed-64 for T >= 64, and for
+# shorter T it removes padding, measured to change gradients by O(1e-8) on
+# CUDA. No test here requires it to equal fixed-64's gradients; the policies
+# are compared only where they are provably the same call (T >= 64).
+# ---------------------------------------------------------------------------
+
+def test_default_gdn_chunk_policy_is_fixed_and_omits_the_key():
+    """Existing checkpoints must stay loadable, exactly as for qsa_implementation."""
+    default = Qwen4MicroConfig(vocab_size=16)
+    assert default.gdn_chunk_policy == "fixed-64"
+    assert "gdn_chunk_policy" not in default.resolved()
+
+    chunked = Qwen4MicroConfig(vocab_size=16, gdn_chunk_policy="min-sequence-64-v1")
+    assert chunked.resolved()["gdn_chunk_policy"] == "min-sequence-64-v1"
+    assert _model_signature(default) != _model_signature(chunked)
+
+    with pytest.raises(ValueError, match="gdn_chunk_policy"):
+        Qwen4MicroConfig(vocab_size=16, gdn_chunk_policy="min-64")
+
+
+def test_combined_non_default_identity_differs_from_either_alone():
+    """Both fields are independent identity axes, not one combined profile."""
+    default = Qwen4MicroConfig(vocab_size=16)
+    qsa_only = Qwen4MicroConfig(vocab_size=16, qsa_implementation="batched-stable-v1")
+    gdn_only = Qwen4MicroConfig(vocab_size=16, gdn_chunk_policy="min-sequence-64-v1")
+    both = Qwen4MicroConfig(vocab_size=16, qsa_implementation="batched-stable-v1",
+                            gdn_chunk_policy="min-sequence-64-v1")
+
+    signatures = {repr(_model_signature(c))
+                  for c in (default, qsa_only, gdn_only, both)}
+    assert len(signatures) == 4
+
+    resolved = both.resolved()
+    assert resolved["qsa_implementation"] == "batched-stable-v1"
+    assert resolved["gdn_chunk_policy"] == "min-sequence-64-v1"
+
+
+def test_chunk_policy_is_not_passed_into_the_transformers_config():
+    """It is a repository-level field; Qwen4ExpTextConfig must never see it."""
+    model, _, _ = _hybrid(gdn="min-sequence-64-v1")
+    assert not hasattr(model.backbone.model.config, "gdn_chunk_policy")
+
+
+def test_min_sequence_chunk_policy_selects_the_defined_sizes(monkeypatch):
+    """1, 18, 64, 64 for input lengths 1, 18, 64, 65; reaches every GDN layer.
+
+    Uses all-gdn (4 linear_attention layers, no QSA layer) so "every" is
+    actually checked, not just the hybrid's three.
+    """
+    import transformers.models.qwen4_exp.modeling_qwen4_exp as qwen_module
+
+    original = qwen_module.torch_chunk_gated_delta_rule
+    seen = []
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("chunk_size"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(qwen_module, "torch_chunk_gated_delta_rule", spy)
+
+    spec = ChaseSpec(num_nodes=16, num_maps=4, max_depth=32)
+    set_seed(9)
+    model = _model(Qwen4MicroConfig(vocab_size=16, variant="all-gdn",
+                                    gdn_chunk_policy="min-sequence-64-v1"), spec)
+
+    for seq_len, expected in ((1, 1), (18, 18), (64, 64), (65, 64)):
+        seen.clear()
+        inputs = torch.randn(2, seq_len, spec.d_input)
+        with torch.no_grad():
+            forward_logits(model, inputs)
+        assert seen == [expected] * 4, (seq_len, seen)
+
+
+def test_fixed_policy_never_passes_chunk_size(monkeypatch):
+    """The default call is unaltered: no chunk_size kwarg reaches the rule."""
+    import transformers.models.qwen4_exp.modeling_qwen4_exp as qwen_module
+
+    original = qwen_module.torch_chunk_gated_delta_rule
+    seen = []
+
+    def spy(*args, **kwargs):
+        seen.append("chunk_size" in kwargs)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(qwen_module, "torch_chunk_gated_delta_rule", spy)
+
+    model, _, spec = _hybrid()
+    with torch.no_grad():
+        forward_logits(model, torch.randn(2, 18, spec.d_input))
+    assert seen and not any(seen)
+
+
+def test_gdn_chunk_policy_agrees_with_fixed_at_sequence_length_64_and_above():
+    """Both policies select chunk_size=64 once T >= 64, so the call is the
+    same call: this is the one place equality is provably guaranteed, not
+    assumed."""
+    spec = ChaseSpec(num_nodes=16, num_maps=4, max_depth=32)
+    for seq_len in (64, 65, 96):
+        set_seed(7)
+        fixed, _, _ = _hybrid(gdn="fixed-64")
+        set_seed(7)
+        chunked, _, _ = _hybrid(gdn="min-sequence-64-v1")
+        inputs = torch.randn(2, seq_len, spec.d_input)
+        with torch.no_grad():
+            assert torch.equal(forward_logits(fixed, inputs),
+                               forward_logits(chunked, inputs)), seq_len
+
+
+def test_gdn_chunk_policy_does_not_change_state_dict_keys_or_shapes():
+    """Only the forward call changes; parameters and their layout do not."""
+    spec = ChaseSpec(num_nodes=16, num_maps=4, max_depth=32)
+    for variant in ("hybrid", "all-gdn"):
+        set_seed(4)
+        fixed = _model(Qwen4MicroConfig(vocab_size=16, variant=variant), spec)
+        set_seed(4)
+        chunked = _model(Qwen4MicroConfig(vocab_size=16, variant=variant,
+                                          gdn_chunk_policy="min-sequence-64-v1"),
+                         spec)
+        assert list(fixed.state_dict()) == list(chunked.state_dict()), variant
+        for name, value in fixed.state_dict().items():
+            assert value.shape == chunked.state_dict()[name].shape, (variant, name)
+            assert torch.equal(value, chunked.state_dict()[name]), (variant, name)
+
+
+def test_gdn_chunk_policy_repeats_exactly_on_cpu():
+    """Determinism within a policy, which is what a rerun of a cell relies on."""
+    spec = ChaseSpec(num_nodes=16, num_maps=4, max_depth=32)
+    for policy in GDN_POLICIES:
+        set_seed(11)
+        model = _model(Qwen4MicroConfig(vocab_size=16, gdn_chunk_policy=policy),
+                       spec)
+        inputs = torch.randn(4, 18, spec.d_input)
+        with torch.no_grad():
+            first = forward_logits(model, inputs)
+            for _ in range(3):
+                assert torch.equal(first, forward_logits(model, inputs)), policy
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_gdn_chunk_policy_repeats_exactly_on_cuda():
+    spec = ChaseSpec(num_nodes=16, num_maps=4, max_depth=32)
+    for policy in GDN_POLICIES:
+        set_seed(11)
+        model = _model(Qwen4MicroConfig(vocab_size=16, gdn_chunk_policy=policy),
+                       spec).cuda()
+        inputs = torch.randn(4, 18, spec.d_input, device="cuda")
+        with torch.no_grad():
+            first = forward_logits(model, inputs)
+            for _ in range(3):
+                assert torch.equal(first, forward_logits(model, inputs)), policy
+
+
+def test_combined_mode_checkpoint_resume_is_exact(tmp_path):
+    """Same combined-mode (QSA + GDN) checkpoint/resume identity."""
+    set_seed(42)
+    full, full_history = _tiny_training(
+        "batched-stable-v1", tmp_path, gdn="min-sequence-64-v1")
+    checkpoints = tmp_path / "ckpt-combined"
+    set_seed(42)
+    _tiny_training("batched-stable-v1", tmp_path, gdn="min-sequence-64-v1",
+                   checkpoint_path=checkpoints, max_epochs=1)
+    set_seed(999)
+    resumed, resumed_history = _tiny_training(
+        "batched-stable-v1", tmp_path, gdn="min-sequence-64-v1",
+        resume_from_checkpoint=checkpoints / "latest.pt")
+
+    assert resumed_history["epoch_train_losses"] == full_history["epoch_train_losses"]
+    assert (resumed_history["epoch_val_accuracies"]
+            == full_history["epoch_val_accuracies"])
+    for name, value in full.state_dict().items():
+        assert torch.equal(resumed.state_dict()[name], value), name
+
+
+@pytest.mark.parametrize("resume_qsa,resume_gdn", [
+    ("causal-exact", "min-sequence-64-v1"),        # gdn differs alone
+    ("batched-stable-v1", "fixed-64"),              # qsa differs alone
+    ("batched-stable-v1", "min-sequence-64-v1"),    # both differ
+])
+def test_resume_is_rejected_across_any_apparatus_mismatch(
+    resume_qsa, resume_gdn, tmp_path
+):
+    """A run must never silently resume a checkpoint from a different
+    QSA implementation, a different GDN chunk policy, or both."""
+    checkpoints = tmp_path / "baseline-ckpt"
+    set_seed(42)
+    _tiny_training("causal-exact", tmp_path, gdn="fixed-64",
+                   checkpoint_path=checkpoints, max_epochs=1)
+    with pytest.raises(ValueError, match="qwen4_exp"):
+        _tiny_training(resume_qsa, tmp_path, gdn=resume_gdn,
+                       resume_from_checkpoint=checkpoints / "latest.pt",
+                       max_epochs=0)
