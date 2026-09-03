@@ -10,6 +10,13 @@ from exp0.models.base import InputEmbedWrapper
 
 TRANSFORMERS_VERSION = "5.16.0"
 QWEN4_VARIANTS = ("hybrid", "all-gdn")
+# Which QSA index selector a run installs. "causal-exact" reproduces
+# upstream's masks exactly; "batched-stable-v1" is a separate apparatus
+# whose batching can change near-tie block choices. Defined here rather
+# than in exp1.qsa_indexer so that reading the identity never imports
+# Transformers ahead of the version guard in Qwen4ExpBackbone.
+QSA_IMPLEMENTATIONS = ("causal-exact", "batched-stable-v1")
+DEFAULT_QSA_IMPLEMENTATION = "causal-exact"
 QWEN4_MAX_POSITION_EMBEDDINGS = 128
 
 
@@ -21,6 +28,9 @@ class Qwen4MicroConfig:
     hidden_size: int = 128
     num_hidden_layers: int = 4
     variant: str = "hybrid"
+    # Which QSA index selector to install. A repository-level choice, not a
+    # Transformers config field, so it is never passed to Qwen4ExpTextConfig.
+    qsa_implementation: str = DEFAULT_QSA_IMPLEMENTATION
     architecture: str = field(default="qwen4_exp", init=False)
 
     def __post_init__(self) -> None:
@@ -35,6 +45,11 @@ class Qwen4MicroConfig:
             raise ValueError(
                 f"variant must be one of {QWEN4_VARIANTS}; got {self.variant!r}"
             )
+        if self.qsa_implementation not in QSA_IMPLEMENTATIONS:
+            raise ValueError(
+                f"qsa_implementation must be one of {QSA_IMPLEMENTATIONS}; "
+                f"got {self.qsa_implementation!r}"
+            )
 
     @property
     def layer_types(self) -> tuple[str, ...]:
@@ -48,8 +63,16 @@ class Qwen4MicroConfig:
         )
 
     def resolved(self) -> Dict[str, Any]:
-        """Return the complete JSON-safe architecture identity."""
-        return {
+        """Return the complete JSON-safe architecture identity.
+
+        ``qsa_implementation`` appears only when it is not the default. The
+        default selector reproduces upstream's masks exactly, so omitting it
+        keeps this identity byte-identical to the one already written into
+        existing checkpoints: they stay loadable, and they can only resume as
+        the exact implementation. A non-default selector adds the key, which
+        makes the identity differ and the resume signature reject it.
+        """
+        identity: Dict[str, Any] = {
             "architecture": self.architecture,
             "transformers_version": TRANSFORMERS_VERSION,
             "variant": self.variant,
@@ -93,6 +116,9 @@ class Qwen4MicroConfig:
             "tie_word_embeddings": False,
             "use_cache": False,
         }
+        if self.qsa_implementation != DEFAULT_QSA_IMPLEMENTATION:
+            identity["qsa_implementation"] = self.qsa_implementation
+        return identity
 
 
 class Qwen4ExpBackbone(nn.Module):
@@ -113,17 +139,29 @@ class Qwen4ExpBackbone(nn.Module):
         values.pop("architecture")
         values.pop("transformers_version")
         values.pop("variant")
+        # Repository-level selector, not a Transformers config field.
+        values.pop("qsa_implementation", None)
+
+        # The registered QSA forwards read no tensor contents, so they cannot
+        # verify the mask per step. They rely on this boundary instead: this
+        # wrapper's forward supplies only inputs_embeds and never an external
+        # mask, and use_cache is off, so Transformers builds a plain unpadded
+        # full-causal mask with key length equal to query length. Asserted
+        # here so a future config change trips rather than silently voiding
+        # the contract the indexer depends on.
+        if values["use_cache"] is not False:
+            raise RuntimeError(
+                "The registered Qwen4-Exp identity requires use_cache=False; "
+                "the QSA index selectors assume the no-cache full-causal mask."
+            )
+
         # Imported here, not at module scope, so the version guard above runs
         # before anything reaches into the Transformers internals this binds to.
-        from exp1.qsa_indexer import install_causal_qsa_indexer
+        from exp1.qsa_indexer import install_qsa_indexer
 
         self.model = Qwen4ExpTextModel(Qwen4ExpTextConfig(**values))
         self.model.embed_tokens.weight.requires_grad_(False)
-        # QSA index selection without the per-query torch.nonzero, bound to
-        # this model's indexer instances only. Upstream's own operations on
-        # upstream's own shapes, so the mask is exact; it defers to upstream
-        # on any input it cannot prove. See exp1.qsa_indexer.
-        install_causal_qsa_indexer(self.model)
+        install_qsa_indexer(self.model, config.qsa_implementation)
 
     def forward(self, *, inputs_embeds: torch.Tensor) -> torch.Tensor:
         output = self.model(inputs_embeds=inputs_embeds)
