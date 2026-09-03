@@ -574,3 +574,36 @@ def test_batched_qsa_is_installed_on_hybrid_and_absent_from_all_gdn():
         module for module in recurrent.modules()
         if isinstance(module, Qwen4ExpTextQSAIndexer)
     ]
+
+
+def test_batched_qsa_path_is_actually_taken_by_a_model_forward(monkeypatch):
+    """Without this, every equality test above could pass vacuously.
+
+    Equality against upstream proves nothing if the batched path is never
+    entered, so this proves the model's forward reaches it and takes the
+    optimized branch rather than the fallback.
+    """
+    import exp1.qsa_indexer as qsa
+
+    calls = {"batched": 0, "fallback": 0}
+    real = qsa.batched_qsa_forward
+
+    def counting(self, hidden_states, position_embeddings, attention_mask,
+                 past_key_values):
+        if qsa.optimized_path_applies(self, hidden_states, attention_mask,
+                                      past_key_values):
+            calls["batched"] += 1
+        else:
+            calls["fallback"] += 1
+        return real(self, hidden_states, position_embeddings, attention_mask,
+                    past_key_values)
+
+    monkeypatch.setattr(qsa, "batched_qsa_forward", counting)
+    spec = ChaseSpec(num_nodes=16, num_maps=4, max_depth=32)
+    model = _model(Qwen4MicroConfig(vocab_size=16), spec)
+    assert qsa.install_batched_qsa_indexer(model) == 1
+
+    with torch.no_grad():
+        forward_logits(model, torch.randn(4, 18, spec.d_input))
+
+    assert calls == {"batched": 1, "fallback": 0}
